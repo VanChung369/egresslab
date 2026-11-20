@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Basic desktop window permissions only. No privileged network permissions.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
