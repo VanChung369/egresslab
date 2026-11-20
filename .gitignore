@@ -1,0 +1,19 @@
+# Node / SvelteKit
+node_modules/
+.svelte-kit/
+apps/desktop/build/
+apps/desktop/.env
+apps/desktop/.env.local
+apps/desktop/.vite/
+# Tauri / Rust
+apps/desktop/src-tauri/target/
+# Go / state
+*.exe
+*.test
+coverage.out
+state.json
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
