@@ -1,0 +1,9 @@
+{
+  "recommendations": [
+    "esbenp.prettier-vscode",
+    "svelte.svelte-vscode",
+    "golang.go",
+    "rust-lang.rust-analyzer",
+    "editorconfig.editorconfig"
+  ]
+}

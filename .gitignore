@@ -15,5 +15,7 @@ state.json
 # OS / editors
 .DS_Store
 Thumbs.db
-.vscode/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
 .idea/

@@ -65,10 +65,18 @@ export const getProfiles = () => api<{ items: RoutingProfile[] }>('/profiles');
 export const getEndpoints = () => api<{ items: ProxyEndpoint[] }>('/endpoints');
 export const getOverview = () => api<Overview>('/overview');
 export const getHealth = () => api<Health>('/health');
-export const createProfile = (name: string) => api<RoutingProfile>('/profiles', {
-  method: 'POST', body: JSON.stringify({ name })
-});
-export const createEndpoint = (input: { name: string; protocol: string; port: number; profile_id: string }) =>
-  api<ProxyEndpoint>('/endpoints', { method: 'POST', body: JSON.stringify(input) });
-export const deleteProfile = (id: string) => api<void>(`/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' });
-export const deleteEndpoint = (id: string) => api<void>(`/endpoints/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export const createProfile = (name: string) =>
+  api<RoutingProfile>('/profiles', {
+    method: 'POST',
+    body: JSON.stringify({ name })
+  });
+export const createEndpoint = (input: {
+  name: string;
+  protocol: string;
+  port: number;
+  profile_id: string;
+}) => api<ProxyEndpoint>('/endpoints', { method: 'POST', body: JSON.stringify(input) });
+export const deleteProfile = (id: string) =>
+  api<void>(`/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export const deleteEndpoint = (id: string) =>
+  api<void>(`/endpoints/${encodeURIComponent(id)}`, { method: 'DELETE' });

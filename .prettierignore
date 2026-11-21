@@ -1,0 +1,19 @@
+# Used by the VS Code Prettier extension (workspace root).
+# The CLI runs from apps/desktop and uses apps/desktop/.prettierignore.
+
+# Reference material kept byte-for-byte as committed
+README.md
+LICENSE
+docs/
+design/
+
+# Lockfiles / generated output
+**/node_modules/
+**/yarn.lock
+**/package-lock.json
+**/pnpm-lock.yaml
+**/.svelte-kit/
+apps/desktop/build/
+apps/desktop/.vite/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
