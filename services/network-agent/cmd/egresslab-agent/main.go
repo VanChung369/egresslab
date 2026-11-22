@@ -10,7 +10,7 @@ import (
 type HealthResponse struct {
 	Status       string `json:"status"`
 	Mode         string `json:"mode"`
-	MetworkReady bool   `json:"network_ready"`
+	NetworkReady bool   `json:"network_ready"`
 }
 
 func main() {
@@ -26,7 +26,7 @@ func main() {
 		response := HealthResponse{
 			Status:       "running",
 			Mode:         "read-only",
-			MetworkReady: false,
+			NetworkReady: false,
 		}
 
 		if err := json.NewEncoder(w).Encode(response); err != nil {
