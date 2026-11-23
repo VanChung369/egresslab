@@ -11,23 +11,15 @@ func (f *LabFirewall) PermitWireGuardLab(ctx context.Context, name string, side 
 		return errors.New("invalid lab namespace name")
 	}
 
-	f.manager.mu.Lock()
-	defer f.manager.mu.Unlock()
-
-	if _, ok := f.manager.owned[name]; !ok {
-		return fmt.Errorf("namespace %s is not owned by this session", name)
-	}
-
-	if !f.sealed[name] {
-		return fmt.Errorf("namespace %s must be sealed first", name)
-	}
-
 	script, err := wireGuardLabRules(side)
 	if err != nil {
 		return err
 	}
 
-	return f.apply(ctx, name, script)
+	f.manager.mu.Lock()
+	defer f.manager.mu.Unlock()
+
+	return f.applyVerifiedLocked(ctx, name, script)
 }
 
 func wireGuardLabRules(side LabSide) (string, error) {

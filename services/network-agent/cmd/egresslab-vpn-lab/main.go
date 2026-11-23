@@ -67,6 +67,11 @@ func run(file, probeURL string) (resultErr error) {
 		return fmt.Errorf("import rejected: %w", err)
 	}
 
+	// Fail before any namespace or tunnel exists if the lab cannot use this config.
+	if err := agent.CheckVPNLabCompatibility(cfg); err != nil {
+		return fmt.Errorf("config is valid but not usable by the VPN egress lab: %w", err)
+	}
+
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -116,15 +121,22 @@ func run(file, probeURL string) (resultErr error) {
 		return fmt.Errorf("create lab namespace: %w", err)
 	}
 
+	// Removes wg0 first, then the VM-side underlay table (retried after namespace deletion).
+	session.OnCleanup("tunnel and underlay policy for "+ns, func(ctx context.Context) error {
+		return lab.Disconnect(ctx, ns)
+	})
+
 	steps := []struct {
 		title string
 		run   func(context.Context) error
 	}{
 		{"seal namespace", func(ctx context.Context) error { return firewall.Seal(ctx, ns) }},
-		{"bring up tunnel", func(ctx context.Context) error { return lab.Connect(ctx, ns, cfg) }},
+		{"bring up tunnel (underlay policy first)", func(ctx context.Context) error { return lab.Connect(ctx, ns, cfg) }},
+		{"verify underlay policy and fwmark", func(ctx context.Context) error { return lab.VerifyUnderlay(ctx, ns) }},
 		{"allow probe through tunnel", func(ctx context.Context) error {
 			return firewall.PermitEgressProbe(ctx, ns, target.IP)
 		}},
+		{"verify lab firewall readback", func(ctx context.Context) error { return firewall.Verify(ctx, ns) }},
 	}
 
 	for _, step := range steps {
@@ -183,6 +195,11 @@ func run(file, probeURL string) (resultErr error) {
 		return fmt.Errorf("egress candidate rejected: %w", err)
 	}
 
+	// Pin the observed IP (in memory for this lab): any later observation must match it.
+	if status, err = registry.Activate(profileID); err != nil {
+		return fmt.Errorf("pin egress IP: %w", err)
+	}
+
 	differs := "unknown (direct probe failed)"
 	if directErr == nil {
 		differs = "yes"
@@ -190,7 +207,8 @@ func run(file, probeURL string) (resultErr error) {
 
 	candidate, _ := json.Marshal(status)
 
-	fmt.Printf("Namespace: %s (only lo and wg0; IPv4 default route via wg0; IPv6 not configured)\n", ns)
+	fmt.Printf("Namespace: %s (only lo and wg0; IPv4 default route via wg0; IPv6 and DNS port 53 explicitly dropped)\n", ns)
+	fmt.Println("Underlay: encrypted UDP from wg0 is marked and may only reach the configured endpoint (VM-side nft table)")
 	fmt.Printf("Tunnel handshake: %s ago\n", time.Since(handshake).Round(time.Second))
 	fmt.Printf("Observed egress IPv4: %s (via %s)\n", observed, target.URL)
 	fmt.Printf("Differs from the VM's direct egress IP: %s\n", differs)
@@ -210,6 +228,9 @@ func run(file, probeURL string) (resultErr error) {
 	}
 
 	registry.Release(profileID)
+	if err := registry.Deactivate(profileID); err != nil {
+		return err
+	}
 
 	var leaked netip.Addr
 	probeErr := session.Step("probe after tunnel loss", func(ctx context.Context) error {

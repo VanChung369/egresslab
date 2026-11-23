@@ -61,6 +61,35 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return data as T;
 }
 
+export type AgentDiscovery = {
+  os?: string;
+  capabilities: Record<string, { status: string }>;
+  links: { name: string; kind: string; category: string; operational_state: string }[];
+  lab_namespaces: string[];
+  other_namespaces: number;
+  errors: string[];
+};
+
+export type AgentStatus = {
+  id: string;
+  status: 'online' | 'unreachable' | 'unauthorized' | 'invalid_response' | 'error' | string;
+  mode?: string;
+  network_ready: boolean;
+  discovery?: AgentDiscovery;
+};
+
+// A WireGuard interface the agent saw on its host. EgressLab does not manage it (managed=false).
+export type DiscoveredTunnel = {
+  id: string;
+  name: string;
+  kind: string;
+  operational_state: string;
+  managed: boolean;
+  source: string;
+};
+
+export const getAgents = () => api<{ items: AgentStatus[] }>('/agents');
+export const getTunnels = () => api<{ items: DiscoveredTunnel[] }>('/tunnels');
 export const getProfiles = () => api<{ items: RoutingProfile[] }>('/profiles');
 export const getEndpoints = () => api<{ items: ProxyEndpoint[] }>('/endpoints');
 export const getOverview = () => api<Overview>('/overview');

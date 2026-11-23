@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -50,6 +51,13 @@ func TestMissingNamespaceDirectory(t *testing.T) {
 }
 
 func TestNamespaceDirectoryError(t *testing.T) {
+	// On Windows, reading a regular file as a directory reports "path not found" (os.ErrNotExist),
+	// which listNamedNamespaces deliberately maps to an empty list. Named namespaces exist only
+	// on Linux, where the same call fails with ENOTDIR as this test expects.
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports a file used as a directory as not-exist")
+	}
+
 	path := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(path, nil, 0600); err != nil {
 		t.Fatal(err)

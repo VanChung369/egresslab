@@ -267,3 +267,58 @@ func TestCloseGivesUpOnPersistentlyBusyNamespace(t *testing.T) {
 		t.Fatalf("busy namespace was not retried: %v", manager.deletes)
 	}
 }
+
+func TestCleanupsRunBeforeNamespacesAndRetryAfter(t *testing.T) {
+	manager := &fakeManager{names: []string{"a"}}
+	session, _, out := testSession(strings.NewReader(""), manager)
+
+	if _, err := session.CreateNamespace(); err != nil {
+		t.Fatal(err)
+	}
+
+	var order []string
+	attempts := 0
+
+	session.OnCleanup("first", func(context.Context) error {
+		order = append(order, "first")
+		return nil
+	})
+
+	session.OnCleanup("tunnel", func(context.Context) error {
+		attempts++
+		order = append(order, fmt.Sprintf("tunnel#%d deletes=%d", attempts, len(manager.deletes)))
+		if attempts == 1 {
+			return errors.New("link busy")
+		}
+		return nil
+	})
+
+	var result error
+	session.Close(&result)
+
+	if result != nil {
+		t.Fatalf("unexpected result: %v", result)
+	}
+
+	want := []string{"tunnel#1 deletes=0", "first", "tunnel#2 deletes=1"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("unexpected cleanup order: %v", order)
+	}
+
+	if !strings.Contains(out.String(), "Cleaned up: tunnel") {
+		t.Fatalf("missing cleanup output: %q", out.String())
+	}
+}
+
+func TestCleanupFailureIsReported(t *testing.T) {
+	session, _, _ := testSession(strings.NewReader(""), &fakeManager{})
+
+	session.OnCleanup("underlay policy", func(context.Context) error { return errors.New("nft failed") })
+
+	var result error
+	session.Close(&result)
+
+	if result == nil || !strings.Contains(result.Error(), "cleanup underlay policy") {
+		t.Fatalf("cleanup failure hidden: %v", result)
+	}
+}

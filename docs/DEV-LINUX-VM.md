@@ -193,24 +193,63 @@ Observed results:
 
 ## Current Limitations
 
-The Network Agent currently operates in read-only mode.
+The Network Agent's HTTP API is read-only: every route is `GET`, and the controller treats the agent as healthy only when it reports `mode=read-only` and `network_ready=false`. The agent refuses to start as root or with `CAP_NET_ADMIN`, `CAP_NET_RAW` or `CAP_SYS_ADMIN`.
 
-The following functionality has not yet been implemented:
+Privileged networking exists only as **lab CLIs**. You run them by hand with `sudo` on the VM, and nothing triggers them over HTTP:
 
-- Network Namespace creation and deletion
-- Veth pair management
-- WireGuard tunnel lifecycle
-- nftables kill-switch enforcement
-- Public egress IP verification
-- SOCKS5 runtime activation
+| Command | What it exercises |
+|---|---|
+| `egresslab-netns-lab` | Create and delete an owned lab namespace |
+| `egresslab-veth-lab` | Veth pair between two lab namespaces |
+| `egresslab-firewall-lab` | Sealed nftables table (policy drop, explicit IPv6/DNS drop) with kernel readback |
+| `egresslab-wireguard-lab` | WireGuard between two lab namespaces |
+| `egresslab-vpn-lab -file vpn.conf` | Real VPN egress through a sealed namespace (details below) |
+| `egresslab-wg-inspect`, `egresslab-wg-vault-lab` | Config import summary; in-memory or opt-in encrypted staging |
+| `egresslab-lab-recover [-delete]` | Report (default) or remove lab resources left by a crashed session |
+
+`egresslab-vpn-lab` runs these steps:
+
+1. Seal the namespace.
+2. Install a VM-side underlay table for the tunnel's fwmark.
+3. Bring up `wg0`.
+4. Verify the underlay policy and the firewall by reading them back.
+5. Probe the egress IP and pin it as an active lease.
+6. Simulate tunnel loss to prove there is no fallback route.
+
+Still not implemented:
+
+- A privileged helper and authorization protocol, so that no HTTP path can trigger lab operations. The design is in `docs/PRIVILEGED-HELPER.md`.
+- DNS through the tunnel. DNS (port 53) and IPv6 are explicitly dropped inside lab namespaces.
+- Multi-peer configs, and hostname endpoints in the VPN lab. The importer reports `vpn_lab_compatible=false` for these.
+- SOCKS5 runtime activation.
 
 `network_ready` must remain `false` until the required route verification and network enforcement mechanisms are implemented.
+
+### Running the lab code on the VM
+
+The lab code's unit tests use fake command runners. Only a run on the VM exercises the real kernel paths:
+
+```bash
+cd services/network-agent
+go test ./...
+go build -o /tmp/egresslab-vpn-lab ./cmd/egresslab-vpn-lab
+go build -o /tmp/egresslab-lab-recover ./cmd/egresslab-lab-recover
+sudo /tmp/egresslab-vpn-lab -file /path/to/vpn.conf   # IPv4 endpoint, AllowedIPs 0.0.0.0/0
+sudo /tmp/egresslab-lab-recover                         # should report nothing after a clean exit
+```
+
+The firewall readback tests use a synthetic `nft -j` sample. To replace it with a real capture, run the command below from a second terminal while a lab is sealed, and save the output as `internal/agent/testdata/nft-lab-sealed.json`:
+
+```bash
+sudo ip netns exec <egresslab-lab-...> nft -j list ruleset
+```
 
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
 - Never include Bearer Tokens in documentation or logs.
-- Avoid running the Agent as root unless specifically required.
+- Run the Agent as your normal user. It refuses to start as root or with networking capabilities.
+- Persisting WireGuard configs is opt-in (`egresslab-wg-vault-lab -store ... -key ...`). Configs are encrypted with AES-256-GCM, and the key file must be `0600` and live in a different directory than the data file. This protects backups and copies, not a root user on the VM.
 - Do not expose the Agent's HTTP API publicly.
 - Authenticated communication between the macOS Controller and the Linux VM must be secured before privileged networking operations are introduced.
 

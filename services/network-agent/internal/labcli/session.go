@@ -35,8 +35,14 @@ type Session struct {
 	out      io.Writer
 	manager  namespaceManager
 	created  []string
+	cleanups []cleanup
 	busyWait time.Duration
 	busyPoll time.Duration
+}
+
+type cleanup struct {
+	title string
+	run   func(context.Context) error
 }
 
 func Start(manager namespaceManager) *Session {
@@ -86,6 +92,32 @@ func (s *Session) CreateNamespace() (string, error) {
 	s.created = append(s.created, name)
 
 	return name, s.Err()
+}
+
+// OnCleanup registers teardown that runs (last registered first) before namespaces are deleted.
+// A cleanup that fails is retried once after the namespaces are gone, because deleting a namespace
+// can remove what blocked it (for example the tunnel link inside it).
+func (s *Session) OnCleanup(title string, run func(context.Context) error) {
+	s.cleanups = append(s.cleanups, cleanup{title: title, run: run})
+}
+
+func (s *Session) runCleanups(pending []cleanup) []cleanup {
+	var failed []cleanup
+
+	for i := len(pending) - 1; i >= 0; i-- {
+		ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		err := pending[i].run(ctx)
+		cancel()
+
+		if err != nil {
+			failed = append([]cleanup{pending[i]}, failed...)
+			continue
+		}
+
+		fmt.Fprintln(s.out, "Cleaned up:", pending[i].title)
+	}
+
+	return failed
 }
 
 func (s *Session) Step(title string, run func(context.Context) error) error {
@@ -142,6 +174,8 @@ func (s *Session) Close(result *error) {
 		fmt.Fprintln(s.out, "Interrupted; cleaning up.")
 	}
 
+	failed := s.runCleanups(s.cleanups)
+
 	for i := len(s.created) - 1; i >= 0; i-- {
 		name := s.created[i]
 
@@ -151,6 +185,19 @@ func (s *Session) Close(result *error) {
 		}
 
 		fmt.Fprintln(s.out, "Deleted namespace:", name)
+	}
+
+	for _, c := range failed {
+		ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		err := c.run(ctx)
+		cancel()
+
+		if err != nil {
+			*result = errors.Join(*result, fmt.Errorf("cleanup %s: %w", c.title, err))
+			continue
+		}
+
+		fmt.Fprintln(s.out, "Cleaned up:", c.title)
 	}
 
 	s.stop()

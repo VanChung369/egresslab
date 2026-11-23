@@ -243,3 +243,36 @@ func TestLoadWireGuardPrivateFile(t *testing.T) {
 		t.Fatal("missing file accepted")
 	}
 }
+
+func TestSummaryReportsVPNLabCompatibility(t *testing.T) {
+	hostname := mustParse(t, demoConfig()).Summary()
+	if hostname.VPNLabCompatible || !strings.Contains(hostname.VPNLabIssue, "IPv4 address") {
+		t.Fatalf("hostname endpoint reported as lab-compatible: %+v", hostname)
+	}
+
+	literal := mustParse(t, replaced("vpn.example.com:51820", "198.51.100.7:51820")).Summary()
+	if !literal.VPNLabCompatible || literal.VPNLabIssue != "" {
+		t.Fatalf("IPv4 endpoint reported as incompatible: %+v", literal)
+	}
+
+	split := mustParse(t, strings.NewReplacer(
+		"vpn.example.com:51820", "198.51.100.7:51820",
+		"AllowedIPs = 0.0.0.0/0, ::/0", "AllowedIPs = 10.0.0.0/8",
+	).Replace(demoConfig())).Summary()
+	if split.VPNLabCompatible || !strings.Contains(split.VPNLabIssue, "0.0.0.0/0") {
+		t.Fatalf("split tunnel reported as lab-compatible: %+v", split)
+	}
+
+	if err := CheckVPNLabCompatibility(mustParse(t, demoConfig())); err == nil {
+		t.Fatal("hostname endpoint passed the lab compatibility check")
+	}
+}
+
+func TestParseRejectsMultiplePeersExplicitly(t *testing.T) {
+	src := demoConfig() + fmt.Sprintf("\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.0.0.0/8\nEndpoint = 198.51.100.8:51820\n", demoKey(3))
+
+	_, err := ParseWireGuardConfig(strings.NewReader(src))
+	if err == nil || !strings.Contains(err.Error(), "single-peer") {
+		t.Fatalf("multi-peer config not rejected explicitly: %v", err)
+	}
+}

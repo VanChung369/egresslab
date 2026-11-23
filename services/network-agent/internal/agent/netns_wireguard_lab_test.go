@@ -50,8 +50,8 @@ func testWGLab() (*WireGuardLab, *wgLabRecorder) {
 
 	generated := 0
 
-	run := func(_ context.Context, namespace, stdin string, args ...string) (string, error) {
-		rec.wgCalls = append(rec.wgCalls, wgInvocation{namespace, stdin, append([]string(nil), args...)})
+	run := func(_ context.Context, namespace string, stdin []byte, args ...string) (string, error) {
+		rec.wgCalls = append(rec.wgCalls, wgInvocation{namespace, string(stdin), append([]string(nil), args...)})
 
 		switch args[0] {
 		case "genkey":
@@ -62,7 +62,7 @@ func testWGLab() (*WireGuardLab, *wgLabRecorder) {
 			return testWGKey(byte(generated)), nil
 
 		case "pubkey":
-			if stdin == testWGKey(1) {
+			if string(stdin) == testWGKey(1) {
 				return testWGKey(3), nil
 			}
 			return testWGKey(4), nil

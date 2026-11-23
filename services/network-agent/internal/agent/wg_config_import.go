@@ -23,14 +23,16 @@ const (
 	redactedWireGuardConfig = "<WireGuard config: redacted>"
 )
 
-// ImportedWireGuardConfig holds secrets in memory only; never log, serialize or persist it.
+// ImportedWireGuardConfig holds secrets in memory; never log or serialize it. The only way to
+// persist it is SealedWireGuardStore, which encrypts it. Key material is kept in byte slices so
+// releaseWireGuardConfig can overwrite it; see that function for the limits of this.
 type ImportedWireGuardConfig struct {
-	privateKey       string
+	privateKey       []byte
 	addresses        []netip.Prefix
 	dns              []netip.Addr
 	mtu              int
 	peerPublicKey    string
-	peerPresharedKey string
+	peerPresharedKey []byte
 	endpointHost     string
 	endpointPort     uint16
 	allowedIPs       []netip.Prefix
@@ -65,6 +67,8 @@ type WireGuardImportSummary struct {
 	HasPresharedKey  bool   `json:"has_preshared_key"`
 	MTU              int    `json:"mtu,omitempty"`
 	KeepaliveSeconds uint16 `json:"keepalive_seconds,omitempty"`
+	VPNLabCompatible bool   `json:"vpn_lab_compatible"`
+	VPNLabIssue      string `json:"vpn_lab_issue,omitempty"`
 	NetworkReady     bool   `json:"network_ready"`
 }
 
@@ -76,7 +80,7 @@ func (c *ImportedWireGuardConfig) Summary() WireGuardImportSummary {
 		Addresses:        len(c.addresses),
 		DNSServers:       len(c.dns),
 		AllowedRoutes:    len(c.allowedIPs),
-		HasPresharedKey:  c.peerPresharedKey != "",
+		HasPresharedKey:  len(c.peerPresharedKey) != 0,
 		MTU:              c.mtu,
 		KeepaliveSeconds: c.keepalive,
 	}
@@ -93,7 +97,20 @@ func (c *ImportedWireGuardConfig) Summary() WireGuardImportSummary {
 		}
 	}
 
+	if err := CheckVPNLabCompatibility(c); err != nil {
+		summary.VPNLabIssue = strings.TrimPrefix(err.Error(), ErrUnsupportedTunnelConfig.Error()+": ")
+	} else {
+		summary.VPNLabCompatible = true
+	}
+
 	return summary
+}
+
+// CheckVPNLabCompatibility reports, at import time, whether the VPN egress lab can use cfg. The
+// importer accepts a wider set (for example hostname endpoints) than the lab can connect.
+func CheckVPNLabCompatibility(cfg *ImportedWireGuardConfig) error {
+	_, err := planVPNTunnel(cfg)
+	return err
 }
 
 func LoadWireGuardConfig(path string) (*ImportedWireGuardConfig, error) {
@@ -139,30 +156,51 @@ func ParseWireGuardConfig(r io.Reader) (*ImportedWireGuardConfig, error) {
 		return nil, errors.New("WireGuard configuration exceeds 64 KiB")
 	}
 
-	cfg := &ImportedWireGuardConfig{}
+	return parseWireGuardBytes(data)
+}
+
+// parseWireGuardBytes works on byte slices only, so key material never becomes an immutable
+// string. The scanner buffer is as large as the input limit (it never reallocates) and is cleared.
+func parseWireGuardBytes(data []byte) (cfg *ImportedWireGuardConfig, err error) {
+	cfg = &ImportedWireGuardConfig{}
+	defer func() {
+		if err != nil {
+			releaseWireGuardConfig(cfg)
+			cfg = nil
+		}
+	}()
+
 	section := ""
 	sections := map[string]bool{}
 	seen := map[string]map[string]bool{"Interface": {}, "Peer": {}}
 
+	buffer := make([]byte, maxWireGuardConfigBytes+1)
+	defer clear(buffer)
+
 	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 4096), maxWireGuardConfigBytes+1)
+	scanner.Buffer(buffer, len(buffer))
 
 	for lineNo := 1; scanner.Scan(); lineNo++ {
-		line := strings.TrimSpace(scanner.Text())
-		if i := strings.IndexByte(line, '#'); i >= 0 {
-			line = strings.TrimSpace(line[:i])
+		raw := bytes.TrimSpace(scanner.Bytes())
+		if i := bytes.IndexByte(raw, '#'); i >= 0 {
+			raw = bytes.TrimSpace(raw[:i])
 		}
 
-		if line == "" {
+		if len(raw) == 0 {
 			continue
 		}
 
-		if strings.HasPrefix(line, "[") {
+		if raw[0] == '[' {
+			line := string(raw)
 			if line != "[Interface]" && line != "[Peer]" {
 				return nil, fmt.Errorf("unsupported section at line %d", lineNo)
 			}
 
 			next := strings.Trim(line, "[]")
+			if next == "Peer" && sections["Peer"] {
+				return nil, fmt.Errorf("multiple [Peer] sections at line %d: only single-peer configs are supported", lineNo)
+			}
+
 			if sections[next] || (next == "Interface" && sections["Peer"]) || (next == "Peer" && !sections["Interface"]) {
 				return nil, fmt.Errorf("duplicate or out-of-order section at line %d", lineNo)
 			}
@@ -173,10 +211,11 @@ func ParseWireGuardConfig(r io.Reader) (*ImportedWireGuardConfig, error) {
 			continue
 		}
 
-		key, value, ok := strings.Cut(line, "=")
-		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		rawKey, value, ok := bytes.Cut(raw, []byte("="))
+		key := string(bytes.TrimSpace(rawKey))
+		value = bytes.TrimSpace(value)
 
-		if !ok || key == "" || value == "" || section == "" {
+		if !ok || key == "" || len(value) == 0 || section == "" {
 			return nil, fmt.Errorf("invalid configuration entry at line %d", lineNo)
 		}
 
@@ -186,8 +225,17 @@ func ParseWireGuardConfig(r io.Reader) (*ImportedWireGuardConfig, error) {
 
 		seen[section][key] = true
 
-		if err := cfg.apply(section+"."+key, value); err != nil {
-			return nil, fmt.Errorf("%s at line %d", err, lineNo)
+		option := section + "." + key
+
+		var applyErr error
+		if option == "Interface.PrivateKey" || option == "Peer.PresharedKey" {
+			applyErr = cfg.applySecret(option, value)
+		} else {
+			applyErr = cfg.apply(option, string(value))
+		}
+
+		if applyErr != nil {
+			return nil, fmt.Errorf("%s at line %d", applyErr, lineNo)
 		}
 	}
 
@@ -195,7 +243,7 @@ func ParseWireGuardConfig(r io.Reader) (*ImportedWireGuardConfig, error) {
 		return nil, errors.New("could not parse WireGuard configuration")
 	}
 
-	if !sections["Interface"] || !sections["Peer"] || cfg.privateKey == "" || len(cfg.addresses) == 0 ||
+	if !sections["Interface"] || !sections["Peer"] || len(cfg.privateKey) == 0 || len(cfg.addresses) == 0 ||
 		cfg.peerPublicKey == "" || cfg.endpointHost == "" || len(cfg.allowedIPs) == 0 {
 		return nil, errors.New("missing required WireGuard sections or fields")
 	}
@@ -203,14 +251,53 @@ func ParseWireGuardConfig(r io.Reader) (*ImportedWireGuardConfig, error) {
 	return cfg, nil
 }
 
-func (c *ImportedWireGuardConfig) apply(option, value string) error {
+// applySecret stores a copy of a key that the config owns and releaseWireGuardConfig clears.
+func (c *ImportedWireGuardConfig) applySecret(option string, value []byte) error {
 	switch option {
 	case "Interface.PrivateKey":
-		if !validImportKey(value) {
+		if !validSecretKey(value) {
 			return errors.New("invalid interface key")
 		}
-		c.privateKey = value
+		c.privateKey = bytes.Clone(value)
 
+	case "Peer.PresharedKey":
+		if !validSecretKey(value) {
+			return errors.New("invalid peer preshared key")
+		}
+		c.peerPresharedKey = bytes.Clone(value)
+
+	default:
+		return errors.New("unsupported or unsafe option")
+	}
+
+	return nil
+}
+
+// validSecretKey is validImportKey for key material: canonical base64 of 32 bytes, decoded into
+// fixed buffers that are cleared, without creating strings.
+func validSecretKey(b []byte) bool {
+	if len(b) != base64.StdEncoding.EncodedLen(32) {
+		return false
+	}
+
+	var decoded [33]byte
+	defer clear(decoded[:])
+
+	n, err := base64.StdEncoding.Decode(decoded[:], b)
+	if err != nil || n != 32 {
+		return false
+	}
+
+	var canonical [44]byte
+	defer clear(canonical[:])
+
+	base64.StdEncoding.Encode(canonical[:], decoded[:32])
+
+	return bytes.Equal(canonical[:], b)
+}
+
+func (c *ImportedWireGuardConfig) apply(option, value string) error {
+	switch option {
 	case "Interface.Address":
 		prefixes, err := parsePrefixList(value, maxWireGuardAddresses-len(c.addresses))
 		if err != nil {
@@ -237,12 +324,6 @@ func (c *ImportedWireGuardConfig) apply(option, value string) error {
 			return errors.New("invalid peer public key")
 		}
 		c.peerPublicKey = value
-
-	case "Peer.PresharedKey":
-		if !validImportKey(value) {
-			return errors.New("invalid peer preshared key")
-		}
-		c.peerPresharedKey = value
 
 	case "Peer.Endpoint":
 		host, port, err := parseWGEndpoint(value)

@@ -41,6 +41,7 @@ type NetNSLabManager struct {
 	makeName labNameGenerator
 	exists   netNSExists
 	owned    map[string]struct{}
+	markers  *labMarkers // nil only in tests that do not model ownership markers
 }
 
 func NewNetNSLabManager() (*NetNSLabManager, error) {
@@ -65,7 +66,15 @@ func NewNetNSLabManager() (*NetNSLabManager, error) {
 		return output, nil
 	}
 
-	return newNetNSLabManager(run, generateLabName, namespaceExists), nil
+	markers, err := newLabMarkers(defaultLabMarkerDir)
+	if err != nil {
+		return nil, err
+	}
+
+	m := newNetNSLabManager(run, generateLabName, namespaceExists)
+	m.markers = markers
+
+	return m, nil
 }
 
 // Generate a 64-bit random identifier.
@@ -126,6 +135,14 @@ func (m *NetNSLabManager) Create(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("lab namespace %s already exists", name)
 	}
 
+	// The marker is written first: a crash right after "netns add" still leaves a record of
+	// which process owned the namespace, so recovery can find it.
+	if m.markers != nil {
+		if err := m.markers.write(name); err != nil {
+			return "", err
+		}
+	}
+
 	commandCtx, cancel := context.WithTimeout(ctx, netNSCommandTimeout)
 	defer cancel()
 
@@ -152,7 +169,19 @@ func (m *NetNSLabManager) Create(ctx context.Context) (string, error) {
 		)
 	}
 
-	return "", createErr
+	return "", errors.Join(createErr, m.removeMarker(name))
+}
+
+func (m *NetNSLabManager) removeMarker(name string) error {
+	if m.markers == nil {
+		return nil
+	}
+
+	if err := m.markers.remove(name); err != nil {
+		return fmt.Errorf("remove ownership marker for %s: %w", name, err)
+	}
+
+	return nil
 }
 
 func (m *NetNSLabManager) Delete(ctx context.Context, name string) error {
@@ -190,6 +219,9 @@ func (m *NetNSLabManager) deleteLocked(ctx context.Context, name string) error {
 
 	delete(m.owned, name)
 
+	// A leftover marker without a namespace is reported as stale by recovery; it never blocks.
+	_ = m.removeMarker(name)
+
 	return nil
 }
 
@@ -204,6 +236,7 @@ func (m *NetNSLabManager) forgetIfGone(name string, cause error) error {
 	}
 
 	delete(m.owned, name)
+	_ = m.removeMarker(name)
 
 	return nil
 }

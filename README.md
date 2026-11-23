@@ -75,15 +75,22 @@ apps/desktop/                   SvelteKit + Tauri 2 desktop UI
 services/controller/            Go HTTP controller
   cmd/egresslab-controller/     Entrypoint
   internal/control/             Store + REST handlers + tests
+services/network-agent/         Linux network agent (read-only HTTP API) + sudo-only lab CLIs
 docs/ARCHITECTURE.md            Boundaries and invariants
+docs/DEV-LINUX-VM.md            Linux VM setup, lab CLIs and what still needs a VM run
+docs/PRIVILEGED-HELPER.md       Required boundary before any privileged action over IPC (design)
 docs/NEXT_MILESTONES.md         Implementation sequence
 ```
+
+The Linux network agent's HTTP API is read-only and refuses to run as root. Namespaces, firewall, WireGuard and egress-probe code exists only in lab CLIs that you run by hand with `sudo` on a Linux VM (see `docs/DEV-LINUX-VM.md`). The desktop's **Network Agents** and **VPN Tunnels** views show the agent's read-only discovery. Nothing is shown as connected or managed.
+
+CI (`.github/workflows/ci.yml`) runs gofmt, `go vet` and `go test` for both Go modules, plus Prettier and svelte-check for the desktop.
 
 ## Security boundary and limitations
 
 The Go API is a loopback development control API with origin checks, not authenticated IPC.
 It must not be exposed to the LAN, the public internet or privileged network functions in its current state.
-The desktop and API currently run as separate processes. SvelteKit builds and Rust/Tauri desktop builds have **not been executed in the artifact environment** because npm registry access and Rust toolchain were unavailable. Go tests **have** been executed successfully.
+The desktop and API currently run as separate processes. The SvelteKit frontend passes `svelte-check` and `vite build`. Go tests pass. The Rust/Tauri desktop bundle has **not** been built or run through rustfmt yet.
 
 ## Design source
 

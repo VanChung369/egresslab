@@ -1,11 +1,13 @@
 package control
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,12 +73,24 @@ func NewStore(path string) (*Store, error) {
 	}
 
 	var state snapshot
-	if err := json.Unmarshal(data, &state); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&state); err != nil {
 		return nil, fmt.Errorf("read state: %w", err)
+	}
+
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("read state: %w: trailing data after the state object", ErrInvalidState)
 	}
 
 	if state.Version != 1 {
 		return nil, fmt.Errorf("unsupported state version %d", state.Version)
+	}
+
+	if err := validateSnapshot(state); err != nil {
+		return nil, fmt.Errorf("read state %s: %w", path, err)
 	}
 
 	if state.Profiles != nil {

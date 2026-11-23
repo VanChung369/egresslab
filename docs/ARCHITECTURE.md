@@ -9,7 +9,11 @@ It uses the v1.1.1 Claude Design prototype as UX reference only; no HTML prototy
 
 1. **Desktop UI** — SvelteKit SPA rendered inside a Tauri 2 window. It calls the local Go API.
 2. **Go Control Plane** — persists routing profiles and proxy endpoint *definitions*; exposes read-only status and CRUD endpoints. It does not handle network traffic.
-3. **Linux Network Agent (planned)** — manages namespaces, VPN interfaces, firewall rules and fail-closed verification. Not present in v0.1.
+3. **Linux Network Agent** (`services/network-agent`) has two parts:
+   - **Read-only HTTP API**: GET-only discovery (system info, capabilities, links, namespaces) behind a bearer token. It must run unprivileged.
+   - **Lab code, CLI only, run with `sudo`**: owned lab namespaces with ownership markers and crash recovery; a sealed nftables table with kernel readback and drift blocking; a per-tunnel VM-side underlay policy (fwmark plus an endpoint-only table); egress probing with sticky active-IP leases; and an encrypted, opt-in WireGuard config store.
+
+   No HTTP handler can trigger lab code. The boundary required before that changes is in `docs/PRIVILEGED-HELPER.md`.
 4. **Proxy Data Plane (planned)** — SOCKS5/HTTP CONNECT listeners restricted to verified, isolated routes. Not present in v0.1.
 
 ### Invariants
@@ -36,7 +40,10 @@ Write operations are serialized; persistence is atomic to a temporary file and r
 `POST /api/v1/profiles`, `DELETE /api/v1/profiles/{id}`,
 `GET /api/v1/endpoints`, `POST /api/v1/endpoints`, `DELETE /api/v1/endpoints/{id}`,
 `POST /api/v1/endpoints/{id}/start` (always `409 ROUTE_NOT_VERIFIED` in v0.1),
-`GET /api/v1/tunnels`, `GET /api/v1/agents` (currently empty).
+`GET /api/v1/tunnels` (WireGuard interfaces discovered by the agent, all `managed=false`),
+`GET /api/v1/agents` (agent health plus sanitized read-only discovery; empty without `EGRESSLAB_AGENT_TOKEN`).
+
+On startup, the controller re-validates every invariant of the persisted state and refuses to start if any fails. The checks cover ID formats, unique names, ports and IDs, endpoint-to-profile references, statuses, the loopback listener, and enabled policy flags.
 
 This API is intentionally *not* a remote management API and listens on loopback only.
 CORS is restricted to local development and Tauri origins. This is not full process authentication.

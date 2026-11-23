@@ -91,7 +91,7 @@ func TestWGVaultStageAndRevoke(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if saved.privateKey != "" || saved.peerPresharedKey != "" || saved.addresses != nil {
+	if saved.privateKey != nil || saved.peerPresharedKey != nil || saved.addresses != nil {
 		t.Fatal("references to keys not dropped")
 	}
 
@@ -152,7 +152,7 @@ func TestWGVaultReplacementKeepsOldOnInvalidImport(t *testing.T) {
 		t.Fatalf("replacement failed: %+v", next)
 	}
 
-	if oldPtr.privateKey != "" {
+	if oldPtr.privateKey != nil {
 		t.Fatal("old key reference was retained")
 	}
 }
@@ -199,7 +199,7 @@ func TestWGVaultClosedAndInvalidProfile(t *testing.T) {
 	vault.Close()
 	vault.Close()
 
-	if saved.privateKey != "" {
+	if saved.privateKey != nil {
 		t.Fatal("close kept key references")
 	}
 

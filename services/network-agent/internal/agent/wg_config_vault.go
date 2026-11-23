@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"sync"
 )
+
+var stageIDPattern = regexp.MustCompile(`^wgstage_[0-9a-f]{32}$`)
 
 var (
 	ErrWGVaultClosed   = errors.New("WireGuard vault is closed")
@@ -30,15 +33,62 @@ type wireGuardStage struct {
 	cfg *ImportedWireGuardConfig
 }
 
-// WireGuardConfigVault keeps staged configs in process memory only; never expose it over HTTP or persist it.
+// WireGuardConfigVault keeps staged configs in process memory; never expose it over HTTP. By
+// default nothing is persisted. OpenPersistentWireGuardConfigVault adds an opt-in encrypted
+// SealedWireGuardStore; JSON and fmt output stay redacted either way.
 type WireGuardConfigVault struct {
 	mu      sync.RWMutex
 	closed  bool
 	entries map[string]wireGuardStage
+	store   *SealedWireGuardStore
 }
 
 func NewWireGuardConfigVault() *WireGuardConfigVault {
 	return &WireGuardConfigVault{entries: make(map[string]wireGuardStage)}
+}
+
+// OpenPersistentWireGuardConfigVault loads every config from the encrypted store and writes each
+// later change back to it before the change takes effect in memory.
+func OpenPersistentWireGuardConfigVault(store *SealedWireGuardStore) (*WireGuardConfigVault, error) {
+	if store == nil {
+		return nil, errors.New("nil sealed store")
+	}
+
+	entries, err := store.load()
+	if err != nil {
+		return nil, err
+	}
+
+	return &WireGuardConfigVault{entries: entries, store: store}, nil
+}
+
+// persistLocked writes next to the store (if any). The in-memory map is changed only after this
+// succeeds, so memory and disk never disagree about what is staged.
+func (v *WireGuardConfigVault) persistLocked(next map[string]wireGuardStage) error {
+	if v.store == nil {
+		return nil
+	}
+
+	if err := v.store.save(next); err != nil {
+		return fmt.Errorf("persist WireGuard vault: %w", err)
+	}
+
+	return nil
+}
+
+func (v *WireGuardConfigVault) withEntry(profileID string, record *wireGuardStage) map[string]wireGuardStage {
+	next := make(map[string]wireGuardStage, len(v.entries)+1)
+	for id, entry := range v.entries {
+		next[id] = entry
+	}
+
+	if record == nil {
+		delete(next, profileID)
+	} else {
+		next[profileID] = *record
+	}
+
+	return next
 }
 
 func (*WireGuardConfigVault) String() string {
@@ -95,20 +145,30 @@ func (v *WireGuardConfigVault) StageFile(profileID, path string) (WireGuardStage
 		return WireGuardStageStatus{}, ErrWGVaultClosed
 	}
 
+	if err := v.persistLocked(v.withEntry(profileID, &record)); err != nil {
+		releaseWireGuardConfig(cfg)
+		return WireGuardStageStatus{}, err
+	}
+
 	if old, ok := v.entries[profileID]; ok {
 		releaseWireGuardConfig(old.cfg)
 	}
 
 	v.entries[profileID] = record
 
-	return stageStatus(profileID, record), nil
+	return v.stageStatus(profileID, record), nil
 }
 
-func stageStatus(profileID string, record wireGuardStage) WireGuardStageStatus {
+func (v *WireGuardConfigVault) stageStatus(profileID string, record wireGuardStage) WireGuardStageStatus {
+	state := "staged_in_memory"
+	if v.store != nil {
+		state = "staged_encrypted_at_rest"
+	}
+
 	return WireGuardStageStatus{
 		StageID:   record.id,
 		ProfileID: profileID,
-		State:     "staged_in_memory",
+		State:     state,
 		Config:    record.cfg.Summary(),
 	}
 }
@@ -130,7 +190,7 @@ func (v *WireGuardConfigVault) Status(profileID string) (WireGuardStageStatus, e
 		return WireGuardStageStatus{}, ErrWGStageNotFound
 	}
 
-	return stageStatus(profileID, entry), nil
+	return v.stageStatus(profileID, entry), nil
 }
 
 func (v *WireGuardConfigVault) List() ([]WireGuardStageStatus, error) {
@@ -147,7 +207,7 @@ func (v *WireGuardConfigVault) List() ([]WireGuardStageStatus, error) {
 
 	out := make([]WireGuardStageStatus, 0, len(v.entries))
 	for profileID, entry := range v.entries {
-		out = append(out, stageStatus(profileID, entry))
+		out = append(out, v.stageStatus(profileID, entry))
 	}
 
 	sort.Slice(out, func(i, j int) bool { return out[i].ProfileID < out[j].ProfileID })
@@ -170,6 +230,10 @@ func (v *WireGuardConfigVault) Revoke(profileID string) error {
 	old, ok := v.entries[profileID]
 	if !ok {
 		return ErrWGStageNotFound
+	}
+
+	if err := v.persistLocked(v.withEntry(profileID, nil)); err != nil {
+		return err
 	}
 
 	delete(v.entries, profileID)
@@ -198,12 +262,19 @@ func (v *WireGuardConfigVault) Close() {
 	v.closed = true
 }
 
-// Best effort only: Go strings are immutable, so earlier copies may remain in memory.
+// releaseWireGuardConfig overwrites the key material the config owns, then drops everything.
+//
+// Limits (Go cannot guarantee erasure): the kernel and wg(8) keep their own copies once a tunnel
+// is configured, the Go runtime may have copied stack frames, and memory is not locked, so it can
+// reach swap or a core dump. Within this process, the importer, the vault and the encrypted store
+// never create a string copy of a private or preshared key.
 func releaseWireGuardConfig(cfg *ImportedWireGuardConfig) {
 	if cfg == nil {
 		return
 	}
 
+	clear(cfg.privateKey)
+	clear(cfg.peerPresharedKey)
 	clear(cfg.addresses)
 	clear(cfg.dns)
 	clear(cfg.allowedIPs)

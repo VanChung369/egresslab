@@ -3,10 +3,17 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestFindExecutableSkipsUnusableCandidates(t *testing.T) {
+	// Windows has no Unix execute bits (every file reports -rw-rw-rw-), and findSystemBinary is
+	// only used by the Linux lab code, which searches /usr/sbin, /usr/bin, /sbin and /bin.
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix execute permission bits do not exist on Windows")
+	}
+
 	notExecutable := t.TempDir()
 	directory := t.TempDir()
 	valid := t.TempDir()

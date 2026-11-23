@@ -13,6 +13,8 @@ import (
 var (
 	ErrInvalidObservation = errors.New("invalid egress observation")
 	ErrEgressIPCollision  = errors.New("egress IP already reserved by another profile")
+	ErrEgressIPChanged    = errors.New("observed egress IP differs from the IP pinned to the active profile")
+	ErrNoEgressCandidate  = errors.New("profile has no current egress candidate")
 
 	profileIDPattern = regexp.MustCompile(`^profile_[0-9a-f]{16}$`)
 
@@ -41,10 +43,13 @@ type EgressObservation struct {
 	ObservedAt time.Time
 }
 
+// Status values: "rejected", "collision", "candidate", "absent", "active" (lease pinned and, after
+// Evaluate, the observation matched it) and "ip_changed" (observation differs from the pinned IP).
 type EgressCandidateStatus struct {
 	ProfileID    string     `json:"profile_id"`
 	Status       string     `json:"status"`
 	CandidateIP  string     `json:"candidate_ip,omitempty"`
+	PinnedIP     string     `json:"pinned_ip,omitempty"`
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 	NetworkReady bool       `json:"network_ready"`
 }
@@ -54,13 +59,20 @@ type candidateRecord struct {
 	expires time.Time
 }
 
-// EgressCandidateRegistry is an in-memory uniqueness precheck, never proof that traffic left through a VPN.
+// EgressCandidateRegistry is a uniqueness precheck, never proof that traffic left through a VPN.
+//
+// Candidates are short-lived (TTL) and in memory. Active leases pin one IP to one profile until
+// Deactivate; they block every other profile from that IP and make any different observation for
+// the pinned profile fail with ErrEgressIPChanged. With a lease file, leases survive restarts.
 type EgressCandidateRegistry struct {
 	mu        sync.Mutex
 	ttl       time.Duration
 	now       func() time.Time
 	byProfile map[string]candidateRecord
 	byIP      map[netip.Addr]string
+	leases    map[string]egressLease
+	leasedBy  map[netip.Addr]string
+	leaseFile string
 }
 
 func NewEgressCandidateRegistry(ttl time.Duration) (*EgressCandidateRegistry, error) {
@@ -73,7 +85,36 @@ func NewEgressCandidateRegistry(ttl time.Duration) (*EgressCandidateRegistry, er
 		now:       time.Now,
 		byProfile: make(map[string]candidateRecord),
 		byIP:      make(map[netip.Addr]string),
+		leases:    make(map[string]egressLease),
+		leasedBy:  make(map[netip.Addr]string),
 	}, nil
+}
+
+// OpenEgressCandidateRegistry is NewEgressCandidateRegistry with active leases persisted to
+// leaseFile (created 0600 on first write). Existing leases are loaded and fully re-validated.
+func OpenEgressCandidateRegistry(ttl time.Duration, leaseFile string) (*EgressCandidateRegistry, error) {
+	if leaseFile == "" {
+		return nil, errors.New("lease file path is required")
+	}
+
+	r, err := NewEgressCandidateRegistry(ttl)
+	if err != nil {
+		return nil, err
+	}
+
+	leases, err := loadEgressLeases(leaseFile)
+	if err != nil {
+		return nil, err
+	}
+
+	for profileID, lease := range leases {
+		r.leases[profileID] = lease
+		r.leasedBy[lease.ip] = profileID
+	}
+
+	r.leaseFile = leaseFile
+
+	return r, nil
 }
 
 func parseCandidateIPv4(raw string) (netip.Addr, error) {
@@ -118,6 +159,23 @@ func (r *EgressCandidateRegistry) Evaluate(obs EgressObservation) (EgressCandida
 		return result, fmt.Errorf("%w: observation is stale or future-dated", ErrInvalidObservation)
 	}
 
+	// Sticky IP: an active profile may only ever be observed on its pinned IP.
+	lease, active := r.leases[obs.ProfileID]
+	if active {
+		result.PinnedIP = lease.ip.String()
+
+		if ip != lease.ip {
+			result.Status = "ip_changed"
+			result.CandidateIP = ip.String()
+			return result, fmt.Errorf("%w: pinned %s, observed %s", ErrEgressIPChanged, lease.ip, ip)
+		}
+	}
+
+	if owner, exists := r.leasedBy[ip]; exists && owner != obs.ProfileID {
+		result.Status = "collision"
+		return result, ErrEgressIPCollision
+	}
+
 	if owner, exists := r.byIP[ip]; exists && owner != obs.ProfileID {
 		result.Status = "collision"
 		return result, ErrEgressIPCollision
@@ -128,19 +186,98 @@ func (r *EgressCandidateRegistry) Evaluate(obs EgressObservation) (EgressCandida
 	r.byIP[ip] = obs.ProfileID
 
 	result.Status = "candidate"
+	if active {
+		result.Status = "active"
+	}
+
 	result.CandidateIP = ip.String()
 	result.ExpiresAt = &expires
 
 	return result, nil
 }
 
-func (r *EgressCandidateRegistry) Snapshot(profileID string) EgressCandidateStatus {
-	result := EgressCandidateStatus{ProfileID: profileID, Status: "absent"}
+// Activate pins the profile's current candidate IP as its active lease. It is idempotent for the
+// same IP and fails with ErrEgressIPChanged if the profile is already pinned to a different IP.
+func (r *EgressCandidateRegistry) Activate(profileID string) (EgressCandidateStatus, error) {
+	result := EgressCandidateStatus{ProfileID: profileID, Status: "rejected"}
+
+	if !profileIDPattern.MatchString(profileID) {
+		return result, fmt.Errorf("%w: invalid profile ID", ErrInvalidObservation)
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.pruneLocked(r.now())
+
+	record, ok := r.byProfile[profileID]
+	if !ok {
+		return result, ErrNoEgressCandidate
+	}
+
+	if lease, active := r.leases[profileID]; active {
+		result.PinnedIP = lease.ip.String()
+
+		if lease.ip != record.ip {
+			result.Status = "ip_changed"
+			return result, fmt.Errorf("%w: pinned %s, candidate %s", ErrEgressIPChanged, lease.ip, record.ip)
+		}
+
+		return r.activeStatusLocked(profileID), nil
+	}
+
+	if owner, exists := r.leasedBy[record.ip]; exists && owner != profileID {
+		result.Status = "collision"
+		return result, ErrEgressIPCollision
+	}
+
+	r.leases[profileID] = egressLease{ip: record.ip, pinnedAt: r.now().UTC()}
+	r.leasedBy[record.ip] = profileID
+
+	if err := r.persistLocked(); err != nil {
+		delete(r.leases, profileID)
+		delete(r.leasedBy, record.ip)
+
+		return result, fmt.Errorf("persist active lease: %w", err)
+	}
+
+	return r.activeStatusLocked(profileID), nil
+}
+
+// Deactivate removes the profile's active lease, freeing its IP for other profiles.
+func (r *EgressCandidateRegistry) Deactivate(profileID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	lease, ok := r.leases[profileID]
+	if !ok {
+		return nil
+	}
+
+	delete(r.leases, profileID)
+	delete(r.leasedBy, lease.ip)
+
+	if err := r.persistLocked(); err != nil {
+		r.leases[profileID] = lease
+		r.leasedBy[lease.ip] = profileID
+
+		return fmt.Errorf("persist lease removal: %w", err)
+	}
+
+	return nil
+}
+
+func (r *EgressCandidateRegistry) Snapshot(profileID string) EgressCandidateStatus {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.pruneLocked(r.now())
+
+	if _, active := r.leases[profileID]; active {
+		return r.activeStatusLocked(profileID)
+	}
+
+	result := EgressCandidateStatus{ProfileID: profileID, Status: "absent"}
 
 	if record, exists := r.byProfile[profileID]; exists {
 		expires := record.expires
@@ -150,6 +287,27 @@ func (r *EgressCandidateRegistry) Snapshot(profileID string) EgressCandidateStat
 	}
 
 	return result
+}
+
+func (r *EgressCandidateRegistry) activeStatusLocked(profileID string) EgressCandidateStatus {
+	lease := r.leases[profileID]
+	result := EgressCandidateStatus{ProfileID: profileID, Status: "active", PinnedIP: lease.ip.String()}
+
+	if record, exists := r.byProfile[profileID]; exists {
+		expires := record.expires
+		result.CandidateIP = record.ip.String()
+		result.ExpiresAt = &expires
+	}
+
+	return result
+}
+
+func (r *EgressCandidateRegistry) persistLocked() error {
+	if r.leaseFile == "" {
+		return nil
+	}
+
+	return saveEgressLeases(r.leaseFile, r.leases)
 }
 
 func (r *EgressCandidateRegistry) Release(profileID string) {

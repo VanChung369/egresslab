@@ -10,6 +10,11 @@ import (
 )
 
 func main() {
+	// The HTTP API is read-only; refuse to serve it with root or networking capabilities.
+	if err := agent.RequireUnprivilegedAgent(); err != nil {
+		log.Fatal(err)
+	}
+
 	token := os.Getenv("EGRESSLAB_AGENT_TOKEN")
 	handler, err := agent.NewAuthenticatedHTTPHandler(token)
 	if err != nil {

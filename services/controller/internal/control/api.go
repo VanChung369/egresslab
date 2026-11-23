@@ -181,8 +181,15 @@ func (a *API) Handler() http.Handler {
 		)
 	})
 
+	// Managed tunnels do not exist yet; this lists WireGuard interfaces the agent discovered,
+	// each marked managed=false.
 	mux.HandleFunc("GET /api/v1/tunnels", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, 200, map[string]any{"items": []any{}})
+		if a.Agent == nil {
+			respond(w, 200, map[string]any{"items": []DiscoveredTunnel{}})
+			return
+		}
+
+		respond(w, 200, map[string]any{"items": discoveredTunnels(a.Agent.Snapshot(r.Context()))})
 	})
 
 	mux.HandleFunc("GET /api/v1/agents", func(w http.ResponseWriter, r *http.Request) {

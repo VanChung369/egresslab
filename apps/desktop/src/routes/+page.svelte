@@ -5,10 +5,14 @@
     createProfile,
     deleteEndpoint,
     deleteProfile,
+    getAgents,
     getEndpoints,
     getHealth,
     getOverview,
     getProfiles,
+    getTunnels,
+    type AgentStatus,
+    type DiscoveredTunnel,
     type Health,
     type Overview,
     type ProxyEndpoint,
@@ -27,6 +31,9 @@
   let overview: Overview | null = null;
   let profiles: RoutingProfile[] = [];
   let endpoints: ProxyEndpoint[] = [];
+  let agents: AgentStatus[] = [];
+  let tunnels: DiscoveredTunnel[] = [];
+  let discoveryError = '';
 
   let profileDialog = false;
   let endpointDialog = false;
@@ -76,6 +83,35 @@
     } finally {
       loading = false;
     }
+
+    // Agent discovery is read-only and optional; its failure never hides the core screens.
+    if (connected) {
+      try {
+        const [a, t] = await Promise.all([getAgents(), getTunnels()]);
+        agents = a.items;
+        tunnels = t.items;
+        discoveryError = '';
+      } catch (e) {
+        discoveryError = e instanceof Error ? e.message : 'Agent discovery failed';
+      }
+    }
+  }
+
+  function agentStatusClass(status: string): string {
+    if (status === 'online') return 'good-text';
+    if (status === 'unreachable') return 'muted-text';
+    return 'red-text';
+  }
+
+  function capabilityLabel(key: string): string {
+    const labels: Record<string, string> = {
+      iproute2: 'iproute2 (ip)',
+      wireguard_tools: 'WireGuard tools (wg)',
+      nftables: 'nftables (nft)',
+      network_namespace: 'Network namespaces',
+      cap_net_admin_effective: 'CAP_NET_ADMIN (agent process)'
+    };
+    return labels[key] ?? key;
   }
 
   onMount(() => {
@@ -521,37 +557,160 @@
               <div>
                 <div class="eyebrow">NETWORK ENGINE</div>
                 <h1>VPN Tunnels</h1>
-                <p>WireGuard and OpenVPN integration is the next implementation phase.</p>
+                <p>
+                  WireGuard interfaces discovered by the network agent. EgressLab does not manage or
+                  activate them yet.
+                </p>
               </div>
             </div>
-            <div class="empty in-page">
-              <span class="empty-icon">⇄</span>
-              <h2>No tunnel management yet</h2>
-              <p>
-                We will introduce tunnel import, connection health, egress verification, and
-                controlled activation after the Linux network agent exists. No simulated VPN is
-                shown as connected.
-              </p>
-              <span class="pill muted">Planned · Phase 2</span>
+            {#if discoveryError}<div class="banner critical">
+                <strong>Discovery failed</strong><span>{discoveryError}</span>
+              </div>{/if}
+            <div class="panel table-panel">
+              <div class="panel-heading">
+                <h2>Discovered interfaces <span class="muted-text">({tunnels.length})</span></h2>
+                <span class="pill warning">Read-only discovery · not managed</span>
+              </div>
+              {#if agents.length === 0}<div class="empty-in-panel">
+                  <span class="empty-icon">⇄</span>
+                  <h2>No network agent configured</h2>
+                  <p>
+                    Set <code>EGRESSLAB_AGENT_TOKEN</code> for the controller and start the agent on the
+                    Linux VM to discover tunnels. No simulated VPN is shown as connected.
+                  </p>
+                </div>
+              {:else if tunnels.length === 0}<div class="empty-in-panel">
+                  <span class="empty-icon">⇄</span>
+                  <h2>No WireGuard interfaces found</h2>
+                  <p>
+                    The agent reported no WireGuard links on its host. Lab tunnels live inside lab
+                    namespaces and are not listed here.
+                  </p>
+                </div>
+              {:else}<div class="table-wrap">
+                  <table>
+                    <thead
+                      ><tr
+                        ><th>INTERFACE</th><th>KIND</th><th>STATE</th><th>SOURCE</th><th>MANAGED</th
+                        ></tr
+                      ></thead
+                    ><tbody>
+                      {#each tunnels as tunnel (tunnel.id)}
+                        <tr
+                          ><td class="table-name mono"
+                            ><span class="name-dot"></span>{tunnel.name}</td
+                          ><td class="mono">{tunnel.kind}</td><td
+                            ><span class="pill muted">{tunnel.operational_state}</span></td
+                          ><td class="muted-text">{tunnel.source}</td><td
+                            ><span class="pill muted">No</span></td
+                          ></tr
+                        >
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>{/if}
             </div>
           {:else if activeView === 'agents'}
             <div class="page-header">
               <div>
                 <div class="eyebrow">SYSTEM</div>
                 <h1>Network Agents</h1>
-                <p>Dedicated network engines for WSL2, Ubuntu VM, and remote Linux.</p>
+                <p>Read-only Linux network agent status and host discovery.</p>
               </div>
             </div>
-            <div class="empty in-page">
-              <span class="empty-icon">▣</span>
-              <h2>No network agent registered</h2>
-              <p>
-                The Go control API is running on {health?.platform}, but a privileged Linux network
-                agent has not been installed or paired. Agent lifecycle and secure pairing are
-                planned for the next milestone.
-              </p>
-              <span class="pill muted">Pairing unavailable</span>
-            </div>
+            {#if discoveryError}<div class="banner critical">
+                <strong>Discovery failed</strong><span>{discoveryError}</span>
+              </div>{/if}
+            {#if agents.length === 0}<div class="empty in-page">
+                <span class="empty-icon">▣</span>
+                <h2>No network agent configured</h2>
+                <p>
+                  The Go control API is running on {health?.platform}. Set
+                  <code>EGRESSLAB_AGENT_TOKEN</code> for the controller and start the agent on the Linux
+                  VM to see its status here.
+                </p>
+                <span class="pill muted">Agent not configured</span>
+              </div>
+            {:else}{#each agents as agent (agent.id)}
+                <div class="twocol">
+                  <section class="panel">
+                    <div class="panel-heading">
+                      <h2>{agent.id}</h2>
+                      <span class="pill muted">{agent.mode ?? 'unknown mode'}</span>
+                    </div>
+                    <div class="fact">
+                      <span>Status</span><span class={agentStatusClass(agent.status)}
+                        >{agent.status}</span
+                      >
+                    </div>
+                    <div class="fact">
+                      <span>Host OS</span><code>{agent.discovery?.os ?? '—'}</code>
+                    </div>
+                    <div class="fact">
+                      <span>Network ready</span><span class="red-text"
+                        >{agent.network_ready ? 'Yes' : 'No — enforcement not verified'}</span
+                      >
+                    </div>
+                    <div class="fact">
+                      <span>Lab namespaces</span><code
+                        >{agent.discovery?.lab_namespaces.length ?? 0}</code
+                      >
+                    </div>
+                    <div class="fact">
+                      <span>Other named namespaces</span><code
+                        >{agent.discovery?.other_namespaces ?? 0}</code
+                      >
+                    </div>
+                    {#each agent.discovery?.errors ?? [] as problem}<div class="fact">
+                        <span>Discovery issue</span><span class="red-text">{problem}</span>
+                      </div>{/each}
+                  </section>
+                  <section class="panel">
+                    <div class="panel-heading">
+                      <h2>Host capabilities</h2>
+                      <span class="pill muted">Read-only checks</span>
+                    </div>
+                    {#each Object.entries(agent.discovery?.capabilities ?? {}) as [key, check]}<div
+                        class="fact"
+                      >
+                        <span>{capabilityLabel(key)}</span><span
+                          class={check.status === 'detected' ? 'good-text' : 'muted-text'}
+                          >{check.status}</span
+                        >
+                      </div>{:else}<div class="mini-empty">
+                        Capabilities are available once the agent is online.
+                      </div>{/each}
+                  </section>
+                </div>
+                {#if agent.discovery && agent.discovery.links.length > 0}<div
+                    class="panel table-panel"
+                  >
+                    <div class="panel-heading">
+                      <h2>
+                        Network links <span class="muted-text"
+                          >({agent.discovery.links.length})</span
+                        >
+                      </h2>
+                    </div>
+                    <div class="table-wrap">
+                      <table>
+                        <thead
+                          ><tr><th>NAME</th><th>KIND</th><th>CATEGORY</th><th>STATE</th></tr></thead
+                        ><tbody>
+                          {#each agent.discovery.links as link (link.name)}
+                            <tr
+                              ><td class="table-name mono">{link.name}</td><td class="mono"
+                                >{link.kind}</td
+                              ><td>{link.category}</td><td
+                                ><span class="pill muted">{link.operational_state}</span></td
+                              ></tr
+                            >
+                          {/each}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>{/if}
+              {/each}{/if}
           {/if}
         </div>
       </div>

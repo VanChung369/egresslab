@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -20,7 +21,8 @@ const (
 	labWGPortB     = 51821
 )
 
-type wgLabCommand func(ctx context.Context, namespace, stdin string, args ...string) (string, error)
+// stdin carries secrets (keys); runners must not retain it, and the caller owns and clears it.
+type wgLabCommand func(ctx context.Context, namespace string, stdin []byte, args ...string) (string, error)
 
 type wgLabKeys struct {
 	private string
@@ -61,7 +63,7 @@ func newSystemWGRunner() (wgLabCommand, error) {
 		return nil, err
 	}
 
-	return func(ctx context.Context, namespace, stdin string, args ...string) (string, error) {
+	return func(ctx context.Context, namespace string, stdin []byte, args ...string) (string, error) {
 		command, argv := wgPath, args
 		if namespace != "" {
 			command = ipPath
@@ -74,8 +76,13 @@ func newSystemWGRunner() (wgLabCommand, error) {
 		cmd := exec.CommandContext(commandCtx, command, argv...)
 		isolateFromTerminalSignals(cmd)
 
-		if stdin != "" {
-			cmd.Stdin = strings.NewReader(stdin + "\n")
+		if len(stdin) != 0 {
+			input := make([]byte, len(stdin)+1)
+			copy(input, stdin)
+			input[len(stdin)] = '\n'
+			defer clear(input)
+
+			cmd.Stdin = bytes.NewReader(input)
 		}
 
 		output, err := cmd.Output()
@@ -101,7 +108,7 @@ func validWGKey(key string) bool {
 }
 
 func (l *WireGuardLab) newKeys(ctx context.Context) (wgLabKeys, error) {
-	private, err := l.runWG(ctx, "", "", "genkey")
+	private, err := l.runWG(ctx, "", nil, "genkey")
 	if err != nil {
 		return wgLabKeys{}, err
 	}
@@ -110,7 +117,7 @@ func (l *WireGuardLab) newKeys(ctx context.Context) (wgLabKeys, error) {
 		return wgLabKeys{}, errors.New("invalid WireGuard private key output")
 	}
 
-	public, err := l.runWG(ctx, "", private, "pubkey")
+	public, err := l.runWG(ctx, "", []byte(private), "pubkey")
 	if err != nil {
 		return wgLabKeys{}, err
 	}
@@ -199,7 +206,7 @@ func (l *WireGuardLab) Setup(ctx context.Context, a, b string) error {
 	}
 
 	for _, p := range peers {
-		if _, err := l.runWG(ctx, p.namespace, p.keys.private,
+		if _, err := l.runWG(ctx, p.namespace, []byte(p.keys.private),
 			"set", labWGInterface,
 			"listen-port", strconv.Itoa(p.port),
 			"private-key", "/dev/stdin",
@@ -209,7 +216,7 @@ func (l *WireGuardLab) Setup(ctx context.Context, a, b string) error {
 	}
 
 	for _, p := range peers {
-		if _, err := l.runWG(ctx, p.namespace, "",
+		if _, err := l.runWG(ctx, p.namespace, nil,
 			"set", labWGInterface,
 			"peer", p.peer.public,
 			"allowed-ips", labHost(p.peerWG)+"/32",

@@ -18,6 +18,8 @@ type vpnLabRecorder struct {
 	ipCalls [][]string
 	wgCalls []wgInvocation
 	nft     []nftInvocation
+	root    []nftInvocation
+	rootErr error
 	failIP  func(args []string) error
 	probed  []string
 	body    string
@@ -54,8 +56,8 @@ func testVPNLab(sealed bool) (*VPNEgressLab, *vpnLabRecorder) {
 	})
 	firewall.sealed[vpnTestNS] = sealed
 
-	runWG := func(_ context.Context, namespace, stdin string, args ...string) (string, error) {
-		rec.wgCalls = append(rec.wgCalls, wgInvocation{namespace, stdin, append([]string(nil), args...)})
+	runWG := func(_ context.Context, namespace string, stdin []byte, args ...string) (string, error) {
+		rec.wgCalls = append(rec.wgCalls, wgInvocation{namespace, string(stdin), append([]string(nil), args...)})
 		if args[0] == "show" {
 			return testWGKey(2) + "\t1795424850", nil
 		}
@@ -67,7 +69,17 @@ func testVPNLab(sealed bool) (*VPNEgressLab, *vpnLabRecorder) {
 		return []byte(rec.body), nil
 	}
 
-	return newVPNEgressLab(manager, firewall, runWG, probe, func() (string, error) { return vpnTestLink, nil }), rec
+	rootNFT := underlayNFT{
+		run: func(_ context.Context, script string, check bool) error {
+			rec.root = append(rec.root, nftInvocation{script: script, check: check})
+			return rec.rootErr
+		},
+		list: func(context.Context, string) ([]byte, error) {
+			return nil, errors.New("not modelled")
+		},
+	}
+
+	return newVPNEgressLab(manager, firewall, runWG, probe, func() (string, error) { return vpnTestLink, nil }, rootNFT), rec
 }
 
 func TestPlanVPNTunnel(t *testing.T) {
@@ -157,7 +169,7 @@ func TestVPNEgressLabConnectSequence(t *testing.T) {
 	}
 
 	expectedWG := []wgInvocation{
-		{vpnTestNS, demoKey(1), []string{"set", "wg0", "private-key", "/dev/stdin"}},
+		{vpnTestNS, demoKey(1), []string{"set", "wg0", "fwmark", "0x0000abcd", "private-key", "/dev/stdin"}},
 		{vpnTestNS, "", []string{
 			"set", "wg0", "peer", demoKey(2), "endpoint", "198.51.100.7:51820",
 			"allowed-ips", "0.0.0.0/0", "persistent-keepalive", "25",

@@ -19,10 +19,11 @@ const (
 )
 
 type AgentStatus struct {
-	ID           string `json:"id"`
-	Status       string `json:"status"`
-	Mode         string `json:"mode,omitempty"`
-	NetworkReady bool   `json:"network_ready"`
+	ID           string          `json:"id"`
+	Status       string          `json:"status"`
+	Mode         string          `json:"mode,omitempty"`
+	NetworkReady bool            `json:"network_ready"`
+	Discovery    *AgentDiscovery `json:"discovery,omitempty"`
 }
 
 type agentHealth struct {
@@ -121,6 +122,7 @@ func (c *AgentClient) Snapshot(ctx context.Context) AgentStatus {
 
 	result.Status = "online"
 	result.Mode = health.Mode
+	result.Discovery = c.discover(ctx)
 
 	return result
 }

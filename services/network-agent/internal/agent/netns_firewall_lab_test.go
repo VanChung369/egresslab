@@ -220,3 +220,36 @@ func TestLabFirewallPeerValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestSealDeniesIPv6AndDNSExplicitly(t *testing.T) {
+	lines := strings.Split(strings.TrimSpace(sealLabRules), "\n")
+
+	position := func(rule string) int {
+		for i, line := range lines {
+			if line == "add rule inet egresslab_lab "+rule {
+				return i
+			}
+		}
+
+		t.Fatalf("seal is missing %q", rule)
+		return -1
+	}
+
+	loIn, loOut := position(`input iifname "lo" accept`), position(`output oifname "lo" accept`)
+
+	for _, rule := range []string{
+		"input meta nfproto ipv6 drop",
+		"output meta nfproto ipv6 drop",
+		"output udp dport 53 drop",
+		"output tcp dport 53 drop",
+	} {
+		if p := position(rule); p < loIn || p < loOut {
+			t.Fatalf("%q must follow the loopback accepts", rule)
+		}
+	}
+
+	// Every permit is appended after the seal, so these drops always win over later accepts.
+	if !strings.HasPrefix(lines[0], "create table") {
+		t.Fatal("seal must create the table first")
+	}
+}

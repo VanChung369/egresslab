@@ -51,6 +51,8 @@ type VPNEgressLab struct {
 	runWG    wgLabCommand
 	probe    egressProbeRunner
 	linkName func() (string, error)
+	rootNFT  underlayNFT
+	underlay map[string]underlayTunnel // guarded by manager.mu
 }
 
 func NewVPNEgressLab(m *NetNSLabManager, f *LabFirewall, probeBinary string) (*VPNEgressLab, error) {
@@ -96,7 +98,12 @@ func NewVPNEgressLab(m *NetNSLabManager, f *LabFirewall, probeBinary string) (*V
 		return output, nil
 	}
 
-	return newVPNEgressLab(m, f, runWG, probe, randomTunnelLinkName), nil
+	rootNFT, err := newSystemUnderlayNFT()
+	if err != nil {
+		return nil, err
+	}
+
+	return newVPNEgressLab(m, f, runWG, probe, randomTunnelLinkName, rootNFT), nil
 }
 
 func newVPNEgressLab(
@@ -105,6 +112,7 @@ func newVPNEgressLab(
 	runWG wgLabCommand,
 	probe egressProbeRunner,
 	linkName func() (string, error),
+	rootNFT underlayNFT,
 ) *VPNEgressLab {
 	return &VPNEgressLab{
 		manager:  m,
@@ -112,6 +120,8 @@ func newVPNEgressLab(
 		runWG:    runWG,
 		probe:    probe,
 		linkName: linkName,
+		rootNFT:  rootNFT,
+		underlay: make(map[string]underlayTunnel),
 	}
 }
 
@@ -269,15 +279,7 @@ func (f *LabFirewall) PermitEgressProbe(ctx context.Context, name string, probe 
 	f.manager.mu.Lock()
 	defer f.manager.mu.Unlock()
 
-	if _, ok := f.manager.owned[name]; !ok {
-		return fmt.Errorf("namespace %s is not owned by this session", name)
-	}
-
-	if !f.sealed[name] {
-		return fmt.Errorf("namespace %s must be sealed first", name)
-	}
-
-	return f.apply(ctx, name, script)
+	return f.applyVerifiedLocked(ctx, name, script)
 }
 
 func (l *VPNEgressLab) Connect(ctx context.Context, name string, cfg *ImportedWireGuardConfig) error {
@@ -293,7 +295,8 @@ func (l *VPNEgressLab) Connect(ctx context.Context, name string, cfg *ImportedWi
 	l.manager.mu.Lock()
 	defer l.manager.mu.Unlock()
 
-	if err := l.requireSealedLocked(name); err != nil {
+	// Bringing a tunnel up opens traffic, so the kernel ruleset must match what was installed.
+	if err := l.firewall.requireVerifiedLocked(ctx, name); err != nil {
 		return err
 	}
 
@@ -302,8 +305,19 @@ func (l *VPNEgressLab) Connect(ctx context.Context, name string, cfg *ImportedWi
 		return err
 	}
 
-	if !tunnelLinkPattern.MatchString(link) {
-		return errors.New("invalid tunnel link name")
+	mark, err := tunnelMark(link)
+	if err != nil {
+		return err
+	}
+
+	table, err := underlayTableName(name)
+	if err != nil {
+		return err
+	}
+
+	// The underlay policy exists before the link, so the first encrypted packet is already confined.
+	if err := l.installUnderlayLocked(ctx, name, underlayTunnel{table: table, mark: mark, endpoint: plan.endpoint}); err != nil {
+		return fmt.Errorf("install underlay policy: %w", err)
 	}
 
 	if err := l.ip(ctx, "link", "add", link, "type", "wireguard"); err != nil {
@@ -324,8 +338,11 @@ func (l *VPNEgressLab) Connect(ctx context.Context, name string, cfg *ImportedWi
 		return fmt.Errorf("rename tunnel link: %w", err)
 	}
 
-	if _, err := l.runWG(ctx, name, cfg.privateKey, "set", labWGInterface, "private-key", "/dev/stdin"); err != nil {
-		return fmt.Errorf("set tunnel private key: %w", err)
+	// The fwmark is set before any peer exists, so no encrypted packet ever leaves unmarked.
+	if _, err := l.runWG(ctx, name, cfg.privateKey,
+		"set", labWGInterface, "fwmark", fmt.Sprintf("0x%08x", mark), "private-key", "/dev/stdin",
+	); err != nil {
+		return fmt.Errorf("set tunnel fwmark and private key: %w", err)
 	}
 
 	peer := []string{
@@ -339,11 +356,11 @@ func (l *VPNEgressLab) Connect(ctx context.Context, name string, cfg *ImportedWi
 		peer = append(peer, "persistent-keepalive", strconv.Itoa(int(cfg.keepalive)))
 	}
 
-	if _, err := l.runWG(ctx, name, "", peer...); err != nil {
+	if _, err := l.runWG(ctx, name, nil, peer...); err != nil {
 		return fmt.Errorf("set tunnel peer: %w", err)
 	}
 
-	if cfg.peerPresharedKey != "" {
+	if len(cfg.peerPresharedKey) != 0 {
 		if _, err := l.runWG(ctx, name, cfg.peerPresharedKey,
 			"set", labWGInterface, "peer", cfg.peerPublicKey, "preshared-key", "/dev/stdin",
 		); err != nil {
@@ -386,7 +403,7 @@ func (l *VPNEgressLab) DropPeer(ctx context.Context, name string, cfg *ImportedW
 		return err
 	}
 
-	if _, err := l.runWG(ctx, name, "", "set", labWGInterface, "peer", cfg.peerPublicKey, "remove"); err != nil {
+	if _, err := l.runWG(ctx, name, nil, "set", labWGInterface, "peer", cfg.peerPublicKey, "remove"); err != nil {
 		return fmt.Errorf("remove tunnel peer: %w", err)
 	}
 
@@ -398,7 +415,7 @@ func (l *VPNEgressLab) LatestHandshake(ctx context.Context, name string) (time.T
 		return time.Time{}, errors.New("invalid lab namespace name")
 	}
 
-	output, err := l.runWG(ctx, name, "", "show", labWGInterface, "latest-handshakes")
+	output, err := l.runWG(ctx, name, nil, "show", labWGInterface, "latest-handshakes")
 	if err != nil {
 		return time.Time{}, err
 	}

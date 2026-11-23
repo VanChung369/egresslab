@@ -21,9 +21,13 @@ const (
 type nftLabRunner func(ctx context.Context, namespace, script string, checkOnly bool) error
 
 type LabFirewall struct {
-	manager *NetNSLabManager
-	run     nftLabRunner
-	sealed  map[string]bool
+	manager  *NetNSLabManager
+	run      nftLabRunner
+	list     nftRulesetLister // nil only in tests that do not model kernel readback
+	sealed   map[string]bool
+	applied  map[string][]string
+	baseline map[string]string
+	drifted  map[string]bool
 }
 
 var sealLabRules = fmt.Sprintf(`create table inet %[1]s
@@ -32,7 +36,14 @@ add chain inet %[1]s output { type filter hook output priority 0; policy drop; }
 add chain inet %[1]s forward { type filter hook forward priority 0; policy drop; }
 add rule inet %[1]s input iifname "lo" accept
 add rule inet %[1]s output oifname "lo" accept
+add rule inet %[1]s input meta nfproto ipv6 drop
+add rule inet %[1]s output meta nfproto ipv6 drop
+add rule inet %[1]s output udp dport 53 drop
+add rule inet %[1]s output tcp dport 53 drop
 `, labNFTTable)
+
+// The explicit IPv6 and DNS drops sit before every later "add rule", so no permit added afterwards
+// can open IPv6 or plain DNS from a lab namespace, even one written without an "ip" qualifier.
 
 func NewLabFirewall(manager *NetNSLabManager) (*LabFirewall, error) {
 	if runtime.GOOS != "linux" {
@@ -72,14 +83,37 @@ func NewLabFirewall(manager *NetNSLabManager) (*LabFirewall, error) {
 		return nil
 	}
 
-	return newLabFirewall(manager, run), nil
+	list := func(ctx context.Context, namespace string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, ipPath, "netns", "exec", namespace, nftPath, "-j", "list", "ruleset")
+		isolateFromTerminalSignals(cmd)
+
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+
+		output, err := cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("nft list in namespace %s: %w: %s", namespace, err, strings.TrimSpace(stderr.String()))
+		}
+
+		return output, nil
+	}
+
+	return newVerifyingLabFirewall(manager, run, list), nil
 }
 
 func newLabFirewall(manager *NetNSLabManager, run nftLabRunner) *LabFirewall {
+	return newVerifyingLabFirewall(manager, run, nil)
+}
+
+func newVerifyingLabFirewall(manager *NetNSLabManager, run nftLabRunner, list nftRulesetLister) *LabFirewall {
 	return &LabFirewall{
-		manager: manager,
-		run:     run,
-		sealed:  make(map[string]bool),
+		manager:  manager,
+		run:      run,
+		list:     list,
+		sealed:   make(map[string]bool),
+		applied:  make(map[string][]string),
+		baseline: make(map[string]string),
+		drifted:  make(map[string]bool),
 	}
 }
 
@@ -117,7 +151,21 @@ func (f *LabFirewall) seal(ctx context.Context, name string, allowSealed bool) e
 
 	f.sealed[name] = true
 
-	return nil
+	return f.recordLocked(ctx, name, sealLabRules)
+}
+
+// applyVerifiedLocked adds rules only after the kernel ruleset is confirmed unchanged, then
+// captures the new state as the baseline.
+func (f *LabFirewall) applyVerifiedLocked(ctx context.Context, name, script string) error {
+	if err := f.requireVerifiedLocked(ctx, name); err != nil {
+		return err
+	}
+
+	if err := f.apply(ctx, name, script); err != nil {
+		return err
+	}
+
+	return f.recordLocked(ctx, name, script)
 }
 
 func (f *LabFirewall) PermitPeerICMP(ctx context.Context, name string, side LabSide) error {
@@ -125,23 +173,15 @@ func (f *LabFirewall) PermitPeerICMP(ctx context.Context, name string, side LabS
 		return errors.New("invalid lab namespace name")
 	}
 
-	f.manager.mu.Lock()
-	defer f.manager.mu.Unlock()
-
-	if _, ok := f.manager.owned[name]; !ok {
-		return fmt.Errorf("namespace %s not owned by this session", name)
-	}
-
-	if !f.sealed[name] {
-		return fmt.Errorf("namespace %s must be sealed first", name)
-	}
-
 	script, err := peerICMPRules(side)
 	if err != nil {
 		return err
 	}
 
-	return f.apply(ctx, name, script)
+	f.manager.mu.Lock()
+	defer f.manager.mu.Unlock()
+
+	return f.applyVerifiedLocked(ctx, name, script)
 }
 
 func peerICMPRules(side LabSide) (string, error) {

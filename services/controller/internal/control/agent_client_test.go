@@ -52,7 +52,9 @@ func TestAgentClientOnline(t *testing.T) {
 	token := testAgentToken()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" {
+		switch r.URL.Path {
+		case "/health", "/capabilities", "/network/links", "/network/namespaces":
+		default:
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 
