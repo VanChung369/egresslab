@@ -3,9 +3,11 @@ node_modules/
 .svelte-kit/
 apps/desktop/build/
 apps/desktop/.vite/
-# Env
+# Env and secrets
 .env
 .env.local
+.secrets/
+*.conf
 # Tauri / Rust
 apps/desktop/src-tauri/target/
 # Go / state

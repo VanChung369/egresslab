@@ -42,6 +42,15 @@ func NewWireGuardLab(m *NetNSLabManager, f *LabFirewall) (*WireGuardLab, error) 
 		return nil, errors.New("WireGuard lab needs matching managers")
 	}
 
+	run, err := newSystemWGRunner()
+	if err != nil {
+		return nil, err
+	}
+
+	return newWireGuardLab(m, f, run), nil
+}
+
+func newSystemWGRunner() (wgLabCommand, error) {
 	wgPath, err := findSystemBinary("wg")
 	if err != nil {
 		return nil, err
@@ -52,7 +61,7 @@ func NewWireGuardLab(m *NetNSLabManager, f *LabFirewall) (*WireGuardLab, error) 
 		return nil, err
 	}
 
-	run := func(ctx context.Context, namespace, stdin string, args ...string) (string, error) {
+	return func(ctx context.Context, namespace, stdin string, args ...string) (string, error) {
 		command, argv := wgPath, args
 		if namespace != "" {
 			command = ipPath
@@ -75,9 +84,7 @@ func NewWireGuardLab(m *NetNSLabManager, f *LabFirewall) (*WireGuardLab, error) 
 		}
 
 		return strings.TrimSpace(string(output)), nil
-	}
-
-	return newWireGuardLab(m, f, run), nil
+	}, nil
 }
 
 func newWireGuardLab(m *NetNSLabManager, f *LabFirewall, run wgLabCommand) *WireGuardLab {
