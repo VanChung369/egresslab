@@ -119,3 +119,42 @@ func TestAPI(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+// DNS rebinding: an attacker page resolves its own domain to 127.0.0.1, so its
+// same-origin GETs arrive with no Origin header but with the attacker's Host.
+func TestRejectsNonLoopbackHost(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer((&API{Store: store, Started: time.Now()}).Handler())
+	defer ts.Close()
+
+	for _, host := range []string{"attacker.example:8787", "attacker.example", "127.0.0.1.attacker.example:8787"} {
+		req, _ := http.NewRequest("GET", ts.URL+"/api/v1/profiles", nil)
+		req.Host = host
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("host %q accepted: %d", host, resp.StatusCode)
+		}
+	}
+}
+
+func TestIsLoopbackHost(t *testing.T) {
+	allowed := []string{"127.0.0.1:8787", "localhost:8787", "LocalHost", "[::1]:8787"}
+	for _, host := range allowed {
+		if !isLoopbackHost(host) {
+			t.Errorf("loopback host %q rejected", host)
+		}
+	}
+	blocked := []string{"", "attacker.example", "localhost.attacker.example:8787", "192.168.1.10:8787", "[::2]:8787"}
+	for _, host := range blocked {
+		if isLoopbackHost(host) {
+			t.Errorf("non-loopback host %q accepted", host)
+		}
+	}
+}

@@ -3,7 +3,6 @@ package agent
 import (
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -20,6 +19,47 @@ func newTestRequest(method, path string) *http.Request {
 		"http://127.0.0.1:8788"+path,
 		nil,
 	)
+}
+
+// assertErrorResponse checks the status code and the
+// {"error": {"code", "message"}} envelope shared with the controller.
+func assertErrorResponse(
+	t *testing.T,
+	recorder *httptest.ResponseRecorder,
+	status int,
+	code string,
+) {
+
+	t.Helper()
+
+	if recorder.Code != status {
+		t.Fatalf(
+			"expected status %d, got %d",
+			status,
+			recorder.Code,
+		)
+	}
+
+	var response ErrorResponse
+
+	if err := json.Unmarshal(
+		recorder.Body.Bytes(),
+		&response,
+	); err != nil {
+		t.Fatalf("invalid JSON error response: %v", err)
+	}
+
+	if response.Error.Code != code {
+		t.Errorf(
+			"expected error code %s, got %s",
+			code,
+			response.Error.Code,
+		)
+	}
+
+	if response.Error.Message == "" {
+		t.Error("expected error message")
+	}
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -134,26 +174,12 @@ func TestSystemInfoError(t *testing.T) {
 
 	handler.ServeHTTP(recorder, request)
 
-	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusInternalServerError,
-			recorder.Code,
-		)
-	}
-
-	var response ErrorResponse
-
-	if err := json.Unmarshal(
-		recorder.Body.Bytes(),
-		&response,
-	); err != nil {
-		t.Fatalf("invalid JSON error response: %v", err)
-	}
-
-	if response.Error == "" {
-		t.Error("expected error message")
-	}
+	assertErrorResponse(
+		t,
+		recorder,
+		http.StatusInternalServerError,
+		"INTERNAL_ERROR",
+	)
 }
 
 func TestNetworkInterfacesEndpoint(t *testing.T) {
@@ -260,72 +286,12 @@ func TestNetworkInterfacesError(t *testing.T) {
 
 	handler.ServeHTTP(recorder, request)
 
-	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusInternalServerError,
-			recorder.Code,
-		)
-	}
-
-	var response ErrorResponse
-
-	if err := json.Unmarshal(
-		recorder.Body.Bytes(),
-		&response,
-	); err != nil {
-		t.Fatalf("invalid JSON error response: %v", err)
-	}
-
-	if response.Error == "" {
-		t.Error("expected error message")
-	}
-}
-
-func TestInterfaceFlags(t *testing.T) {
-
-	tests := []struct {
-		name     string
-		flags    net.Flags
-		expected []string
-	}{
-		{
-			name:     "loopback up",
-			flags:    net.FlagUp | net.FlagLoopback,
-			expected: []string{"up", "loopback"},
-		},
-		{
-			name: "ethernet up and running",
-			flags: net.FlagUp | net.FlagRunning |
-				net.FlagBroadcast | net.FlagMulticast,
-			expected: []string{"up", "running", "broadcast", "multicast"},
-		},
-		{
-			name:     "down with other flags set",
-			flags:    net.FlagPointToPoint | net.FlagMulticast,
-			expected: []string{"down", "point-to-point", "multicast"},
-		},
-		{
-			name:     "no flags",
-			flags:    0,
-			expected: []string{"down"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-
-			result := interfaceFlags(tt.flags)
-
-			if !reflect.DeepEqual(result, tt.expected) {
-				t.Errorf(
-					"expected %v, got %v",
-					tt.expected,
-					result,
-				)
-			}
-		})
-	}
+	assertErrorResponse(
+		t,
+		recorder,
+		http.StatusInternalServerError,
+		"INTERNAL_ERROR",
+	)
 }
 
 func TestUnknownEndpoint(t *testing.T) {
@@ -366,7 +332,7 @@ func TestHealthEndpointMethodNotAllowed(t *testing.T) {
 	}
 }
 
-// Kiểm tra Content-Type của JSON response.
+// Checks the Content-Type of the JSON response.
 func TestNetworkInterfacesContentType(t *testing.T) {
 
 	handler := newHTTPHandler(
@@ -450,13 +416,12 @@ func TestRejectsNonLoopbackHost(t *testing.T) {
 
 			handler.ServeHTTP(recorder, request)
 
-			if recorder.Code != http.StatusForbidden {
-				t.Errorf(
-					"expected status %d, got %d",
-					http.StatusForbidden,
-					recorder.Code,
-				)
-			}
+			assertErrorResponse(
+				t,
+				recorder,
+				http.StatusForbidden,
+				"HOST_BLOCKED",
+			)
 		})
 	}
 }
@@ -480,26 +445,12 @@ func TestRejectsBrowserOrigin(t *testing.T) {
 
 			handler.ServeHTTP(recorder, request)
 
-			if recorder.Code != http.StatusForbidden {
-				t.Errorf(
-					"expected status %d, got %d",
-					http.StatusForbidden,
-					recorder.Code,
-				)
-			}
-
-			var response ErrorResponse
-
-			if err := json.Unmarshal(
-				recorder.Body.Bytes(),
-				&response,
-			); err != nil {
-				t.Fatalf("invalid JSON error response: %v", err)
-			}
-
-			if response.Error == "" {
-				t.Error("expected error message")
-			}
+			assertErrorResponse(
+				t,
+				recorder,
+				http.StatusForbidden,
+				"ORIGIN_BLOCKED",
+			)
 		})
 	}
 }

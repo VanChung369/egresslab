@@ -15,7 +15,12 @@ type HealthResponse struct {
 }
 
 type ErrorResponse struct {
-	Error string `json:"error"`
+	Error APIError `json:"error"`
+}
+
+type APIError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 func NewHTTPHandler() http.Handler {
@@ -55,14 +60,6 @@ func newHTTPHandler(
 	return protectLoopback(mux)
 }
 
-// protectLoopback only lets local, non-browser clients through.
-//
-// Binding to 127.0.0.1 is not enough on its own: with DNS rebinding, a web
-// page on an attacker domain can resolve that domain to 127.0.0.1 and read
-// responses as same-origin. The browser still sends the attacker's hostname
-// in the Host header, so requiring a loopback Host blocks that. The agent
-// has no browser clients, so any request carrying an Origin header is
-// rejected too.
 func protectLoopback(next http.Handler) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,10 +67,11 @@ func protectLoopback(next http.Handler) http.Handler {
 		if !isLoopbackHost(r.Host) {
 			log.Printf("rejected request with host %q", r.Host)
 
-			writeJSON(
+			writeError(
 				w,
 				http.StatusForbidden,
-				ErrorResponse{Error: "host not allowed"},
+				"HOST_BLOCKED",
+				"Host not allowed",
 			)
 			return
 		}
@@ -81,10 +79,11 @@ func protectLoopback(next http.Handler) http.Handler {
 		if origin := r.Header.Get("Origin"); origin != "" {
 			log.Printf("rejected browser request from origin %q", origin)
 
-			writeJSON(
+			writeError(
 				w,
 				http.StatusForbidden,
-				ErrorResponse{Error: "browser requests are not allowed"},
+				"ORIGIN_BLOCKED",
+				"Browser requests are not allowed",
 			)
 			return
 		}
@@ -134,12 +133,11 @@ func handleSystemInfo(
 		if err != nil {
 			log.Printf("discover system info: %v", err)
 
-			writeJSON(
+			writeError(
 				w,
 				http.StatusInternalServerError,
-				ErrorResponse{
-					Error: "failed to discover system information",
-				},
+				"INTERNAL_ERROR",
+				"Failed to discover system information",
 			)
 			return
 		}
@@ -158,12 +156,11 @@ func handleNetworkInterfaces(
 		if err != nil {
 			log.Printf("discover network interfaces: %v", err)
 
-			writeJSON(
+			writeError(
 				w,
 				http.StatusInternalServerError,
-				ErrorResponse{
-					Error: "failed to discover network interfaces",
-				},
+				"INTERNAL_ERROR",
+				"Failed to discover network interfaces",
 			)
 			return
 		}
@@ -178,6 +175,21 @@ func handleNetworkInterfaces(
 
 		writeJSON(w, http.StatusOK, response)
 	}
+}
+
+func writeError(
+	w http.ResponseWriter,
+	status int,
+	code string,
+	message string,
+) {
+
+	writeJSON(w, status, ErrorResponse{
+		Error: APIError{
+			Code:    code,
+			Message: message,
+		},
+	})
 }
 
 func writeJSON(

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"runtime"
 	"strings"
@@ -158,6 +159,13 @@ func protectBrowserAccess(next http.Handler) http.Handler {
 		"https://tauri.localhost": true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Block DNS rebinding: an attacker page that resolves its own domain to
+		// 127.0.0.1 makes same-origin GETs, which carry no Origin header for the
+		// check below to catch. The browser still sends the attacker's hostname.
+		if !isLoopbackHost(r.Host) {
+			fail(w, 403, "HOST_BLOCKED", "Host not allowed")
+			return
+		}
 		origin := r.Header.Get("Origin")
 		if origin != "" {
 			if !allowed[origin] {
@@ -176,4 +184,19 @@ func protectBrowserAccess(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isLoopbackHost reports whether a Host header value ("host" or "host:port")
+// names localhost or a loopback IP address.
+func isLoopbackHost(hostport string) bool {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

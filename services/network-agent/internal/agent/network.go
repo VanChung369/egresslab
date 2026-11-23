@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"log"
 	"net"
 )
 
@@ -20,6 +21,8 @@ type NetworkInterfacesResponse struct {
 
 type interfaceProvider func() ([]NetworkInterface, error)
 
+type addressLister func(*net.Interface) ([]net.Addr, error)
+
 func discoverNetworkInterfaces() ([]NetworkInterface, error) {
 	systemInterfaces, err := net.Interfaces()
 
@@ -30,16 +33,28 @@ func discoverNetworkInterfaces() ([]NetworkInterface, error) {
 		)
 	}
 
+	return describeInterfaces(
+		systemInterfaces,
+		(*net.Interface).Addrs,
+	), nil
+}
+
+func describeInterfaces(
+	systemInterfaces []net.Interface,
+	listAddresses addressLister,
+) []NetworkInterface {
+
 	result := make([]NetworkInterface, 0, len(systemInterfaces))
 
 	for _, iface := range systemInterfaces {
-		addresses, err := iface.Addrs()
+		addresses, err := listAddresses(&iface)
 		if err != nil {
-			return nil, fmt.Errorf(
-				"list addresses for interface %q: %w",
+			log.Printf(
+				"skip interface %q: list addresses: %v",
 				iface.Name,
 				err,
 			)
+			continue
 		}
 
 		addressList := make([]string, 0, len(addresses))
@@ -60,7 +75,8 @@ func discoverNetworkInterfaces() ([]NetworkInterface, error) {
 			Addresses:    addressList,
 		})
 	}
-	return result, nil
+
+	return result
 }
 
 func interfaceFlags(flags net.Flags) []string {
