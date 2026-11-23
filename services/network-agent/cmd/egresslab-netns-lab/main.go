@@ -1,17 +1,11 @@
 package main
 
 import (
-	"bufio"
-	"context"
-	"errors"
 	"fmt"
 	"log"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
 	"github.com/VanChung369/egresslab/services/network-agent/internal/agent"
+	"github.com/VanChung369/egresslab/services/network-agent/internal/labcli"
 )
 
 func main() {
@@ -26,44 +20,20 @@ func run() (resultErr error) {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	defer stop()
+	session := labcli.Start(manager)
+	defer session.Close(&resultErr)
 
-	createCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	name, err := manager.Create(createCtx)
-	cancel()
-
+	name, err := session.CreateNamespace()
 	if err != nil {
-		return err
+		return fmt.Errorf("create lab namespace: %w", err)
 	}
-
-	defer func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cleanupCancel()
-
-		if err := manager.Delete(cleanupCtx, name); err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("cleanup %s: %w", name, err))
-			return
-		}
-
-		fmt.Printf("Deleted lab namespace: %s\n", name)
-	}()
 
 	fmt.Printf("Created lab namespace: %s\n", name)
 	fmt.Println("From another VM terminal run: sudo ip netns list")
+	fmt.Println(labcli.StopCommandsHint)
 	fmt.Println("Press Enter or Ctrl+C to clean up this namespace.")
 
-	done := make(chan struct{})
-
-	go func() {
-		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-ctx.Done():
-	}
+	session.WaitForEnter()
 
 	return nil
 }

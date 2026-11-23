@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -43,12 +42,12 @@ func NewWireGuardLab(m *NetNSLabManager, f *LabFirewall) (*WireGuardLab, error) 
 		return nil, errors.New("WireGuard lab needs matching managers")
 	}
 
-	wgPath, err := findSystemWG()
+	wgPath, err := findSystemBinary("wg")
 	if err != nil {
 		return nil, err
 	}
 
-	ipPath, err := findSystemIP()
+	ipPath, err := findSystemBinary("ip")
 	if err != nil {
 		return nil, err
 	}
@@ -79,24 +78,6 @@ func NewWireGuardLab(m *NetNSLabManager, f *LabFirewall) (*WireGuardLab, error) 
 	}
 
 	return newWireGuardLab(m, f, run), nil
-}
-
-func findSystemWG() (string, error) {
-	candidates := []string{
-		"/usr/bin/wg",
-		"/usr/sbin/wg",
-		"/bin/wg",
-		"/sbin/wg",
-	}
-
-	for _, path := range candidates {
-		info, err := os.Stat(path)
-		if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
-			return path, nil
-		}
-	}
-
-	return "", errors.New("system wg executable not found")
 }
 
 func newWireGuardLab(m *NetNSLabManager, f *LabFirewall, run wgLabCommand) *WireGuardLab {
@@ -162,11 +143,11 @@ func (l *WireGuardLab) Setup(ctx context.Context, a, b string) error {
 		return fmt.Errorf("generate B keys: %w", err)
 	}
 
-	if err := l.firewall.Seal(ctx, a); err != nil {
+	if err := l.firewall.sealIfNeeded(ctx, a); err != nil {
 		return fmt.Errorf("seal A: %w", err)
 	}
 
-	if err := l.firewall.Seal(ctx, b); err != nil {
+	if err := l.firewall.sealIfNeeded(ctx, b); err != nil {
 		return fmt.Errorf("seal B: %w", err)
 	}
 

@@ -1,17 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"log"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
 	"github.com/VanChung369/egresslab/services/network-agent/internal/agent"
+	"github.com/VanChung369/egresslab/services/network-agent/internal/labcli"
 )
 
 func main() {
@@ -36,41 +31,33 @@ func run() (resultErr error) {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	defer stop()
+	session := labcli.Start(manager)
+	defer session.Close(&resultErr)
 
-	op := context.WithoutCancel(ctx)
-
-	cleanup := func(name string) {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		if err := manager.Delete(cleanupCtx, name); err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("cleanup %s: %w", name, err))
-			return
-		}
-
-		fmt.Println("Deleted namespace:", name)
-	}
-
-	a, err := manager.Create(op)
+	a, err := session.CreateNamespace()
 	if err != nil {
 		return fmt.Errorf("create namespace A: %w", err)
 	}
-	defer cleanup(a)
 
-	b, err := manager.Create(op)
+	b, err := session.CreateNamespace()
 	if err != nil {
 		return fmt.Errorf("create namespace B: %w", err)
 	}
-	defer cleanup(b)
 
-	if err := manager.ConnectLabVeth(op, a, b); err != nil {
-		return fmt.Errorf("connect veth: %w", err)
+	steps := []struct {
+		title string
+		run   func(context.Context) error
+	}{
+		{"seal namespace A", func(ctx context.Context) error { return firewall.Seal(ctx, a) }},
+		{"seal namespace B", func(ctx context.Context) error { return firewall.Seal(ctx, b) }},
+		{"connect veth", func(ctx context.Context) error { return manager.ConnectLabVeth(ctx, a, b) }},
+		{"setup WireGuard", func(ctx context.Context) error { return wg.Setup(ctx, a, b) }},
 	}
 
-	if err := wg.Setup(op, a, b); err != nil {
-		return fmt.Errorf("setup WireGuard: %w", err)
+	for _, step := range steps {
+		if err := session.Step(step.title, step.run); err != nil {
+			return err
+		}
 	}
 
 	fmt.Printf("Namespace A: %s (ev-a=10.253.0.1, wg0=10.254.0.1)\n", a)
@@ -78,27 +65,10 @@ func run() (resultErr error) {
 	fmt.Printf("Encrypted ping: sudo ip netns exec %s ping -c 3 -W 2 10.254.0.2\n", a)
 	fmt.Printf("Handshake: sudo ip netns exec %s wg show wg0 latest-handshakes\n", a)
 	fmt.Println("Do not run wg showconf: it may reveal private keys.")
+	fmt.Println(labcli.StopCommandsHint)
 	fmt.Println("Press Enter or Ctrl+C to clean up.")
 
-	waitForEnter(ctx, bufio.NewReader(os.Stdin))
+	session.WaitForEnter()
 
 	return nil
-}
-
-func waitForEnter(ctx context.Context, reader *bufio.Reader) bool {
-	done := make(chan struct{})
-
-	go func() {
-		if _, err := reader.ReadString('\n'); err == nil {
-			close(done)
-		}
-	}()
-
-	select {
-	case <-done:
-		return ctx.Err() == nil
-
-	case <-ctx.Done():
-		return false
-	}
 }

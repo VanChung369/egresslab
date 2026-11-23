@@ -142,7 +142,7 @@ func TestNetNSLabRejectsRunningProcesses(t *testing.T) {
 	}
 
 	err = manager.Delete(context.Background(), name)
-	if err == nil || !strings.Contains(err.Error(), "has processes") {
+	if !errors.Is(err, ErrNetNSBusy) || !strings.Contains(err.Error(), "has processes") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 

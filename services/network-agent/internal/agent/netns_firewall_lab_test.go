@@ -188,19 +188,28 @@ func TestLabFirewallPeerValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectations := map[string][]string{
-		a: {
-			`input iifname "ev-a" ip saddr 10.253.0.2 ip daddr 10.253.0.1`,
-			`output oifname "ev-a" ip saddr 10.253.0.1 ip daddr 10.253.0.2`,
-		},
-		b: {
-			`input iifname "ev-b" ip saddr 10.253.0.1 ip daddr 10.253.0.2`,
-			`output oifname "ev-b" ip saddr 10.253.0.2 ip daddr 10.253.0.1`,
-		},
+	if a == b {
+		t.Fatal("both sides produced the same rules")
 	}
 
-	for script, wants := range expectations {
-		for _, want := range wants {
+	expectations := []struct {
+		script string
+		wants  []string
+	}{
+		{a, []string{
+			`input iifname "ev-a" ip saddr 10.253.0.2 ip daddr 10.253.0.1`,
+			`output oifname "ev-a" ip saddr 10.253.0.1 ip daddr 10.253.0.2`,
+		}},
+		{b, []string{
+			`input iifname "ev-b" ip saddr 10.253.0.1 ip daddr 10.253.0.2`,
+			`output oifname "ev-b" ip saddr 10.253.0.2 ip daddr 10.253.0.1`,
+		}},
+	}
+
+	for _, expectation := range expectations {
+		script := expectation.script
+
+		for _, want := range expectation.wants {
 			if !strings.Contains(script, want) {
 				t.Errorf("missing %q in:\n%s", want, script)
 			}

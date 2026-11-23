@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -44,12 +43,12 @@ func NewLabFirewall(manager *NetNSLabManager) (*LabFirewall, error) {
 		return nil, errors.New("nil namespace manager")
 	}
 
-	ipPath, err := findSystemIP()
+	ipPath, err := findSystemBinary("ip")
 	if err != nil {
 		return nil, err
 	}
 
-	nftPath, err := findSystemNFT()
+	nftPath, err := findSystemBinary("nft")
 	if err != nil {
 		return nil, err
 	}
@@ -76,24 +75,6 @@ func NewLabFirewall(manager *NetNSLabManager) (*LabFirewall, error) {
 	return newLabFirewall(manager, run), nil
 }
 
-func findSystemNFT() (string, error) {
-	candidates := []string{
-		"/usr/sbin/nft",
-		"/usr/bin/nft",
-		"/sbin/nft",
-		"/bin/nft",
-	}
-
-	for _, path := range candidates {
-		info, err := os.Stat(path)
-		if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
-			return path, nil
-		}
-	}
-
-	return "", errors.New("system nft executable not found")
-}
-
 func newLabFirewall(manager *NetNSLabManager, run nftLabRunner) *LabFirewall {
 	return &LabFirewall{
 		manager: manager,
@@ -103,6 +84,14 @@ func newLabFirewall(manager *NetNSLabManager, run nftLabRunner) *LabFirewall {
 }
 
 func (f *LabFirewall) Seal(ctx context.Context, name string) error {
+	return f.seal(ctx, name, false)
+}
+
+func (f *LabFirewall) sealIfNeeded(ctx context.Context, name string) error {
+	return f.seal(ctx, name, true)
+}
+
+func (f *LabFirewall) seal(ctx context.Context, name string, allowSealed bool) error {
 	if !labNamePattern.MatchString(name) {
 		return errors.New("invalid lab namespace name")
 	}
@@ -115,6 +104,10 @@ func (f *LabFirewall) Seal(ctx context.Context, name string) error {
 	}
 
 	if f.sealed[name] {
+		if allowSealed {
+			return nil
+		}
+
 		return fmt.Errorf("namespace %s already sealed", name)
 	}
 

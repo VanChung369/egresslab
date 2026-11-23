@@ -24,7 +24,10 @@ const (
 
 var labNamePattern = regexp.MustCompile(`^egresslab-lab-[0-9a-f]{16}$`)
 
-var ErrNetNSStateUncertain = errors.New("lab namespace state is uncertain")
+var (
+	ErrNetNSStateUncertain = errors.New("lab namespace state is uncertain")
+	ErrNetNSBusy           = errors.New("lab namespace is busy")
+)
 
 type netNSCommand func(context.Context, ...string) ([]byte, error)
 
@@ -45,7 +48,7 @@ func NewNetNSLabManager() (*NetNSLabManager, error) {
 		return nil, ErrLinuxRequired
 	}
 
-	ipPath, err := findSystemIP()
+	ipPath, err := findSystemBinary("ip")
 	if err != nil {
 		return nil, err
 	}
@@ -63,24 +66,6 @@ func NewNetNSLabManager() (*NetNSLabManager, error) {
 	}
 
 	return newNetNSLabManager(run, generateLabName, namespaceExists), nil
-}
-
-func findSystemIP() (string, error) {
-	candidates := []string{
-		"/usr/sbin/ip",
-		"/usr/bin/ip",
-		"/sbin/ip",
-		"/bin/ip",
-	}
-
-	for _, candidate := range candidates {
-		info, err := os.Stat(candidate)
-		if err == nil && info.Mode().IsRegular() {
-			return candidate, nil
-		}
-	}
-
-	return "", errors.New("trusted system ip executable not found")
 }
 
 // Generate a 64-bit random identifier.
@@ -196,7 +181,7 @@ func (m *NetNSLabManager) deleteLocked(ctx context.Context, name string) error {
 
 	// Best-effort: a process can still join between "ip netns pids" and "ip netns delete".
 	if len(bytes.TrimSpace(pids)) != 0 {
-		return fmt.Errorf("namespace %s has processes; refusing deletion", name)
+		return fmt.Errorf("namespace %s has processes; refusing deletion: %w", name, ErrNetNSBusy)
 	}
 
 	if _, err := m.run(ctx, "netns", "delete", name); err != nil {
