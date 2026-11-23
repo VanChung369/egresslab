@@ -205,7 +205,7 @@ Privileged networking exists only as **lab CLIs**. You run them by hand with `su
 | `egresslab-wireguard-lab` | WireGuard between two lab namespaces |
 | `egresslab-vpn-lab -file vpn.conf` | Real VPN egress through a sealed namespace (details below) |
 | `egresslab-wg-inspect`, `egresslab-wg-vault-lab` | Config import summary; in-memory or opt-in encrypted staging |
-| `egresslab-lab-recover [-delete]` | Report (default) or remove lab resources left by a crashed session |
+| `egresslab-lab-recover [-delete]` | Report (default) leftovers of a crashed session; `-delete` removes only orphan namespaces holding nothing but `lo`/lab veth (never one with WireGuard) and stale markers. Underlay tables are never removed automatically |
 
 `egresslab-vpn-lab` runs these steps:
 

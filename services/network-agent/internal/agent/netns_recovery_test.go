@@ -131,7 +131,6 @@ type recoveryFixture struct {
 	manager  *NetNSLabManager
 	present  map[string]bool
 	tables   []string
-	deleted  []string
 	ipCalls  [][]string
 }
 
@@ -168,9 +167,9 @@ func newRecoveryFixture(t *testing.T) *recoveryFixture {
 	}
 
 	f.tables = []string{
-		"egresslab_ul_00000000000000a1", // namespace orphaned -> removable after it is deleted
+		"egresslab_ul_00000000000000a1", // namespace orphaned -> still kept after it is deleted
 		"egresslab_ul_00000000000000a2", // namespace active -> kept
-		"egresslab_ul_00000000000000ff", // namespace long gone -> removable
+		"egresslab_ul_00000000000000ff", // namespace long gone -> reported, never removed
 	}
 
 	f.recovery = &LabRecovery{manager: f.manager, env: recoveryEnv{
@@ -185,15 +184,10 @@ func newRecoveryFixture(t *testing.T) *recoveryFixture {
 		listTables: func(context.Context) ([]string, error) {
 			return append([]string(nil), f.tables...), nil
 		},
-		deleteTable: func(_ context.Context, table string) error {
-			f.deleted = append(f.deleted, table)
-			for i, name := range f.tables {
-				if name == table {
-					f.tables = append(f.tables[:i], f.tables[i+1:]...)
-					break
-				}
-			}
-			return nil
+		// Synthetic default: every namespace holds only loopback, no WireGuard. Real recovery
+		// reads this with iproute2.
+		inspectLinks: func(context.Context, string) ([]byte, error) {
+			return []byte(`[{"ifname":"lo"}]`), nil
 		},
 	}}
 
@@ -231,7 +225,7 @@ func TestRecoveryScanIsReadOnly(t *testing.T) {
 		t.Fatalf("unexpected scan:\n got %v\nwant %v", got, want)
 	}
 
-	if len(f.ipCalls) != 0 || len(f.deleted) != 0 {
+	if len(f.ipCalls) != 0 {
 		t.Fatal("scan changed something")
 	}
 }
@@ -246,10 +240,8 @@ func TestRecoveryCleanRemovesOnlyProvenOrphans(t *testing.T) {
 
 	got := states(removed)
 	want := map[string]string{
-		recOrphan:                       LabStateOrphan,
-		recStale:                        LabStateStaleMarker,
-		"egresslab_ul_00000000000000a1": LabStateOrphanTable,
-		"egresslab_ul_00000000000000ff": LabStateOrphanTable,
+		recOrphan: LabStateOrphan,
+		recStale:  LabStateStaleMarker,
 	}
 
 	if !reflect.DeepEqual(got, want) {
@@ -262,8 +254,14 @@ func TestRecoveryCleanRemovesOnlyProvenOrphans(t *testing.T) {
 		}
 	}
 
-	if !reflect.DeepEqual(f.tables, []string{"egresslab_ul_00000000000000a2"}) {
-		t.Fatalf("active namespace lost its underlay table: %v", f.tables)
+	wantTables := []string{
+		"egresslab_ul_00000000000000a1",
+		"egresslab_ul_00000000000000a2",
+		"egresslab_ul_00000000000000ff",
+	}
+
+	if !reflect.DeepEqual(f.tables, wantTables) {
+		t.Fatalf("underlay tables must be preserved: %v", f.tables)
 	}
 
 	if _, owned := f.manager.owned[recBusy]; owned {

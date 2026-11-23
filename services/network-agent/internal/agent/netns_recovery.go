@@ -14,13 +14,13 @@ import (
 
 // Lab resource states reported by LabRecovery.Scan.
 const (
-	LabStateActive      = "active"       // owner process still running; never touched
-	LabStateOrphan      = "orphan"       // marker owner is gone; deletable with -delete
-	LabStateUnmarked    = "unmarked"     // lab-named namespace without a marker; report only
-	LabStateStaleMarker = "stale_marker" // marker whose namespace no longer exists
-	LabStateUnreadable  = "unreadable"   // marker exists but cannot be trusted; report only
-	LabStateOrphanTable = "orphan_underlay"
-	LabStateKeptTable   = "underlay_kept" // its namespace still exists; removing it would unconfine wg0
+	LabStateActive      = "active"          // owner process still running; never touched
+	LabStateOrphan      = "orphan"          // marker owner is gone; deleted by -delete only if its links are safe
+	LabStateUnmarked    = "unmarked"        // lab-named namespace without a marker; report only
+	LabStateStaleMarker = "stale_marker"    // marker whose namespace no longer exists
+	LabStateUnreadable  = "unreadable"      // marker exists but cannot be trusted; report only
+	LabStateOrphanTable = "orphan_underlay" // no named namespace; never deleted automatically
+	LabStateKeptTable   = "underlay_kept"   // its namespace still exists; removing it would unconfine wg0
 )
 
 type LabRecoveryItem struct {
@@ -34,11 +34,15 @@ type recoveryEnv struct {
 	listNamespaces func() ([]string, error)
 	alive          func(pid int, start string) bool
 	listTables     func(ctx context.Context) ([]string, error)
-	deleteTable    func(ctx context.Context, table string) error
+	inspectLinks   func(ctx context.Context, namespace string) ([]byte, error)
 }
 
 // LabRecovery finds lab resources left behind after a crash or restart. Scan never changes
-// anything; Clean removes only orphans whose owner process is provably gone.
+// anything; Clean removes only orphans whose owner process is provably gone and whose kernel
+// link inventory is safe, plus stale markers. Root underlay tables are never removed.
+//
+// Its checks can still race with root processes outside EgressLab; they do not replace an
+// inter-process lock or ownership managed by a privileged helper.
 type LabRecovery struct {
 	manager *NetNSLabManager
 	env     recoveryEnv
@@ -72,18 +76,12 @@ func NewLabRecovery(m *NetNSLabManager) (*LabRecovery, error) {
 
 			return underlayTablesFromJSON(output)
 		},
-		deleteTable: func(ctx context.Context, table string) error {
+		// Read-only: the namespace manager's validated iproute2 runner lists the links.
+		inspectLinks: func(ctx context.Context, namespace string) ([]byte, error) {
 			commandCtx, cancel := context.WithTimeout(ctx, netNSCommandTimeout)
 			defer cancel()
 
-			cmd := exec.CommandContext(commandCtx, nftPath, "-f", "-")
-			cmd.Stdin = strings.NewReader("delete table inet " + table + "\n")
-
-			if output, err := cmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("delete %s: %w: %s", table, err, strings.TrimSpace(string(output)))
-			}
-
-			return nil
+			return m.run(commandCtx, "-n", namespace, "-details", "-json", "link", "show")
 		},
 	}
 
@@ -230,9 +228,11 @@ func (r *LabRecovery) classifyLocked(name string) LabRecoveryItem {
 	return item
 }
 
-// Clean removes orphans found by a fresh scan, in a safe order: namespaces whose owner is gone
-// (refused if processes still run inside), then stale markers, then underlay tables whose
-// namespace no longer exists. Unmarked, unreadable and active resources are never touched.
+// Clean removes proven orphan namespaces with safe link inventories (refused if processes still
+// run inside), then stale ownership markers.
+//
+// Active, unmarked, unreadable and unsafe resources are preserved. Root underlay tables are
+// never removed automatically.
 func (r *LabRecovery) Clean(ctx context.Context) ([]LabRecoveryItem, error) {
 	items, err := r.Scan(ctx)
 	if err != nil {
@@ -260,7 +260,7 @@ func (r *LabRecovery) Clean(ctx context.Context) ([]LabRecoveryItem, error) {
 			continue
 		}
 
-		if err := r.manager.removeMarker(item.Name); err != nil {
+		if err := r.removeStaleMarker(item.Name); err != nil {
 			errs = append(errs, err)
 			continue
 		}
@@ -268,25 +268,10 @@ func (r *LabRecovery) Clean(ctx context.Context) ([]LabRecoveryItem, error) {
 		removed = append(removed, item)
 	}
 
-	// Rescan so tables whose namespace was just deleted become removable, and only those.
-	after, err := r.Scan(ctx)
-	if err != nil {
-		return removed, errors.Join(append(errs, err)...)
-	}
-
-	for _, item := range after {
-		if item.Kind != "underlay_table" || item.State != LabStateOrphanTable {
-			continue
-		}
-
-		if err := r.env.deleteTable(ctx, item.Name); err != nil {
-			errs = append(errs, err)
-			continue
-		}
-
-		removed = append(removed, item)
-	}
-
+	// Root-namespace underlay tables are intentionally preserved. A missing named namespace does
+	// not prove the encrypted WireGuard socket is gone: a namespace without its /run/netns name
+	// lives on while any process or file descriptor still holds it. Removing those tables needs
+	// a separate, explicitly verified offline procedure.
 	return removed, errors.Join(errs...)
 }
 
@@ -297,6 +282,12 @@ func (r *LabRecovery) deleteOrphanNamespace(ctx context.Context, name string) er
 	// Re-check under the lock: the owner must still be gone.
 	if item := r.classifyLocked(name); item.State != LabStateOrphan {
 		return fmt.Errorf("%s is no longer an orphan (%s)", name, item.State)
+	}
+
+	// The owner is gone, but the namespace may still hold a WireGuard interface or an
+	// unexpected device. Refuse unless the kernel's own link listing is safe.
+	if err := r.requireRecoverableLinksLocked(ctx, name); err != nil {
+		return fmt.Errorf("refuse orphan cleanup for %s: %w", name, err)
 	}
 
 	r.manager.owned[name] = struct{}{}
