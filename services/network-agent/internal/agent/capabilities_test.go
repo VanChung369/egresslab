@@ -130,12 +130,12 @@ func TestParseEffectiveNetAdmin(t *testing.T) {
 			want:  false,
 		},
 		{
-			name:  "docker default root capabilities",
+			name:  "root without CAP_NET_ADMIN",
 			input: "CapPrm:\t00000000a80425fb\nCapEff:\t00000000a80425fb\n",
 			want:  false,
 		},
 		{
-			name:  "docker root with --cap-add NET_ADMIN",
+			name:  "root with CAP_NET_ADMIN",
 			input: "CapPrm:\t00000000a80435fb\nCapEff:\t00000000a80435fb\n",
 			want:  true,
 		},
