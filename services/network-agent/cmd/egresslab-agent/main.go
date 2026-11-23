@@ -3,14 +3,20 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/VanChung369/egresslab/services/network-agent/internal/agent"
 )
 
 func main() {
+	token := os.Getenv("EGRESSLAB_AGENT_TOKEN")
 
-	handler := agent.NewHTTPHandler()
+	handler, err := agent.NewAuthenticatedHTTPHandler(token)
+
+	if err != nil {
+		log.Fatal("network agent configuration: ", err)
+	}
 
 	server := &http.Server{
 		Addr:              "127.0.0.1:8788",

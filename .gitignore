@@ -2,9 +2,10 @@
 node_modules/
 .svelte-kit/
 apps/desktop/build/
-apps/desktop/.env
-apps/desktop/.env.local
 apps/desktop/.vite/
+# Env
+.env
+.env.local
 # Tauri / Rust
 apps/desktop/src-tauri/target/
 # Go / state
