@@ -211,11 +211,51 @@ func TestNetNSLabLeavesUncertainNamespaceAlone(t *testing.T) {
 	}
 }
 
+func TestNetNSLabRefusesPreExistingName(t *testing.T) {
+	fake := newFakeNetNS()
+	fake.present[sampleLabName] = true
+	manager := fake.manager()
+
+	_, err := manager.Create(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(fake.calls) != 0 {
+		t.Fatalf("unexpected commands: %#v", fake.calls)
+	}
+
+	if !fake.present[sampleLabName] {
+		t.Fatal("pre-existing namespace was removed")
+	}
+
+	if err := manager.Delete(context.Background(), sampleLabName); err == nil {
+		t.Fatal("pre-existing namespace must not be claimed")
+	}
+}
+
+func TestNetNSLabStopsWhenPreCheckFails(t *testing.T) {
+	fake := newFakeNetNS()
+	fake.existsErr = errors.New("permission denied")
+
+	_, err := fake.manager().Create(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(fake.calls) != 0 {
+		t.Fatalf("unexpected commands: %#v", fake.calls)
+	}
+}
+
 func TestNetNSLabReportsUnknownStateAfterFailedCreation(t *testing.T) {
 	fake := newFakeNetNS()
 	fake.failAdd = true
-	fake.existsErr = errors.New("permission denied")
-	manager := fake.manager()
+	run := func(ctx context.Context, args ...string) ([]byte, error) {
+		fake.existsErr = errors.New("permission denied")
+		return fake.run(ctx, args...)
+	}
+	manager := newNetNSLabManager(run, func() (string, error) { return sampleLabName, nil }, fake.exists)
 
 	_, err := manager.Create(context.Background())
 	if !errors.Is(err, ErrNetNSStateUncertain) || !strings.Contains(err.Error(), "permission denied") {

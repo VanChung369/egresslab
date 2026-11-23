@@ -128,8 +128,17 @@ func (m *NetNSLabManager) Create(ctx context.Context) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, exists := m.owned[name]; exists {
+	if _, owned := m.owned[name]; owned {
 		return "", errors.New("lab namespace name already registered")
+	}
+
+	exists, err := m.exists(name)
+	if err != nil {
+		return "", fmt.Errorf("inspect namespace %s: %w", name, err)
+	}
+
+	if exists {
+		return "", fmt.Errorf("lab namespace %s already exists", name)
 	}
 
 	commandCtx, cancel := context.WithTimeout(ctx, netNSCommandTimeout)
@@ -143,11 +152,11 @@ func (m *NetNSLabManager) Create(ctx context.Context) (string, error) {
 
 	createErr := fmt.Errorf("create lab namespace %s: %w", name, err)
 
-	exists, checkErr := m.exists(name)
-	if checkErr != nil {
+	exists, err = m.exists(name)
+	if err != nil {
 		return "", errors.Join(
 			createErr,
-			fmt.Errorf("%w: cannot check whether %s exists: %w", ErrNetNSStateUncertain, name, checkErr),
+			fmt.Errorf("%w: cannot check whether %s exists: %w", ErrNetNSStateUncertain, name, err),
 		)
 	}
 
