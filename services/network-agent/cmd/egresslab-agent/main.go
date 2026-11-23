@@ -11,9 +11,7 @@ import (
 
 func main() {
 	token := os.Getenv("EGRESSLAB_AGENT_TOKEN")
-
 	handler, err := agent.NewAuthenticatedHTTPHandler(token)
-
 	if err != nil {
 		log.Fatal("network agent configuration: ", err)
 	}

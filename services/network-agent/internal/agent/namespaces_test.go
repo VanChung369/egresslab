@@ -13,29 +13,16 @@ import (
 )
 
 func TestListNamedNamespaces(t *testing.T) {
-
 	root := t.TempDir()
 
-	for _, name := range []string{
-		"vpn-b",
-		"vpn-a",
-	} {
-
+	for _, name := range []string{"vpn-b", "vpn-a"} {
 		path := filepath.Join(root, name)
-
-		if err := os.WriteFile(
-			path,
-			nil,
-			0600,
-		); err != nil {
+		if err := os.WriteFile(path, nil, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	if err := os.Mkdir(
-		filepath.Join(root, "folder"),
-		0700,
-	); err != nil {
+	if err := os.Mkdir(filepath.Join(root, "folder"), 0700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -44,27 +31,14 @@ func TestListNamedNamespaces(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expected := []NamedNamespace{
-		{Name: "vpn-a"},
-		{Name: "vpn-b"},
-	}
-
+	expected := []NamedNamespace{{Name: "vpn-a"}, {Name: "vpn-b"}}
 	if !reflect.DeepEqual(got, expected) {
-		t.Errorf(
-			"expected %+v, got %+v",
-			expected,
-			got,
-		)
+		t.Errorf("expected %+v, got %+v", expected, got)
 	}
 }
 
 func TestMissingNamespaceDirectory(t *testing.T) {
-
-	root := filepath.Join(
-		t.TempDir(),
-		"missing",
-	)
-
+	root := filepath.Join(t.TempDir(), "missing")
 	got, err := listNamedNamespaces(root)
 	if err != nil {
 		t.Fatal(err)
@@ -76,60 +50,34 @@ func TestMissingNamespaceDirectory(t *testing.T) {
 }
 
 func TestNamespaceDirectoryError(t *testing.T) {
-
-	path := filepath.Join(
-		t.TempDir(),
-		"not-a-directory",
-	)
-
-	if err := os.WriteFile(
-		path,
-		nil,
-		0600,
-	); err != nil {
+	path := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 
 	_, err := listNamedNamespaces(path)
-
 	if err == nil {
 		t.Fatal("expected directory read error")
 	}
 }
 
 func TestNamespacesEndpoint(t *testing.T) {
-
 	provider := func() ([]NamedNamespace, error) {
-		return []NamedNamespace{
-			{Name: "egresslab-profile-a"},
-		}, nil
+		return []NamedNamespace{{Name: "egresslab-profile-a"}}, nil
 	}
 
 	handler := handleNamespaces(provider)
-
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"/network/namespaces",
-		nil,
-	)
-
+	request := httptest.NewRequest(http.MethodGet, "/network/namespaces", nil)
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
-		t.Fatalf(
-			"expected 200, got %d",
-			recorder.Code,
-		)
+		t.Fatalf("expected 200, got %d", recorder.Code)
 	}
 
 	var response NamedNamespacesResponse
-
-	if err := json.Unmarshal(
-		recorder.Body.Bytes(),
-		&response,
-	); err != nil {
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
 
@@ -147,7 +95,6 @@ func TestNamespacesEndpoint(t *testing.T) {
 }
 
 func TestNamespacesUnsupported(t *testing.T) {
-
 	handler := handleNamespaces(
 		func() ([]NamedNamespace, error) {
 			return nil, ErrLinuxRequired
@@ -155,25 +102,14 @@ func TestNamespacesUnsupported(t *testing.T) {
 	)
 
 	recorder := httptest.NewRecorder()
-
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"/network/namespaces",
-		nil,
-	)
+	request := httptest.NewRequest(http.MethodGet, "/network/namespaces", nil)
 
 	handler.ServeHTTP(recorder, request)
 
-	assertErrorResponse(
-		t,
-		recorder,
-		http.StatusNotImplemented,
-		"LINUX_REQUIRED",
-	)
+	assertErrorResponse(t, recorder, http.StatusNotImplemented, "LINUX_REQUIRED")
 }
 
 func TestNamespacesUnavailable(t *testing.T) {
-
 	handler := handleNamespaces(
 		func() ([]NamedNamespace, error) {
 			return nil, errors.New("simulated filesystem error")
@@ -181,45 +117,28 @@ func TestNamespacesUnavailable(t *testing.T) {
 	)
 
 	recorder := httptest.NewRecorder()
-
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"/network/namespaces",
-		nil,
-	)
+	request := httptest.NewRequest(http.MethodGet, "/network/namespaces", nil)
 
 	handler.ServeHTTP(recorder, request)
 
-	assertErrorResponse(
-		t,
-		recorder,
-		http.StatusServiceUnavailable,
-		"NAMESPACES_UNAVAILABLE",
-	)
+	assertErrorResponse(t, recorder, http.StatusServiceUnavailable, "NAMESPACES_UNAVAILABLE")
 
-	if strings.Contains(
-		recorder.Body.String(),
-		"simulated filesystem error",
-	) {
+	if strings.Contains(recorder.Body.String(), "simulated filesystem error") {
 		t.Error("internal error was exposed")
 	}
 }
 
 func TestNamespacesRoute(t *testing.T) {
-
 	handler := newHTTPHandler(
 		nil,
 		nil,
 		nil,
 		func() ([]NamedNamespace, error) {
-			return []NamedNamespace{
-				{Name: "egresslab-profile-a"},
-			}, nil
+			return []NamedNamespace{{Name: "egresslab-profile-a"}}, nil
 		},
 	)
 
 	request := newTestRequest(http.MethodGet, "/network/namespaces")
-
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
@@ -229,11 +148,7 @@ func TestNamespacesRoute(t *testing.T) {
 	}
 
 	var response NamedNamespacesResponse
-
-	if err := json.Unmarshal(
-		recorder.Body.Bytes(),
-		&response,
-	); err != nil {
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
 
@@ -241,14 +156,12 @@ func TestNamespacesRoute(t *testing.T) {
 		Scope:      "named",
 		Namespaces: []NamedNamespace{{Name: "egresslab-profile-a"}},
 	}
-
 	if !reflect.DeepEqual(response, expected) {
 		t.Errorf("expected %+v, got %+v", expected, response)
 	}
 }
 
 func TestNamespacesRouteRejectsNonLoopbackHost(t *testing.T) {
-
 	called := false
 
 	handler := newHTTPHandler(
@@ -268,12 +181,7 @@ func TestNamespacesRouteRejectsNonLoopbackHost(t *testing.T) {
 
 	handler.ServeHTTP(recorder, request)
 
-	assertErrorResponse(
-		t,
-		recorder,
-		http.StatusForbidden,
-		"HOST_BLOCKED",
-	)
+	assertErrorResponse(t, recorder, http.StatusForbidden, "HOST_BLOCKED")
 
 	if called {
 		t.Error("namespace provider ran for a blocked request")

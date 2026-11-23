@@ -8,7 +8,6 @@ import (
 )
 
 func TestDescribeInterfaces(t *testing.T) {
-
 	systemInterfaces := []net.Interface{
 		{
 			Index: 1,
@@ -26,7 +25,6 @@ func TestDescribeInterfaces(t *testing.T) {
 	}
 
 	listAddresses := func(iface *net.Interface) ([]net.Addr, error) {
-
 		if iface.Name == "lo0" {
 			return []net.Addr{
 				&net.IPNet{
@@ -60,18 +58,12 @@ func TestDescribeInterfaces(t *testing.T) {
 			Addresses:    []string{},
 		},
 	}
-
 	if !reflect.DeepEqual(result, expected) {
-		t.Errorf(
-			"expected %+v, got %+v",
-			expected,
-			result,
-		)
+		t.Errorf("expected %+v, got %+v", expected, result)
 	}
 }
 
 func TestDescribeInterfacesSkipsFailedInterface(t *testing.T) {
-
 	systemInterfaces := []net.Interface{
 		{Index: 1, Name: "lo0", Flags: net.FlagUp | net.FlagLoopback},
 		{Index: 20, Name: "utun9", Flags: net.FlagUp | net.FlagPointToPoint},
@@ -79,7 +71,6 @@ func TestDescribeInterfacesSkipsFailedInterface(t *testing.T) {
 	}
 
 	listAddresses := func(iface *net.Interface) ([]net.Addr, error) {
-
 		if iface.Name == "utun9" {
 			return nil, errors.New("no such network interface")
 		}
@@ -88,7 +79,6 @@ func TestDescribeInterfacesSkipsFailedInterface(t *testing.T) {
 	}
 
 	result := describeInterfaces(systemInterfaces, listAddresses)
-
 	names := make([]string, 0, len(result))
 
 	for _, iface := range result {
@@ -96,16 +86,11 @@ func TestDescribeInterfacesSkipsFailedInterface(t *testing.T) {
 	}
 
 	if expected := []string{"lo0", "en0"}; !reflect.DeepEqual(names, expected) {
-		t.Errorf(
-			"expected interfaces %v, got %v",
-			expected,
-			names,
-		)
+		t.Errorf("expected interfaces %v, got %v", expected, names)
 	}
 }
 
 func TestInterfaceFlags(t *testing.T) {
-
 	tests := []struct {
 		name     string
 		flags    net.Flags
@@ -136,15 +121,9 @@ func TestInterfaceFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			result := interfaceFlags(tt.flags)
-
 			if !reflect.DeepEqual(result, tt.expected) {
-				t.Errorf(
-					"expected %v, got %v",
-					tt.expected,
-					result,
-				)
+				t.Errorf("expected %v, got %v", tt.expected, result)
 			}
 		})
 	}

@@ -25,12 +25,7 @@ type APIError struct {
 }
 
 func NewHTTPHandler() http.Handler {
-	return newHTTPHandler(
-		discoverNetworkInterfaces,
-		discoverSystemInfo,
-		discoverLinuxLinks,
-		discoverNamedNamespaces,
-	)
+	return newHTTPHandler(discoverNetworkInterfaces, discoverSystemInfo, discoverLinuxLinks, discoverNamedNamespaces)
 }
 
 func newHTTPHandler(
@@ -39,7 +34,6 @@ func newHTTPHandler(
 	listLinks linkProvider,
 	listNamespaces namespaceProvider,
 ) http.Handler {
-
 	if listInterfaces == nil {
 		listInterfaces = discoverNetworkInterfaces
 	}
@@ -59,60 +53,26 @@ func newHTTPHandler(
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", handleHealth)
-
-	mux.HandleFunc(
-		"GET /system/info",
-		handleSystemInfo(systemInfo),
-	)
-
-	mux.HandleFunc(
-		"GET /network/interfaces",
-		handleNetworkInterfaces(listInterfaces),
-	)
-
-	mux.HandleFunc(
-		"GET /network/links",
-		handleLinks(listLinks),
-	)
-
-	mux.HandleFunc(
-		"GET /capabilities",
-		handleCapabilities(discoverCapabilities),
-	)
-
-	mux.HandleFunc(
-		"GET /network/namespaces",
-		handleNamespaces(listNamespaces),
-	)
+	mux.HandleFunc("GET /system/info", handleSystemInfo(systemInfo))
+	mux.HandleFunc("GET /network/interfaces", handleNetworkInterfaces(listInterfaces))
+	mux.HandleFunc("GET /network/links", handleLinks(listLinks))
+	mux.HandleFunc("GET /capabilities", handleCapabilities(discoverCapabilities))
+	mux.HandleFunc("GET /network/namespaces", handleNamespaces(listNamespaces))
 
 	return protectLoopback(mux)
 }
 
 func protectLoopback(next http.Handler) http.Handler {
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-
 		if !isLoopbackHost(r.Host) {
 			log.Printf("rejected request with host %q", r.Host)
-
-			writeError(
-				w,
-				http.StatusForbidden,
-				"HOST_BLOCKED",
-				"Host not allowed",
-			)
+			writeError(w, http.StatusForbidden, "HOST_BLOCKED", "Host not allowed")
 			return
 		}
 
 		if origin := r.Header.Get("Origin"); origin != "" {
 			log.Printf("rejected browser request from origin %q", origin)
-
-			writeError(
-				w,
-				http.StatusForbidden,
-				"ORIGIN_BLOCKED",
-				"Browser requests are not allowed",
-			)
+			writeError(w, http.StatusForbidden, "ORIGIN_BLOCKED", "Browser requests are not allowed")
 			return
 		}
 
@@ -121,25 +81,21 @@ func protectLoopback(next http.Handler) http.Handler {
 }
 
 func isLoopbackHost(hostport string) bool {
-
 	host, _, err := net.SplitHostPort(hostport)
 	if err != nil {
 		host = hostport
 	}
 
 	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 
 	ip := net.ParseIP(host)
-
 	return ip != nil && ip.IsLoopback()
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-
 	response := HealthResponse{
 		Status:       "running",
 		Mode:         "read-only",
@@ -149,22 +105,12 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func handleSystemInfo(
-	systemInfo systemInfoProvider,
-) http.HandlerFunc {
-
+func handleSystemInfo(systemInfo systemInfoProvider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-
 		info, err := systemInfo()
 		if err != nil {
 			log.Printf("discover system info: %v", err)
-
-			writeError(
-				w,
-				http.StatusInternalServerError,
-				"INTERNAL_ERROR",
-				"Failed to discover system information",
-			)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to discover system information")
 			return
 		}
 
@@ -172,22 +118,12 @@ func handleSystemInfo(
 	}
 }
 
-func handleNetworkInterfaces(
-	listInterfaces interfaceProvider,
-) http.HandlerFunc {
-
+func handleNetworkInterfaces(listInterfaces interfaceProvider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-
 		interfaces, err := listInterfaces()
 		if err != nil {
 			log.Printf("discover network interfaces: %v", err)
-
-			writeError(
-				w,
-				http.StatusInternalServerError,
-				"INTERNAL_ERROR",
-				"Failed to discover network interfaces",
-			)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to discover network interfaces")
 			return
 		}
 
@@ -195,27 +131,16 @@ func handleNetworkInterfaces(
 			interfaces = []NetworkInterface{}
 		}
 
-		response := NetworkInterfacesResponse{
-			Interfaces: interfaces,
-		}
+		response := NetworkInterfacesResponse{Interfaces: interfaces}
 
 		writeJSON(w, http.StatusOK, response)
 	}
 }
 
-func handleLinks(
-	listLinks linkProvider,
-) http.HandlerFunc {
-
-	return func(
-		w http.ResponseWriter,
-		r *http.Request,
-	) {
-
+func handleLinks(listLinks linkProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		links, err := listLinks(r.Context())
-
 		if err != nil {
-
 			status := http.StatusServiceUnavailable
 			code := "LINKS_UNAVAILABLE"
 			message := "Failed to read Linux link information"
@@ -228,12 +153,7 @@ func handleLinks(
 
 			log.Printf("discover Linux links: %v", err)
 
-			writeError(
-				w,
-				status,
-				code,
-				message,
-			)
+			writeError(w, status, code, message)
 			return
 		}
 
@@ -241,23 +161,11 @@ func handleLinks(
 			links = []ClassifiedLink{}
 		}
 
-		writeJSON(
-			w,
-			http.StatusOK,
-			ClassifiedLinksResponse{
-				Links: links,
-			},
-		)
+		writeJSON(w, http.StatusOK, ClassifiedLinksResponse{Links: links})
 	}
 }
 
-func writeError(
-	w http.ResponseWriter,
-	status int,
-	code string,
-	message string,
-) {
-
+func writeError(w http.ResponseWriter, status int, code string, message string) {
 	writeJSON(w, status, ErrorResponse{
 		Error: APIError{
 			Code:    code,
@@ -266,16 +174,8 @@ func writeError(
 	})
 }
 
-func writeJSON(
-	w http.ResponseWriter,
-	status int,
-	value any,
-) {
-
-	w.Header().Set(
-		"Content-Type",
-		"application/json; charset=utf-8",
-	)
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 	w.WriteHeader(status)
 

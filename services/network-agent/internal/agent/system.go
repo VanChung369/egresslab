@@ -16,14 +16,9 @@ type SystemInfoResponse struct {
 type systemInfoProvider func() (SystemInfoResponse, error)
 
 func discoverSystemInfo() (SystemInfoResponse, error) {
-
 	hostname, err := os.Hostname()
-
 	if err != nil {
-		return SystemInfoResponse{}, fmt.Errorf(
-			"read hostname: %w",
-			err,
-		)
+		return SystemInfoResponse{}, fmt.Errorf("read hostname: %w", err)
 	}
 
 	return SystemInfoResponse{

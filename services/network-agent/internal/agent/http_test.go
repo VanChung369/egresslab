@@ -12,45 +12,23 @@ import (
 )
 
 func newTestRequest(method, path string) *http.Request {
-	return httptest.NewRequest(
-		method,
-		"http://127.0.0.1:8788"+path,
-		nil,
-	)
+	return httptest.NewRequest(method, "http://127.0.0.1:8788"+path, nil)
 }
 
-func assertErrorResponse(
-	t *testing.T,
-	recorder *httptest.ResponseRecorder,
-	status int,
-	code string,
-) {
-
+func assertErrorResponse(t *testing.T, recorder *httptest.ResponseRecorder, status int, code string) {
 	t.Helper()
 
 	if recorder.Code != status {
-		t.Fatalf(
-			"expected status %d, got %d",
-			status,
-			recorder.Code,
-		)
+		t.Fatalf("expected status %d, got %d", status, recorder.Code)
 	}
 
 	var response ErrorResponse
-
-	if err := json.Unmarshal(
-		recorder.Body.Bytes(),
-		&response,
-	); err != nil {
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("invalid JSON error response: %v", err)
 	}
 
 	if response.Error.Code != code {
-		t.Errorf(
-			"expected error code %s, got %s",
-			code,
-			response.Error.Code,
-		)
+		t.Errorf("expected error code %s, got %s", code, response.Error.Code)
 	}
 
 	if response.Error.Message == "" {
@@ -59,38 +37,23 @@ func assertErrorResponse(
 }
 
 func TestHealthEndpoint(t *testing.T) {
-
 	handler := NewHTTPHandler()
-
 	request := newTestRequest(http.MethodGet, "/health")
-
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusOK,
-			recorder.Code,
-		)
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
 	}
 
 	contentType := recorder.Header().Get("Content-Type")
-
 	if !strings.HasPrefix(contentType, "application/json") {
-		t.Errorf(
-			"expected JSON content type, got %s",
-			contentType,
-		)
+		t.Errorf("expected JSON content type, got %s", contentType)
 	}
 
 	var response HealthResponse
-
-	if err := json.Unmarshal(
-		recorder.Body.Bytes(),
-		&response,
-	); err != nil {
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("invalid JSON response: %v", err)
 	}
 
@@ -108,46 +71,27 @@ func TestHealthEndpoint(t *testing.T) {
 }
 
 func TestSystemInfoEndpoint(t *testing.T) {
-
 	handler := NewHTTPHandler()
-
 	request := newTestRequest(http.MethodGet, "/system/info")
-
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusOK,
-			recorder.Code,
-		)
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
 	}
 
 	var response SystemInfoResponse
-
-	if err := json.Unmarshal(
-		recorder.Body.Bytes(),
-		&response,
-	); err != nil {
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("invalid JSON response: %v", err)
 	}
 
 	if response.OS != runtime.GOOS {
-		t.Errorf(
-			"expected OS %s, got %s",
-			runtime.GOOS,
-			response.OS,
-		)
+		t.Errorf("expected OS %s, got %s", runtime.GOOS, response.OS)
 	}
 
 	if response.Architecture != runtime.GOARCH {
-		t.Errorf(
-			"expected architecture %s, got %s",
-			runtime.GOARCH,
-			response.Architecture,
-		)
+		t.Errorf("expected architecture %s, got %s", runtime.GOARCH, response.Architecture)
 	}
 
 	if response.GoVersion == "" {
@@ -156,7 +100,6 @@ func TestSystemInfoEndpoint(t *testing.T) {
 }
 
 func TestSystemInfoError(t *testing.T) {
-
 	handler := newHTTPHandler(
 		nil,
 		func() (SystemInfoResponse, error) {
@@ -167,21 +110,14 @@ func TestSystemInfoError(t *testing.T) {
 	)
 
 	request := newTestRequest(http.MethodGet, "/system/info")
-
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
 
-	assertErrorResponse(
-		t,
-		recorder,
-		http.StatusInternalServerError,
-		"INTERNAL_ERROR",
-	)
+	assertErrorResponse(t, recorder, http.StatusInternalServerError, "INTERNAL_ERROR")
 }
 
 func TestNetworkInterfacesEndpoint(t *testing.T) {
-
 	expected := []NetworkInterface{
 		{
 			Index:        1,
@@ -203,39 +139,25 @@ func TestNetworkInterfacesEndpoint(t *testing.T) {
 	)
 
 	request := newTestRequest(http.MethodGet, "/network/interfaces")
-
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusOK,
-			recorder.Code,
-		)
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
 	}
 
 	var response NetworkInterfacesResponse
-
-	if err := json.Unmarshal(
-		recorder.Body.Bytes(),
-		&response,
-	); err != nil {
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("invalid JSON response: %v", err)
 	}
 
 	if !reflect.DeepEqual(response.Interfaces, expected) {
-		t.Errorf(
-			"expected %+v, got %+v",
-			expected,
-			response.Interfaces,
-		)
+		t.Errorf("expected %+v, got %+v", expected, response.Interfaces)
 	}
 }
 
 func TestNetworkInterfacesNilBecomesEmptyArray(t *testing.T) {
-
 	handler := newHTTPHandler(
 		func() ([]NetworkInterface, error) {
 			return nil, nil
@@ -246,25 +168,16 @@ func TestNetworkInterfacesNilBecomesEmptyArray(t *testing.T) {
 	)
 
 	request := newTestRequest(http.MethodGet, "/network/interfaces")
-
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusOK,
-			recorder.Code,
-		)
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
 	}
 
 	var response map[string]json.RawMessage
-
-	if err := json.Unmarshal(
-		recorder.Body.Bytes(),
-		&response,
-	); err != nil {
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("invalid JSON response: %v", err)
 	}
 
@@ -274,7 +187,6 @@ func TestNetworkInterfacesNilBecomesEmptyArray(t *testing.T) {
 }
 
 func TestNetworkInterfacesError(t *testing.T) {
-
 	handler := newHTTPHandler(
 		func() ([]NetworkInterface, error) {
 			return nil, errors.New("simulated failure")
@@ -285,60 +197,39 @@ func TestNetworkInterfacesError(t *testing.T) {
 	)
 
 	request := newTestRequest(http.MethodGet, "/network/interfaces")
-
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
 
-	assertErrorResponse(
-		t,
-		recorder,
-		http.StatusInternalServerError,
-		"INTERNAL_ERROR",
-	)
+	assertErrorResponse(t, recorder, http.StatusInternalServerError, "INTERNAL_ERROR")
 }
 
 func TestUnknownEndpoint(t *testing.T) {
-
 	handler := NewHTTPHandler()
-
 	request := newTestRequest(http.MethodGet, "/unknown")
-
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusNotFound {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusNotFound,
-			recorder.Code,
-		)
+		t.Fatalf("expected status %d, got %d", http.StatusNotFound, recorder.Code)
 	}
 }
 
 func TestHealthEndpointMethodNotAllowed(t *testing.T) {
-
 	handler := NewHTTPHandler()
-
 	request := newTestRequest(http.MethodPost, "/health")
-
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusMethodNotAllowed {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusMethodNotAllowed,
-			recorder.Code,
-		)
+		t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, recorder.Code)
 	}
 }
 
 // Checks the Content-Type of the JSON response.
 func TestNetworkInterfacesContentType(t *testing.T) {
-
 	handler := newHTTPHandler(
 		func() ([]NetworkInterface, error) {
 			return []NetworkInterface{}, nil
@@ -349,23 +240,17 @@ func TestNetworkInterfacesContentType(t *testing.T) {
 	)
 
 	request := newTestRequest(http.MethodGet, "/network/interfaces")
-
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
 
 	contentType := recorder.Header().Get("Content-Type")
-
 	if !strings.HasPrefix(contentType, "application/json") {
-		t.Errorf(
-			"expected JSON content type, got %s",
-			contentType,
-		)
+		t.Errorf("expected JSON content type, got %s", contentType)
 	}
 }
 
 func TestAllowsLoopbackHosts(t *testing.T) {
-
 	handler := NewHTTPHandler()
 
 	hosts := []string{
@@ -378,7 +263,6 @@ func TestAllowsLoopbackHosts(t *testing.T) {
 
 	for _, host := range hosts {
 		t.Run(host, func(t *testing.T) {
-
 			request := newTestRequest(http.MethodGet, "/health")
 			request.Host = host
 
@@ -387,18 +271,13 @@ func TestAllowsLoopbackHosts(t *testing.T) {
 			handler.ServeHTTP(recorder, request)
 
 			if recorder.Code != http.StatusOK {
-				t.Errorf(
-					"expected status %d, got %d",
-					http.StatusOK,
-					recorder.Code,
-				)
+				t.Errorf("expected status %d, got %d", http.StatusOK, recorder.Code)
 			}
 		})
 	}
 }
 
 func TestRejectsNonLoopbackHost(t *testing.T) {
-
 	handler := NewHTTPHandler()
 
 	hosts := []string{
@@ -412,7 +291,6 @@ func TestRejectsNonLoopbackHost(t *testing.T) {
 
 	for _, host := range hosts {
 		t.Run(host, func(t *testing.T) {
-
 			request := newTestRequest(http.MethodGet, "/system/info")
 			request.Host = host
 
@@ -420,28 +298,17 @@ func TestRejectsNonLoopbackHost(t *testing.T) {
 
 			handler.ServeHTTP(recorder, request)
 
-			assertErrorResponse(
-				t,
-				recorder,
-				http.StatusForbidden,
-				"HOST_BLOCKED",
-			)
+			assertErrorResponse(t, recorder, http.StatusForbidden, "HOST_BLOCKED")
 		})
 	}
 }
 
 func TestRejectsBrowserOrigin(t *testing.T) {
-
 	handler := NewHTTPHandler()
-
-	origins := []string{
-		"http://attacker.example",
-		"null",
-	}
+	origins := []string{"http://attacker.example", "null"}
 
 	for _, origin := range origins {
 		t.Run(origin, func(t *testing.T) {
-
 			request := newTestRequest(http.MethodGet, "/network/interfaces")
 			request.Header.Set("Origin", origin)
 
@@ -449,12 +316,7 @@ func TestRejectsBrowserOrigin(t *testing.T) {
 
 			handler.ServeHTTP(recorder, request)
 
-			assertErrorResponse(
-				t,
-				recorder,
-				http.StatusForbidden,
-				"ORIGIN_BLOCKED",
-			)
+			assertErrorResponse(t, recorder, http.StatusForbidden, "ORIGIN_BLOCKED")
 		})
 	}
 }

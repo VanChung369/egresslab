@@ -11,11 +11,7 @@ import (
 )
 
 func TestCapabilitiesOnMac(t *testing.T) {
-
-	got := detectCapabilities(capabilityProbe{
-		OS: "darwin",
-	})
-
+	got := detectCapabilities(capabilityProbe{OS: "darwin"})
 	if got.NetworkReady {
 		t.Fatal("network must not be ready")
 	}
@@ -32,7 +28,6 @@ func TestCapabilitiesOnMac(t *testing.T) {
 }
 
 func TestCapabilitiesOnLinux(t *testing.T) {
-
 	got := detectCapabilities(capabilityProbe{
 		OS: "linux",
 
@@ -59,19 +54,13 @@ func TestCapabilitiesOnLinux(t *testing.T) {
 		"network_namespace":       "detected",
 		"cap_net_admin_effective": "missing",
 	}
-
 	if len(got.Checks) != len(expected) {
 		t.Fatalf("expected %d checks, got %d", len(expected), len(got.Checks))
 	}
 
 	for key, want := range expected {
 		if got.Checks[key].Status != want {
-			t.Errorf(
-				"%s: expected %s, got %s",
-				key,
-				want,
-				got.Checks[key].Status,
-			)
+			t.Errorf("%s: expected %s, got %s", key, want, got.Checks[key].Status)
 		}
 	}
 
@@ -81,7 +70,6 @@ func TestCapabilitiesOnLinux(t *testing.T) {
 }
 
 func TestCapabilityProbeFailures(t *testing.T) {
-
 	probeErr := errors.New("permission denied")
 
 	got := detectCapabilities(capabilityProbe{
@@ -99,7 +87,6 @@ func TestCapabilityProbeFailures(t *testing.T) {
 			return false, probeErr
 		},
 	})
-
 	if len(got.Checks) != 5 {
 		t.Fatalf("expected 5 checks, got %d", len(got.Checks))
 	}
@@ -112,7 +99,6 @@ func TestCapabilityProbeFailures(t *testing.T) {
 }
 
 func TestParseEffectiveNetAdmin(t *testing.T) {
-
 	tests := []struct {
 		name    string
 		input   string
@@ -158,9 +144,7 @@ func TestParseEffectiveNetAdmin(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			got, err := parseEffectiveNetAdmin([]byte(tt.input))
-
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -173,11 +157,8 @@ func TestParseEffectiveNetAdmin(t *testing.T) {
 }
 
 func TestCapabilitiesEndpoint(t *testing.T) {
-
 	handler := NewHTTPHandler()
-
 	request := newTestRequest(http.MethodGet, "/capabilities")
-
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
@@ -187,11 +168,7 @@ func TestCapabilitiesEndpoint(t *testing.T) {
 	}
 
 	var response CapabilitiesResponse
-
-	if err := json.Unmarshal(
-		recorder.Body.Bytes(),
-		&response,
-	); err != nil {
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
 

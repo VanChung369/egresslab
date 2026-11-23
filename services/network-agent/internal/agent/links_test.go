@@ -45,11 +45,7 @@ const linkFixture = `[
 ]`
 
 func TestParseIPLinkJSON(t *testing.T) {
-
-	links, err := parseIPLinkJSON(
-		[]byte(linkFixture),
-	)
-
+	links, err := parseIPLinkJSON([]byte(linkFixture))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,19 +56,13 @@ func TestParseIPLinkJSON(t *testing.T) {
 		"vpn-interface",
 		"virtual",
 	}
-
 	if len(links) != len(expectedCategories) {
 		t.Fatalf("unexpected link count: %d", len(links))
 	}
 
 	for i, expected := range expectedCategories {
 		if links[i].Category != expected {
-			t.Errorf(
-				"%s: got %s, want %s",
-				links[i].Name,
-				links[i].Category,
-				expected,
-			)
+			t.Errorf("%s: got %s, want %s", links[i].Name, links[i].Category, expected)
 		}
 	}
 
@@ -82,7 +72,6 @@ func TestParseIPLinkJSON(t *testing.T) {
 }
 
 func TestInvalidIPLinkJSON(t *testing.T) {
-
 	cases := []string{
 		"invalid json",
 		"null",
@@ -91,7 +80,6 @@ func TestInvalidIPLinkJSON(t *testing.T) {
 
 	for _, input := range cases {
 		_, err := parseIPLinkJSON([]byte(input))
-
 		if err == nil {
 			t.Errorf("expected error for %q", input)
 		}
@@ -99,9 +87,7 @@ func TestInvalidIPLinkJSON(t *testing.T) {
 }
 
 func TestInterfaceAdminState(t *testing.T) {
-
 	flags := net.FlagBroadcast | net.FlagMulticast
-
 	if got := interfaceAdminState(flags); got != "down" {
 		t.Errorf("expected down, got %s", got)
 	}
@@ -120,11 +106,7 @@ func TestInterfaceAdminState(t *testing.T) {
 }
 
 func TestClassifiedLinksHandler(t *testing.T) {
-
-	provider := func(
-		ctx context.Context,
-	) ([]ClassifiedLink, error) {
-
+	provider := func(ctx context.Context) ([]ClassifiedLink, error) {
 		return []ClassifiedLink{
 			{
 				Index:            1,
@@ -137,13 +119,7 @@ func TestClassifiedLinksHandler(t *testing.T) {
 	}
 
 	handler := handleLinks(provider)
-
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"/network/links",
-		nil,
-	)
-
+	request := httptest.NewRequest(http.MethodGet, "/network/links", nil)
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
@@ -153,11 +129,7 @@ func TestClassifiedLinksHandler(t *testing.T) {
 	}
 
 	var response ClassifiedLinksResponse
-
-	if err := json.Unmarshal(
-		recorder.Body.Bytes(),
-		&response,
-	); err != nil {
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
 
@@ -171,70 +143,40 @@ func TestClassifiedLinksHandler(t *testing.T) {
 }
 
 func TestClassifiedLinksUnsupported(t *testing.T) {
-
 	handler := handleLinks(
-		func(
-			context.Context,
-		) ([]ClassifiedLink, error) {
+		func(context.Context) ([]ClassifiedLink, error) {
 			return nil, ErrLinuxRequired
 		},
 	)
 
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"/network/links",
-		nil,
-	)
-
+	request := httptest.NewRequest(http.MethodGet, "/network/links", nil)
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
 
-	assertErrorResponse(
-		t,
-		recorder,
-		http.StatusNotImplemented,
-		"LINUX_REQUIRED",
-	)
+	assertErrorResponse(t, recorder, http.StatusNotImplemented, "LINUX_REQUIRED")
 }
 
 func TestClassifiedLinksFailure(t *testing.T) {
-
 	handler := handleLinks(
-		func(
-			context.Context,
-		) ([]ClassifiedLink, error) {
+		func(context.Context) ([]ClassifiedLink, error) {
 			return nil, errors.New("private internal error")
 		},
 	)
 
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"/network/links",
-		nil,
-	)
-
+	request := httptest.NewRequest(http.MethodGet, "/network/links", nil)
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
 
-	assertErrorResponse(
-		t,
-		recorder,
-		http.StatusServiceUnavailable,
-		"LINKS_UNAVAILABLE",
-	)
+	assertErrorResponse(t, recorder, http.StatusServiceUnavailable, "LINKS_UNAVAILABLE")
 
-	if strings.Contains(
-		recorder.Body.String(),
-		"private internal error",
-	) {
+	if strings.Contains(recorder.Body.String(), "private internal error") {
 		t.Error("internal error was exposed")
 	}
 }
 
 func TestNetworkLinksRoute(t *testing.T) {
-
 	handler := newHTTPHandler(
 		nil,
 		nil,
@@ -253,25 +195,16 @@ func TestNetworkLinksRoute(t *testing.T) {
 	)
 
 	request := newTestRequest(http.MethodGet, "/network/links")
-
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
-		t.Fatalf(
-			"expected status %d, got %d",
-			http.StatusOK,
-			recorder.Code,
-		)
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
 	}
 
 	var response ClassifiedLinksResponse
-
-	if err := json.Unmarshal(
-		recorder.Body.Bytes(),
-		&response,
-	); err != nil {
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("invalid JSON response: %v", err)
 	}
 
@@ -281,7 +214,6 @@ func TestNetworkLinksRoute(t *testing.T) {
 }
 
 func TestNetworkLinksRouteRejectsNonLoopbackHost(t *testing.T) {
-
 	called := false
 
 	handler := newHTTPHandler(
@@ -301,12 +233,7 @@ func TestNetworkLinksRouteRejectsNonLoopbackHost(t *testing.T) {
 
 	handler.ServeHTTP(recorder, request)
 
-	assertErrorResponse(
-		t,
-		recorder,
-		http.StatusForbidden,
-		"HOST_BLOCKED",
-	)
+	assertErrorResponse(t, recorder, http.StatusForbidden, "HOST_BLOCKED")
 
 	if called {
 		t.Error("link provider ran for a blocked request")
@@ -314,7 +241,6 @@ func TestNetworkLinksRouteRejectsNonLoopbackHost(t *testing.T) {
 }
 
 func TestParseIPLinkJSONRealOutput(t *testing.T) {
-
 	data, err := os.ReadFile("testdata/ip-link-details.json")
 	if err != nil {
 		t.Fatal(err)
@@ -356,7 +282,6 @@ func TestParseIPLinkJSONRealOutput(t *testing.T) {
 	}
 
 	for name, want := range expected {
-
 		link, ok := byName[name]
 		if !ok {
 			t.Errorf("%s: missing from parsed links", name)

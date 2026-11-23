@@ -39,88 +39,48 @@ type ipLink struct {
 	} `json:"linkinfo"`
 }
 
-type linkProvider func(
-	context.Context,
-) ([]ClassifiedLink, error)
+type linkProvider func(context.Context) ([]ClassifiedLink, error)
 
-func discoverLinuxLinks(
-	ctx context.Context,
-) ([]ClassifiedLink, error) {
-
+func discoverLinuxLinks(ctx context.Context) ([]ClassifiedLink, error) {
 	if runtime.GOOS != "linux" {
 		return nil, ErrLinuxRequired
 	}
 
-	ctx, cancel := context.WithTimeout(
-		ctx,
-		3*time.Second,
-	)
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	output, err := exec.CommandContext(
-		ctx,
-		"ip",
-		"-details",
-		"-json",
-		"link",
-		"show",
-	).Output()
-
+	output, err := exec.CommandContext(ctx, "ip", "-details", "-json", "link", "show").Output()
 	if err != nil {
-		return nil, fmt.Errorf(
-			"read link info with iproute2: %w",
-			err,
-		)
+		return nil, fmt.Errorf("read link info with iproute2: %w", err)
 	}
 
 	return parseIPLinkJSON(output)
 }
 
-func parseIPLinkJSON(
-	data []byte,
-) ([]ClassifiedLink, error) {
-
+func parseIPLinkJSON(data []byte) ([]ClassifiedLink, error) {
 	var raw []ipLink
-
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf(
-			"decode ip link output: %w",
-			err,
-		)
+		return nil, fmt.Errorf("decode ip link output: %w", err)
 	}
 
 	if raw == nil {
-		return nil, errors.New(
-			"expected a JSON array of links",
-		)
+		return nil, errors.New("expected a JSON array of links")
 	}
 
-	result := make(
-		[]ClassifiedLink,
-		0,
-		len(raw),
-	)
+	result := make([]ClassifiedLink, 0, len(raw))
 
 	for i, link := range raw {
-
 		if link.Index <= 0 || link.Name == "" {
-			return nil, fmt.Errorf(
-				"invalid link at index %d",
-				i,
-			)
+			return nil, fmt.Errorf("invalid link at index %d", i)
 		}
 
-		result = append(
-			result,
-			classifyIPLink(link),
-		)
+		result = append(result, classifyIPLink(link))
 	}
 
 	return result, nil
 }
 
 func classifyIPLink(link ipLink) ClassifiedLink {
-
 	kind := strings.ToLower(link.LinkInfo.Kind)
 	category := "unknown"
 
@@ -128,25 +88,17 @@ func classifyIPLink(link ipLink) ClassifiedLink {
 		var data struct {
 			Type string `json:"type"`
 		}
-
 		if json.Unmarshal(link.LinkInfo.Data, &data) == nil &&
 			strings.EqualFold(data.Type, "tap") {
 			kind = "tap"
 		}
 	}
 
-	if strings.EqualFold(
-		link.LinkType,
-		"loopback",
-	) || slices.Contains(link.Flags, "LOOPBACK") {
-
+	if strings.EqualFold(link.LinkType, "loopback") || slices.Contains(link.Flags, "LOOPBACK") {
 		kind = "loopback"
 		category = "loopback"
-
 	} else {
-
 		switch kind {
-
 		case "wireguard":
 			category = "vpn-interface"
 
@@ -167,7 +119,6 @@ func classifyIPLink(link ipLink) ClassifiedLink {
 	}
 
 	operState := strings.ToLower(link.OperState)
-
 	if operState == "" {
 		operState = "unknown"
 	}

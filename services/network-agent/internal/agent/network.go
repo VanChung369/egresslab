@@ -26,45 +26,27 @@ type addressLister func(*net.Interface) ([]net.Addr, error)
 
 func discoverNetworkInterfaces() ([]NetworkInterface, error) {
 	systemInterfaces, err := net.Interfaces()
-
 	if err != nil {
-		return nil, fmt.Errorf(
-			"list network interfaces: %w",
-			err,
-		)
+		return nil, fmt.Errorf("list network interfaces: %w", err)
 	}
 
-	return describeInterfaces(
-		systemInterfaces,
-		(*net.Interface).Addrs,
-	), nil
+	return describeInterfaces(systemInterfaces, (*net.Interface).Addrs), nil
 }
 
-func describeInterfaces(
-	systemInterfaces []net.Interface,
-	listAddresses addressLister,
-) []NetworkInterface {
-
+func describeInterfaces(systemInterfaces []net.Interface, listAddresses addressLister) []NetworkInterface {
 	result := make([]NetworkInterface, 0, len(systemInterfaces))
 
 	for _, iface := range systemInterfaces {
 		addresses, err := listAddresses(&iface)
 		if err != nil {
-			log.Printf(
-				"skip interface %q: list addresses: %v",
-				iface.Name,
-				err,
-			)
+			log.Printf("skip interface %q: list addresses: %v", iface.Name, err)
 			continue
 		}
 
 		addressList := make([]string, 0, len(addresses))
 
 		for _, address := range addresses {
-			addressList = append(
-				addressList,
-				address.String(),
-			)
+			addressList = append(addressList, address.String())
 		}
 
 		result = append(result, NetworkInterface{
@@ -82,7 +64,6 @@ func describeInterfaces(
 }
 
 func interfaceFlags(flags net.Flags) []string {
-
 	result := make([]string, 0, 6)
 
 	if flags&net.FlagUp != 0 {
