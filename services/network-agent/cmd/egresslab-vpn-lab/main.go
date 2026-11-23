@@ -110,7 +110,9 @@ func run(file, probeURL string) (resultErr error) {
 	var direct netip.Addr
 	directErr := session.Step("direct probe", func(ctx context.Context) error {
 		var err error
-		direct, err = probeWithRetry(ctx, session, lab, "", target, "Direct probe")
+		direct, err = probeWithRetry(session, "Direct probe", func() (netip.Addr, error) {
+			return lab.Probe(ctx, "", target)
+		})
 		return err
 	})
 
@@ -155,22 +157,36 @@ func run(file, probeURL string) (resultErr error) {
 		}
 	}
 
+	// ProbeVerified reads back the namespace firewall, the underlay table and wg0's fwmark before
+	// and after each request. A network error is retried; an isolation failure is not, and its
+	// IP is never used for a candidate.
 	var observed netip.Addr
-	if err := session.Step("probe through tunnel", func(ctx context.Context) error {
+	if err := session.Step("probe through tunnel (isolation verified before and after)", func(ctx context.Context) error {
 		var err error
-		observed, err = probeWithRetry(ctx, session, lab, ns, target, "Tunnel probe")
+		observed, err = probeWithRetry(session, "Tunnel probe", func() (netip.Addr, error) {
+			return lab.ProbeVerified(ctx, ns, target)
+		})
 		return err
 	}); err != nil {
 		if errors.Is(err, labcli.ErrInterrupted) {
 			return err
 		}
 
-		if handshake, hsErr := lab.LatestHandshake(context.Background(), ns); hsErr == nil && handshake.IsZero() {
-			err = fmt.Errorf("%w (the tunnel never completed a handshake)", err)
+		isolationFailed := errors.Is(err, agent.ErrVPNIsolationNotVerified)
+
+		if !isolationFailed {
+			if handshake, hsErr := lab.LatestHandshake(context.Background(), ns); hsErr == nil && handshake.IsZero() {
+				err = fmt.Errorf("%w (the tunnel never completed a handshake)", err)
+			}
 		}
 
 		fmt.Printf("Namespace: %s\n", ns)
-		fmt.Printf("Probe through tunnel failed: %v\n", err)
+		if isolationFailed {
+			fmt.Printf("Isolation check failed; the probe result is not trusted: %v\n", err)
+			fmt.Println("The firewall or underlay changed outside this session. Do not activate this route.")
+		} else {
+			fmt.Printf("Probe through tunnel failed: %v\n", err)
+		}
 		fmt.Println("No egress candidate was recorded. Inspect the namespace, then press Enter or Ctrl+C to clean up.")
 		session.WaitForEnter()
 
@@ -262,15 +278,13 @@ func run(file, probeURL string) (resultErr error) {
 	return nil
 }
 
-// probeWithRetry runs the egress probe up to probeAttempts times. It checks for Ctrl+C before
-// every attempt and during the back-off, so an interrupt waits for at most the probe in flight.
+// probeWithRetry runs probe up to probeAttempts times. It checks for Ctrl+C before every attempt
+// and during the back-off, so an interrupt waits for at most the probe in flight. Isolation
+// failures (ErrVPNIsolationNotVerified) are returned at once: retrying cannot make them safe.
 func probeWithRetry(
-	ctx context.Context,
 	session *labcli.Session,
-	lab *agent.VPNEgressLab,
-	namespace string,
-	target agent.EgressProbeTarget,
 	label string,
+	probe func() (netip.Addr, error),
 ) (netip.Addr, error) {
 	var lastErr error
 
@@ -279,9 +293,13 @@ func probeWithRetry(
 			return netip.Addr{}, err
 		}
 
-		ip, err := lab.Probe(ctx, namespace, target)
+		ip, err := probe()
 		if err == nil {
 			return ip, nil
+		}
+
+		if errors.Is(err, agent.ErrVPNIsolationNotVerified) {
+			return netip.Addr{}, err
 		}
 
 		lastErr = err
