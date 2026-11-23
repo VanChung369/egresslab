@@ -11,8 +11,6 @@ import (
 	"testing"
 )
 
-// newTestRequest builds a request addressed to the agent's loopback listener,
-// so it passes the Host check like a real local client would.
 func newTestRequest(method, path string) *http.Request {
 	return httptest.NewRequest(
 		method,
@@ -21,8 +19,6 @@ func newTestRequest(method, path string) *http.Request {
 	)
 }
 
-// assertErrorResponse checks the status code and the
-// {"error": {"code", "message"}} envelope shared with the controller.
 func assertErrorResponse(
 	t *testing.T,
 	recorder *httptest.ResponseRecorder,
@@ -166,6 +162,7 @@ func TestSystemInfoError(t *testing.T) {
 		func() (SystemInfoResponse, error) {
 			return SystemInfoResponse{}, errors.New("simulated failure")
 		},
+		nil,
 	)
 
 	request := newTestRequest(http.MethodGet, "/system/info")
@@ -199,6 +196,7 @@ func TestNetworkInterfacesEndpoint(t *testing.T) {
 		func() ([]NetworkInterface, error) {
 			return expected, nil
 		},
+		nil,
 		nil,
 	)
 
@@ -241,6 +239,7 @@ func TestNetworkInterfacesNilBecomesEmptyArray(t *testing.T) {
 			return nil, nil
 		},
 		nil,
+		nil,
 	)
 
 	request := newTestRequest(http.MethodGet, "/network/interfaces")
@@ -277,6 +276,7 @@ func TestNetworkInterfacesError(t *testing.T) {
 		func() ([]NetworkInterface, error) {
 			return nil, errors.New("simulated failure")
 		},
+		nil,
 		nil,
 	)
 
@@ -340,6 +340,7 @@ func TestNetworkInterfacesContentType(t *testing.T) {
 			return []NetworkInterface{}, nil
 		},
 		nil,
+		nil,
 	)
 
 	request := newTestRequest(http.MethodGet, "/network/interfaces")
@@ -391,8 +392,6 @@ func TestAllowsLoopbackHosts(t *testing.T) {
 	}
 }
 
-// A DNS-rebinding page reaches 127.0.0.1 but the browser still sends the
-// attacker's hostname, so anything that is not a loopback Host is rejected.
 func TestRejectsNonLoopbackHost(t *testing.T) {
 
 	handler := NewHTTPHandler()

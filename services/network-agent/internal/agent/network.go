@@ -11,6 +11,7 @@ type NetworkInterface struct {
 	Name         string   `json:"name"`
 	MTU          int      `json:"mtu"`
 	HardwareAddr string   `json:"hardware_addr,omitempty"`
+	AdminState   string   `json:"admin_state"`
 	Flags        []string `json:"flags"`
 	Addresses    []string `json:"addresses"`
 }
@@ -71,6 +72,7 @@ func describeInterfaces(
 			Name:         iface.Name,
 			MTU:          iface.MTU,
 			HardwareAddr: iface.HardwareAddr.String(),
+			AdminState:   interfaceAdminState(iface.Flags),
 			Flags:        interfaceFlags(iface.Flags),
 			Addresses:    addressList,
 		})
@@ -83,12 +85,8 @@ func interfaceFlags(flags net.Flags) []string {
 
 	result := make([]string, 0, 6)
 
-	// Always report the administrative state first so clients can rely on
-	// "up"/"down" being present, even when other flags are set.
 	if flags&net.FlagUp != 0 {
 		result = append(result, "up")
-	} else {
-		result = append(result, "down")
 	}
 
 	if flags&net.FlagRunning != 0 {
@@ -112,4 +110,12 @@ func interfaceFlags(flags net.Flags) []string {
 	}
 
 	return result
+}
+
+func interfaceAdminState(flags net.Flags) string {
+	if flags&net.FlagUp != 0 {
+		return "up"
+	}
+
+	return "down"
 }

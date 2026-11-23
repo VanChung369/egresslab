@@ -43,17 +43,19 @@ func TestDescribeInterfaces(t *testing.T) {
 
 	expected := []NetworkInterface{
 		{
-			Index:     1,
-			Name:      "lo0",
-			MTU:       16384,
-			Flags:     []string{"up", "loopback"},
-			Addresses: []string{"127.0.0.1/8"},
+			Index:      1,
+			Name:       "lo0",
+			MTU:        16384,
+			AdminState: "up",
+			Flags:      []string{"up", "loopback"},
+			Addresses:  []string{"127.0.0.1/8"},
 		},
 		{
 			Index:        4,
 			Name:         "en0",
 			MTU:          1500,
 			HardwareAddr: "02:00:00:00:00:01",
+			AdminState:   "up",
 			Flags:        []string{"up", "running", "broadcast"},
 			Addresses:    []string{},
 		},
@@ -68,8 +70,6 @@ func TestDescribeInterfaces(t *testing.T) {
 	}
 }
 
-// A VPN tunnel can vanish between net.Interfaces() and Addrs(). That one
-// interface is dropped; the rest of the listing still comes back.
 func TestDescribeInterfacesSkipsFailedInterface(t *testing.T) {
 
 	systemInterfaces := []net.Interface{
@@ -125,12 +125,12 @@ func TestInterfaceFlags(t *testing.T) {
 		{
 			name:     "down with other flags set",
 			flags:    net.FlagPointToPoint | net.FlagMulticast,
-			expected: []string{"down", "point-to-point", "multicast"},
+			expected: []string{"point-to-point", "multicast"},
 		},
 		{
 			name:     "no flags",
 			flags:    0,
-			expected: []string{"down"},
+			expected: []string{},
 		},
 	}
 

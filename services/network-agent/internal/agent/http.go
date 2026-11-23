@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -27,12 +28,14 @@ func NewHTTPHandler() http.Handler {
 	return newHTTPHandler(
 		discoverNetworkInterfaces,
 		discoverSystemInfo,
+		discoverLinuxLinks,
 	)
 }
 
 func newHTTPHandler(
 	listInterfaces interfaceProvider,
 	systemInfo systemInfoProvider,
+	listLinks linkProvider,
 ) http.Handler {
 
 	if listInterfaces == nil {
@@ -41,6 +44,10 @@ func newHTTPHandler(
 
 	if systemInfo == nil {
 		systemInfo = discoverSystemInfo
+	}
+
+	if listLinks == nil {
+		listLinks = discoverLinuxLinks
 	}
 
 	mux := http.NewServeMux()
@@ -55,6 +62,11 @@ func newHTTPHandler(
 	mux.HandleFunc(
 		"GET /network/interfaces",
 		handleNetworkInterfaces(listInterfaces),
+	)
+
+	mux.HandleFunc(
+		"GET /network/links",
+		handleLinks(listLinks),
 	)
 
 	return protectLoopback(mux)
@@ -92,8 +104,6 @@ func protectLoopback(next http.Handler) http.Handler {
 	})
 }
 
-// isLoopbackHost reports whether a Host header value ("host" or
-// "host:port") names localhost or a loopback IP address.
 func isLoopbackHost(hostport string) bool {
 
 	host, _, err := net.SplitHostPort(hostport)
@@ -174,6 +184,54 @@ func handleNetworkInterfaces(
 		}
 
 		writeJSON(w, http.StatusOK, response)
+	}
+}
+
+func handleLinks(
+	listLinks linkProvider,
+) http.HandlerFunc {
+
+	return func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+
+		links, err := listLinks(r.Context())
+
+		if err != nil {
+
+			status := http.StatusServiceUnavailable
+			code := "LINKS_UNAVAILABLE"
+			message := "Failed to read Linux link information"
+
+			if errors.Is(err, ErrLinuxRequired) {
+				status = http.StatusNotImplemented
+				code = "LINUX_REQUIRED"
+				message = "Link classification requires Linux"
+			}
+
+			log.Printf("discover Linux links: %v", err)
+
+			writeError(
+				w,
+				status,
+				code,
+				message,
+			)
+			return
+		}
+
+		if links == nil {
+			links = []ClassifiedLink{}
+		}
+
+		writeJSON(
+			w,
+			http.StatusOK,
+			ClassifiedLinksResponse{
+				Links: links,
+			},
+		)
 	}
 }
 
