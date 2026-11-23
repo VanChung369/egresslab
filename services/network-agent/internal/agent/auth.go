@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
@@ -12,35 +11,34 @@ import (
 const agentTokenBytes = 32
 
 func NewAuthenticatedHTTPHandler(token string) (http.Handler, error) {
-	if err := validateAgentToken(token); err != nil {
+	key, err := parseAgentToken(token)
+	if err != nil {
 		return nil, err
 	}
 
 	return requireBearerToken(
 		NewHTTPHandler(),
-		token,
+		key,
 	), nil
 }
 
-func validateAgentToken(token string) error {
-	data, err := hex.DecodeString(token)
+func parseAgentToken(token string) ([]byte, error) {
+	key, err := hex.DecodeString(token)
 
-	if err != nil || len(data) != agentTokenBytes {
-		return errors.New(
+	if err != nil || len(key) != agentTokenBytes {
+		return nil, errors.New(
 			"EGRESSLAB_AGENT_TOKEN must contain " +
 				"64 hex characters (32 bytes)",
 		)
 	}
 
-	return nil
+	return key, nil
 }
 
 func requireBearerToken(
 	next http.Handler,
-	secret string,
+	key []byte,
 ) http.Handler {
-
-	expected := sha256.Sum256([]byte(secret))
 
 	return http.HandlerFunc(func(
 		w http.ResponseWriter,
@@ -49,35 +47,10 @@ func requireBearerToken(
 
 		w.Header().Set("Cache-Control", "no-store")
 
-		values := r.Header.Values("Authorization")
-
-		supplied := ""
-
-		if len(values) == 1 {
-			scheme, credential, found := strings.Cut(
-				values[0],
-				" ",
-			)
-
-			if found &&
-				strings.EqualFold(scheme, "Bearer") &&
-				credential != "" &&
-				!strings.ContainsAny(
-					credential,
-					" \t\r\n",
-				) {
-
-				supplied = credential
-			}
-		}
-
-		// Compare fixed-size SHA-256 digests.
-		actual := sha256.Sum256([]byte(supplied))
-
-		if subtle.ConstantTimeCompare(
-			actual[:],
-			expected[:],
-		) != 1 {
+		if !hasBearerToken(
+			r.Header.Values("Authorization"),
+			key,
+		) {
 
 			w.Header().Set(
 				"WWW-Authenticate",
@@ -97,4 +70,23 @@ func requireBearerToken(
 		next.ServeHTTP(w, r)
 	})
 
+}
+
+func hasBearerToken(values []string, key []byte) bool {
+	if len(values) != 1 {
+		return false
+	}
+
+	scheme, credential, found := strings.Cut(values[0], " ")
+
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return false
+	}
+
+	supplied, err := parseAgentToken(credential)
+	if err != nil {
+		return false
+	}
+
+	return subtle.ConstantTimeCompare(supplied, key) == 1
 }

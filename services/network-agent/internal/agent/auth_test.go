@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +21,7 @@ func TestAuthenticationConfiguration(t *testing.T) {
 
 	for _, token := range invalid {
 		if _, err := NewAuthenticatedHTTPHandler(token); err == nil {
-			t.Error("expected invalid token configuration to fail")
+			t.Errorf("token %q accepted", token)
 		}
 	}
 }
@@ -63,6 +64,22 @@ func TestAuthenticatedHTTPHandler(t *testing.T) {
 			name:          "valid token",
 			authorization: []string{"Bearer " + token},
 			wantStatus:    http.StatusOK,
+		},
+		{
+			name:          "uppercase token",
+			authorization: []string{"Bearer " + strings.ToUpper(token)},
+			wantStatus:    http.StatusOK,
+		},
+		{
+			name:          "lowercase scheme",
+			authorization: []string{"bearer " + token},
+			wantStatus:    http.StatusOK,
+		},
+		{
+			name:          "token with trailing whitespace",
+			authorization: []string{"Bearer " + token + " "},
+			wantStatus:    http.StatusUnauthorized,
+			wantCode:      "UNAUTHORIZED",
 		},
 		{
 			name: "duplicate authorization headers",
@@ -161,7 +178,7 @@ func TestAuthenticatedHTTPHandler(t *testing.T) {
 
 func TestAuthRejectsRequestBeforeNextHandler(t *testing.T) {
 
-	token := strings.Repeat("ab", 32)
+	key := bytes.Repeat([]byte{0xab}, agentTokenBytes)
 
 	calls := 0
 
@@ -173,7 +190,7 @@ func TestAuthRejectsRequestBeforeNextHandler(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := requireBearerToken(next, token)
+	handler := requireBearerToken(next, key)
 
 	request := httptest.NewRequest(
 		http.MethodGet,
@@ -200,5 +217,58 @@ func TestAuthRejectsRequestBeforeNextHandler(t *testing.T) {
 
 	if recorder.Header().Get("WWW-Authenticate") == "" {
 		t.Error("missing WWW-Authenticate header")
+	}
+}
+
+func TestAuthAcceptsConfiguredUppercaseToken(t *testing.T) {
+
+	handler, err := NewAuthenticatedHTTPHandler(
+		strings.Repeat("AB", 32),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"http://127.0.0.1:8788/health",
+		nil,
+	)
+
+	request.Header.Set(
+		"Authorization",
+		"Bearer "+strings.Repeat("ab", 32),
+	)
+
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+}
+
+func TestAuthRejectsEmptyKey(t *testing.T) {
+
+	handler := requireBearerToken(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}),
+		nil,
+	)
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"http://127.0.0.1:8788/health",
+		nil,
+	)
+
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", recorder.Code)
 	}
 }
