@@ -116,6 +116,13 @@ func run(file, probeURL string) (resultErr error) {
 		return directErr
 	}
 
+	if directErr != nil {
+		return fmt.Errorf(
+			"cannot establish direct WSL egress baseline: %w",
+			directErr,
+		)
+	}
+
 	ns, err := session.CreateNamespace()
 	if err != nil {
 		return fmt.Errorf("create lab namespace: %w", err)
@@ -182,8 +189,20 @@ func run(file, probeURL string) (resultErr error) {
 		return err
 	}
 
-	if directErr == nil && observed == direct {
-		return errors.New("observed egress IP equals the VM's direct egress IP; traffic is not using the VPN")
+	if err := agent.ValidateVPNLabHandshake(
+		time.Now(),
+		handshake,
+	); err != nil {
+		return fmt.Errorf(
+			"tunnel verification failed: %w",
+			err,
+		)
+	}
+
+	if observed == direct {
+		return errors.New(
+			"observed egress IP equals WSL direct egress IP",
+		)
 	}
 
 	status, err := registry.Evaluate(agent.EgressObservation{
@@ -200,18 +219,15 @@ func run(file, probeURL string) (resultErr error) {
 		return fmt.Errorf("pin egress IP: %w", err)
 	}
 
-	differs := "unknown (direct probe failed)"
-	if directErr == nil {
-		differs = "yes"
-	}
-
 	candidate, _ := json.Marshal(status)
 
 	fmt.Printf("Namespace: %s (only lo and wg0; IPv4 default route via wg0; IPv6 and DNS port 53 explicitly dropped)\n", ns)
 	fmt.Println("Underlay: encrypted UDP from wg0 is marked and may only reach the configured endpoint (VM-side nft table)")
 	fmt.Printf("Tunnel handshake: %s ago\n", time.Since(handshake).Round(time.Second))
 	fmt.Printf("Observed egress IPv4: %s (via %s)\n", observed, target.URL)
-	fmt.Printf("Differs from the VM's direct egress IP: %s\n", differs)
+	fmt.Println(
+		"Differs from WSL direct egress IP: yes",
+	)
 	fmt.Printf("Candidate: %s\n", candidate)
 	fmt.Printf("Check: sudo ip netns exec %s wg show wg0 latest-handshakes\n", ns)
 	fmt.Println(labcli.StopCommandsHint)
