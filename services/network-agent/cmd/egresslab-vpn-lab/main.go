@@ -17,6 +17,11 @@ import (
 	"github.com/VanChung369/egresslab/services/network-agent/internal/labcli"
 )
 
+const (
+	probeAttempts   = 3
+	probeRetryDelay = 2 * time.Second
+)
+
 func main() {
 	if len(os.Args) == 3 && os.Args[1] == "internal-probe" {
 		os.Exit(probe(os.Args[2]))
@@ -130,13 +135,33 @@ func run(file, probeURL string) (resultErr error) {
 
 	var observed netip.Addr
 	if err := session.Step("probe through tunnel", func(ctx context.Context) error {
-		ip, err := lab.Probe(ctx, ns, target)
-		observed = ip
+		var err error
+		for attempt := 1; attempt <= probeAttempts; attempt++ {
+			if observed, err = lab.Probe(ctx, ns, target); err == nil || session.Err() != nil {
+				return err
+			}
+
+			if attempt < probeAttempts {
+				fmt.Printf("Probe attempt %d failed; retrying.\n", attempt)
+				time.Sleep(probeRetryDelay)
+			}
+		}
+
 		return err
 	}); err != nil {
-		if handshake, hsErr := lab.LatestHandshake(context.Background(), ns); hsErr == nil && handshake.IsZero() {
-			return fmt.Errorf("%w (the tunnel never completed a handshake)", err)
+		if errors.Is(err, labcli.ErrInterrupted) {
+			return err
 		}
+
+		if handshake, hsErr := lab.LatestHandshake(context.Background(), ns); hsErr == nil && handshake.IsZero() {
+			err = fmt.Errorf("%w (the tunnel never completed a handshake)", err)
+		}
+
+		fmt.Printf("Namespace: %s\n", ns)
+		fmt.Printf("Probe through tunnel failed: %v\n", err)
+		fmt.Println("No egress candidate was recorded. Inspect the namespace, then press Enter or Ctrl+C to clean up.")
+		session.WaitForEnter()
+
 		return err
 	}
 
