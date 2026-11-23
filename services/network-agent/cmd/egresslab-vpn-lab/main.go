@@ -105,10 +105,12 @@ func run(file, probeURL string) (resultErr error) {
 	session := labcli.Start(manager)
 	defer session.Close(&resultErr)
 
+	// The baseline is required: without it the lab cannot show that the tunnel changes egress.
+	// It gets the same retries as the tunnel probe, so one transient failure does not end the run.
 	var direct netip.Addr
 	directErr := session.Step("direct probe", func(ctx context.Context) error {
-		ip, err := lab.Probe(ctx, "", target)
-		direct = ip
+		var err error
+		direct, err = probeWithRetry(ctx, session, lab, "", target, "Direct probe")
 		return err
 	})
 
@@ -118,8 +120,9 @@ func run(file, probeURL string) (resultErr error) {
 
 	if directErr != nil {
 		return fmt.Errorf(
-			"cannot establish direct WSL egress baseline: %w",
-			directErr,
+			"cannot establish the host's direct egress baseline after %d attempts "+
+				"(the host must reach %s directly): %w",
+			probeAttempts, target.URL, directErr,
 		)
 	}
 
@@ -128,7 +131,7 @@ func run(file, probeURL string) (resultErr error) {
 		return fmt.Errorf("create lab namespace: %w", err)
 	}
 
-	// Removes wg0 first, then the VM-side underlay table (retried after namespace deletion).
+	// Removes wg0 first, then the host-side underlay table (retried after namespace deletion).
 	session.OnCleanup("tunnel and underlay policy for "+ns, func(ctx context.Context) error {
 		return lab.Disconnect(ctx, ns)
 	})
@@ -155,17 +158,7 @@ func run(file, probeURL string) (resultErr error) {
 	var observed netip.Addr
 	if err := session.Step("probe through tunnel", func(ctx context.Context) error {
 		var err error
-		for attempt := 1; attempt <= probeAttempts; attempt++ {
-			if observed, err = lab.Probe(ctx, ns, target); err == nil || session.Err() != nil {
-				return err
-			}
-
-			if attempt < probeAttempts {
-				fmt.Printf("Probe attempt %d failed; retrying.\n", attempt)
-				time.Sleep(probeRetryDelay)
-			}
-		}
-
+		observed, err = probeWithRetry(ctx, session, lab, ns, target, "Tunnel probe")
 		return err
 	}); err != nil {
 		if errors.Is(err, labcli.ErrInterrupted) {
@@ -189,19 +182,18 @@ func run(file, probeURL string) (resultErr error) {
 		return err
 	}
 
-	if err := agent.ValidateVPNLabHandshake(
-		time.Now(),
-		handshake,
-	); err != nil {
-		return fmt.Errorf(
-			"tunnel verification failed: %w",
-			err,
-		)
+	// The successful probe already proves a live session (the namespace has only lo and wg0), so
+	// an odd handshake timestamp, usually a WSL clock jump, is reported but does not end the run.
+	if err := agent.ValidateVPNLabHandshake(time.Now(), handshake); err != nil {
+		fmt.Printf("Warning: %v\n", err)
 	}
 
 	if observed == direct {
-		return errors.New(
-			"observed egress IP equals WSL direct egress IP",
+		return fmt.Errorf(
+			"observed egress IP %s equals the host's direct egress IP: traffic may not be using "+
+				"the tunnel, or the host itself already exits through the same VPN or provider "+
+				"(disconnect any VPN on the host, for example on Windows, and run the lab again)",
+			observed,
 		)
 	}
 
@@ -222,12 +214,10 @@ func run(file, probeURL string) (resultErr error) {
 	candidate, _ := json.Marshal(status)
 
 	fmt.Printf("Namespace: %s (only lo and wg0; IPv4 default route via wg0; IPv6 and DNS port 53 explicitly dropped)\n", ns)
-	fmt.Println("Underlay: encrypted UDP from wg0 is marked and may only reach the configured endpoint (VM-side nft table)")
+	fmt.Println("Underlay: encrypted UDP from wg0 is marked and may only reach the configured endpoint (host-side nft table)")
 	fmt.Printf("Tunnel handshake: %s ago\n", time.Since(handshake).Round(time.Second))
 	fmt.Printf("Observed egress IPv4: %s (via %s)\n", observed, target.URL)
-	fmt.Println(
-		"Differs from WSL direct egress IP: yes",
-	)
+	fmt.Printf("Differs from the host's direct egress IP (%s): yes\n", direct)
 	fmt.Printf("Candidate: %s\n", candidate)
 	fmt.Printf("Check: sudo ip netns exec %s wg show wg0 latest-handshakes\n", ns)
 	fmt.Println(labcli.StopCommandsHint)
@@ -270,6 +260,42 @@ func run(file, probeURL string) (resultErr error) {
 	session.WaitForEnter()
 
 	return nil
+}
+
+// probeWithRetry runs the egress probe up to probeAttempts times. It checks for Ctrl+C before
+// every attempt and during the back-off, so an interrupt waits for at most the probe in flight.
+func probeWithRetry(
+	ctx context.Context,
+	session *labcli.Session,
+	lab *agent.VPNEgressLab,
+	namespace string,
+	target agent.EgressProbeTarget,
+	label string,
+) (netip.Addr, error) {
+	var lastErr error
+
+	for attempt := 1; attempt <= probeAttempts; attempt++ {
+		if err := session.Err(); err != nil {
+			return netip.Addr{}, err
+		}
+
+		ip, err := lab.Probe(ctx, namespace, target)
+		if err == nil {
+			return ip, nil
+		}
+
+		lastErr = err
+
+		if attempt < probeAttempts {
+			fmt.Printf("%s attempt %d failed (%v); retrying.\n", label, attempt, err)
+
+			if err := session.Pause(probeRetryDelay); err != nil {
+				return netip.Addr{}, err
+			}
+		}
+	}
+
+	return netip.Addr{}, lastErr
 }
 
 func labProfileID() (string, error) {

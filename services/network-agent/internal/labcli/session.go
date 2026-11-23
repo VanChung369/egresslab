@@ -126,10 +126,29 @@ func (s *Session) Step(title string, run func(context.Context) error) error {
 	}
 
 	if err := run(context.WithoutCancel(s.ctx)); err != nil {
+		// A step that fails while the user is interrupting is reported as an interruption, so
+		// Close turns it into a clean exit instead of a fatal error.
+		if s.Err() != nil {
+			return fmt.Errorf("%s: %w", title, errors.Join(err, ErrInterrupted))
+		}
+
 		return fmt.Errorf("%s: %w", title, err)
 	}
 
 	return s.Err()
+}
+
+// Pause waits for d, returning ErrInterrupted as soon as the session is interrupted.
+func (s *Session) Pause(d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return s.Err()
+	case <-s.ctx.Done():
+		return ErrInterrupted
+	}
 }
 
 func (s *Session) WaitForEnter() bool {

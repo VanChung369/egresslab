@@ -322,3 +322,46 @@ func TestCleanupFailureIsReported(t *testing.T) {
 		t.Fatalf("cleanup failure hidden: %v", result)
 	}
 }
+
+func TestStepFailureDuringInterruptIsAnInterruption(t *testing.T) {
+	session, cancel, _ := testSession(strings.NewReader(""), &fakeManager{})
+
+	probeErr := errors.New("egress probe failed: TLS handshake timeout")
+	err := session.Step("direct probe", func(context.Context) error {
+		cancel()
+		return probeErr
+	})
+
+	if !errors.Is(err, ErrInterrupted) || !errors.Is(err, probeErr) {
+		t.Fatalf("expected an interruption that keeps the cause, got %v", err)
+	}
+
+	result := err
+	session.Close(&result)
+
+	if result != nil {
+		t.Fatalf("interrupted run reported as failure: %v", result)
+	}
+}
+
+func TestPauseStopsOnInterrupt(t *testing.T) {
+	session, cancel, _ := testSession(strings.NewReader(""), &fakeManager{})
+
+	if err := session.Pause(time.Millisecond); err != nil {
+		t.Fatalf("uninterrupted pause failed: %v", err)
+	}
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	if err := session.Pause(time.Minute); !errors.Is(err, ErrInterrupted) {
+		t.Fatalf("expected interruption, got %v", err)
+	}
+
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("pause ignored the interrupt")
+	}
+}
