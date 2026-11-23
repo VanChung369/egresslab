@@ -180,23 +180,26 @@ func TestNetNSLabDoesNotClaimFailedCreation(t *testing.T) {
 	}
 }
 
-func TestNetNSLabRollsBackCreatedNamespaceOnError(t *testing.T) {
+func TestNetNSLabLeavesUncertainNamespaceAlone(t *testing.T) {
 	fake := newFakeNetNS()
 	fake.failAdd = true
 	manager := fake.manager()
 
-	if _, err := manager.Create(context.Background()); err == nil {
-		t.Fatal("expected creation error")
+	_, err := manager.Create(context.Background())
+	if !errors.Is(err, ErrNetNSStateUncertain) {
+		t.Fatalf("expected uncertain state error, got %v", err)
 	}
 
-	if fake.present[sampleLabName] {
-		t.Fatal("namespace was left behind")
+	if !strings.Contains(err.Error(), sampleLabName) {
+		t.Errorf("error does not name the namespace: %v", err)
+	}
+
+	if !fake.present[sampleLabName] {
+		t.Fatal("namespace with uncertain ownership was removed")
 	}
 
 	expected := [][]string{
 		{"netns", "add", sampleLabName},
-		{"netns", "pids", sampleLabName},
-		{"netns", "delete", sampleLabName},
 	}
 
 	if !reflect.DeepEqual(fake.calls, expected) {
@@ -204,29 +207,7 @@ func TestNetNSLabRollsBackCreatedNamespaceOnError(t *testing.T) {
 	}
 
 	if err := manager.Delete(context.Background(), sampleLabName); err == nil {
-		t.Fatal("rolled back namespace must not stay owned")
-	}
-}
-
-func TestNetNSLabKeepsOwnershipWhenRollbackFails(t *testing.T) {
-	fake := newFakeNetNS()
-	fake.failAdd = true
-	fake.pidsOut = "123\n"
-	manager := fake.manager()
-
-	_, err := manager.Create(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "roll back") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	fake.pidsOut = ""
-
-	if err := manager.Delete(context.Background(), sampleLabName); err != nil {
-		t.Fatal(err)
-	}
-
-	if fake.present[sampleLabName] {
-		t.Fatal("namespace was left behind")
+		t.Fatal("namespace with uncertain ownership must not be claimed")
 	}
 }
 
@@ -234,10 +215,19 @@ func TestNetNSLabReportsUnknownStateAfterFailedCreation(t *testing.T) {
 	fake := newFakeNetNS()
 	fake.failAdd = true
 	fake.existsErr = errors.New("permission denied")
+	manager := fake.manager()
 
-	_, err := fake.manager().Create(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+	_, err := manager.Create(context.Background())
+	if !errors.Is(err, ErrNetNSStateUncertain) || !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(fake.calls) != 1 {
+		t.Fatalf("unexpected commands: %#v", fake.calls)
+	}
+
+	if err := manager.Delete(context.Background(), sampleLabName); err == nil {
+		t.Fatal("namespace with uncertain ownership must not be claimed")
 	}
 }
 

@@ -24,6 +24,8 @@ const (
 
 var labNamePattern = regexp.MustCompile(`^egresslab-lab-[0-9a-f]{16}$`)
 
+var ErrNetNSStateUncertain = errors.New("lab namespace state is uncertain")
+
 type netNSCommand func(context.Context, ...string) ([]byte, error)
 
 type labNameGenerator func() (string, error)
@@ -143,20 +145,17 @@ func (m *NetNSLabManager) Create(ctx context.Context) (string, error) {
 
 	exists, checkErr := m.exists(name)
 	if checkErr != nil {
-		return "", errors.Join(createErr, fmt.Errorf("check namespace %s: %w", name, checkErr))
+		return "", errors.Join(
+			createErr,
+			fmt.Errorf("%w: cannot check whether %s exists: %w", ErrNetNSStateUncertain, name, checkErr),
+		)
 	}
 
-	if !exists {
-		return "", createErr
-	}
-
-	m.owned[name] = struct{}{}
-
-	rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), netNSCommandTimeout)
-	defer rollbackCancel()
-
-	if err := m.deleteLocked(rollbackCtx, name); err != nil {
-		return "", errors.Join(createErr, fmt.Errorf("roll back namespace %s: %w", name, err))
+	if exists {
+		return "", errors.Join(
+			createErr,
+			fmt.Errorf("%w: %s exists but is not owned; inspect it before removing it manually", ErrNetNSStateUncertain, name),
+		)
 	}
 
 	return "", createErr
