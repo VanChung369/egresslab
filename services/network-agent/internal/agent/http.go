@@ -74,6 +74,11 @@ func newHTTPHandler(
 		handleCapabilities(discoverCapabilities),
 	)
 
+	mux.HandleFunc(
+		"GET /network/namespaces",
+		handleNamespaces(discoverNamedNamespaces),
+	)
+
 	return protectLoopback(mux)
 }
 
