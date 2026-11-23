@@ -232,13 +232,15 @@ The lab code's unit tests use fake command runners. Only a run on the VM exercis
 ```bash
 cd services/network-agent
 go test ./...
-go build -o /tmp/egresslab-vpn-lab ./cmd/egresslab-vpn-lab
-go build -o /tmp/egresslab-lab-recover ./cmd/egresslab-lab-recover
-sudo /tmp/egresslab-vpn-lab -file /path/to/vpn.conf   # IPv4 endpoint, AllowedIPs 0.0.0.0/0
-sudo /tmp/egresslab-lab-recover                         # should report nothing after a clean exit
+go build -o ~/.local/bin/egresslab-vpn-lab ./cmd/egresslab-vpn-lab
+go build -o ~/.local/bin/egresslab-lab-recover ./cmd/egresslab-lab-recover
+sudo ~/.local/bin/egresslab-vpn-lab -file ~/.config/egresslab/private/vpn.conf   # IPv4 endpoint, AllowedIPs 0.0.0.0/0
+sudo ~/.local/bin/egresslab-lab-recover                                          # should report nothing after a clean exit
 ```
 
-The firewall readback tests use a synthetic `nft -j` sample. To replace it with a real capture, run the command below from a second terminal while a lab is sealed, and save the output as `internal/agent/testdata/nft-lab-sealed.json`:
+On WSL, avoid `/tmp` for these binaries: WSL empties it at every distro boot, and it stops the distro when idle. Keep `vpn.conf` on the Linux filesystem, not under `/mnt/<drive>`: files there always show mode 777, so the config is rejected.
+
+The firewall readback tests use real `nft -j` captures from nft 1.0.2 (Ubuntu 22.04 on WSL2). These are `testdata/nft-lab-sealed.json`, taken right after Seal, and `testdata/nft-lab-probe-permitted.json`, taken after PermitEgressProbe. To refresh them for another nft version, run this from a second terminal while a lab is sealed:
 
 ```bash
 sudo ip netns exec <egresslab-lab-...> nft -j list ruleset

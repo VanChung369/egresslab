@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// testdata/nft-lab-sealed.json is SYNTHETIC: hand-built in the shape of `nft -j list ruleset`.
-// Replace it with a real capture from the Linux VM after sealing a lab namespace:
+// testdata/nft-lab-sealed.json is a REAL capture (nft 1.0.2, Ubuntu 22.04 on WSL2) of a lab
+// namespace right after Seal, taken during an egresslab-firewall-lab run with:
 //
 //	sudo ip netns exec <egresslab-lab-...> nft -j list ruleset
 //
