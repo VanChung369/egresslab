@@ -249,6 +249,7 @@ func TestNetworkLinksRoute(t *testing.T) {
 				},
 			}, nil
 		},
+		nil,
 	)
 
 	request := newTestRequest(http.MethodGet, "/network/links")
@@ -290,6 +291,7 @@ func TestNetworkLinksRouteRejectsNonLoopbackHost(t *testing.T) {
 			called = true
 			return nil, nil
 		},
+		nil,
 	)
 
 	request := newTestRequest(http.MethodGet, "/network/links")

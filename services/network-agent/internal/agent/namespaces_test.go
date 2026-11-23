@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -163,12 +164,12 @@ func TestNamespacesUnsupported(t *testing.T) {
 
 	handler.ServeHTTP(recorder, request)
 
-	if recorder.Code != http.StatusNotImplemented {
-		t.Fatalf(
-			"expected 501, got %d",
-			recorder.Code,
-		)
-	}
+	assertErrorResponse(
+		t,
+		recorder,
+		http.StatusNotImplemented,
+		"LINUX_REQUIRED",
+	)
 }
 
 func TestNamespacesUnavailable(t *testing.T) {
@@ -189,10 +190,92 @@ func TestNamespacesUnavailable(t *testing.T) {
 
 	handler.ServeHTTP(recorder, request)
 
-	if recorder.Code != http.StatusServiceUnavailable {
-		t.Fatalf(
-			"expected 503, got %d",
-			recorder.Code,
-		)
+	assertErrorResponse(
+		t,
+		recorder,
+		http.StatusServiceUnavailable,
+		"NAMESPACES_UNAVAILABLE",
+	)
+
+	if strings.Contains(
+		recorder.Body.String(),
+		"simulated filesystem error",
+	) {
+		t.Error("internal error was exposed")
+	}
+}
+
+func TestNamespacesRoute(t *testing.T) {
+
+	handler := newHTTPHandler(
+		nil,
+		nil,
+		nil,
+		func() ([]NamedNamespace, error) {
+			return []NamedNamespace{
+				{Name: "egresslab-profile-a"},
+			}, nil
+		},
+	)
+
+	request := newTestRequest(http.MethodGet, "/network/namespaces")
+
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+
+	var response NamedNamespacesResponse
+
+	if err := json.Unmarshal(
+		recorder.Body.Bytes(),
+		&response,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	expected := NamedNamespacesResponse{
+		Scope:      "named",
+		Namespaces: []NamedNamespace{{Name: "egresslab-profile-a"}},
+	}
+
+	if !reflect.DeepEqual(response, expected) {
+		t.Errorf("expected %+v, got %+v", expected, response)
+	}
+}
+
+func TestNamespacesRouteRejectsNonLoopbackHost(t *testing.T) {
+
+	called := false
+
+	handler := newHTTPHandler(
+		nil,
+		nil,
+		nil,
+		func() ([]NamedNamespace, error) {
+			called = true
+			return nil, nil
+		},
+	)
+
+	request := newTestRequest(http.MethodGet, "/network/namespaces")
+	request.Host = "attacker.example:8788"
+
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	assertErrorResponse(
+		t,
+		recorder,
+		http.StatusForbidden,
+		"HOST_BLOCKED",
+	)
+
+	if called {
+		t.Error("namespace provider ran for a blocked request")
 	}
 }

@@ -163,6 +163,7 @@ func TestSystemInfoError(t *testing.T) {
 			return SystemInfoResponse{}, errors.New("simulated failure")
 		},
 		nil,
+		nil,
 	)
 
 	request := newTestRequest(http.MethodGet, "/system/info")
@@ -196,6 +197,7 @@ func TestNetworkInterfacesEndpoint(t *testing.T) {
 		func() ([]NetworkInterface, error) {
 			return expected, nil
 		},
+		nil,
 		nil,
 		nil,
 	)
@@ -240,6 +242,7 @@ func TestNetworkInterfacesNilBecomesEmptyArray(t *testing.T) {
 		},
 		nil,
 		nil,
+		nil,
 	)
 
 	request := newTestRequest(http.MethodGet, "/network/interfaces")
@@ -276,6 +279,7 @@ func TestNetworkInterfacesError(t *testing.T) {
 		func() ([]NetworkInterface, error) {
 			return nil, errors.New("simulated failure")
 		},
+		nil,
 		nil,
 		nil,
 	)
@@ -339,6 +343,7 @@ func TestNetworkInterfacesContentType(t *testing.T) {
 		func() ([]NetworkInterface, error) {
 			return []NetworkInterface{}, nil
 		},
+		nil,
 		nil,
 		nil,
 	)

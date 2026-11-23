@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"runtime"
@@ -89,6 +90,8 @@ func handleNamespaces(
 				code = "LINUX_REQUIRED"
 				message = "Namespace discovery requires Linux"
 			}
+
+			log.Printf("discover named namespaces: %v", err)
 
 			writeError(
 				w,

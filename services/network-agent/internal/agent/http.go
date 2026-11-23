@@ -29,6 +29,7 @@ func NewHTTPHandler() http.Handler {
 		discoverNetworkInterfaces,
 		discoverSystemInfo,
 		discoverLinuxLinks,
+		discoverNamedNamespaces,
 	)
 }
 
@@ -36,6 +37,7 @@ func newHTTPHandler(
 	listInterfaces interfaceProvider,
 	systemInfo systemInfoProvider,
 	listLinks linkProvider,
+	listNamespaces namespaceProvider,
 ) http.Handler {
 
 	if listInterfaces == nil {
@@ -48,6 +50,10 @@ func newHTTPHandler(
 
 	if listLinks == nil {
 		listLinks = discoverLinuxLinks
+	}
+
+	if listNamespaces == nil {
+		listNamespaces = discoverNamedNamespaces
 	}
 
 	mux := http.NewServeMux()
@@ -76,7 +82,7 @@ func newHTTPHandler(
 
 	mux.HandleFunc(
 		"GET /network/namespaces",
-		handleNamespaces(discoverNamedNamespaces),
+		handleNamespaces(listNamespaces),
 	)
 
 	return protectLoopback(mux)
