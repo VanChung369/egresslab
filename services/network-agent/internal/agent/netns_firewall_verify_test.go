@@ -201,8 +201,17 @@ func (k *fakeKernel) list(context.Context, string) ([]byte, error) {
 }
 
 func verifyingFirewall(t *testing.T) (*LabFirewall, *fakeKernel) {
+	t.Helper()
+
 	kernel := &fakeKernel{t: t}
-	return newVerifyingLabFirewall(ownedTestManager(firewallTestName), kernel.run, kernel.list), kernel
+	manager := ownedTestManager(firewallTestName)
+
+	// An offline namespace: only loopback, no WireGuard interface.
+	manager.run = func(context.Context, ...string) ([]byte, error) {
+		return []byte(`[{"ifname":"lo"}]`), nil
+	}
+
+	return newVerifyingLabFirewall(manager, kernel.run, kernel.list), kernel
 }
 
 func TestLabFirewallBlocksOnOutOfBandChange(t *testing.T) {
@@ -318,5 +327,41 @@ func TestVPNConnectRefusesDriftedNamespace(t *testing.T) {
 
 	if len(rec.ipCalls) != 0 || len(rec.wgCalls) != 0 {
 		t.Fatal("commands ran before the drift check")
+	}
+}
+
+// testdata/nft-lab-probe-permitted.json is a REAL capture (nft 1.0.2, Ubuntu 22.04 on WSL2) of a
+// sealed lab namespace after PermitEgressProbe, taken during a live VPN lab run with:
+//
+//	ip netns exec <egresslab-lab-...> nft -j list ruleset
+func TestLabRulesetFingerprintRealCapture(t *testing.T) {
+	data, err := os.ReadFile("testdata/nft-lab-probe-permitted.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fingerprint, err := labRulesetFingerprint(data)
+	if err != nil {
+		t.Fatalf("real nft output rejected: %v", err)
+	}
+
+	// 6 seal rules + 2 egress-probe rules.
+	if got := strings.Count(fingerprint, "\n") + 1; got != 8 {
+		t.Fatalf("expected 8 rules, got %d:\n%s", got, fingerprint)
+	}
+
+	for _, want := range []string{`"1.1.1.1"`, `"wg0"`, `"ipv6"`, `53`} {
+		if !strings.Contains(fingerprint, want) {
+			t.Fatalf("fingerprint is missing %s:\n%s", want, fingerprint)
+		}
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := labRulesetFingerprint(encodeRuleset(t, mutateChain(doc, "output", "policy", "accept"))); err == nil {
+		t.Fatal("real capture with output policy accept was accepted")
 	}
 }

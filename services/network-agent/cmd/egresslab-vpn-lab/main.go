@@ -20,6 +20,11 @@ import (
 const (
 	probeAttempts   = 3
 	probeRetryDelay = 2 * time.Second
+	watchInterval   = 2 * time.Second
+
+	// Upper bound of one egress probe: the HTTP client gives up after 10s, the probe
+	// subprocess is killed after 15s.
+	leakProbeWait = 15 * time.Second
 )
 
 func main() {
@@ -181,12 +186,16 @@ func run(file, probeURL string) (resultErr error) {
 		}
 
 		fmt.Printf("Namespace: %s\n", ns)
+
 		if isolationFailed {
-			fmt.Printf("Isolation check failed; the probe result is not trusted: %v\n", err)
-			fmt.Println("The firewall or underlay changed outside this session. Do not activate this route.")
-		} else {
-			fmt.Printf("Probe through tunnel failed: %v\n", err)
+			fmt.Printf("Isolation verification failed; the probe result is not trusted: %v\n", err)
+			fmt.Println("Quarantining the tunnel now. Do not activate this route.")
+
+			// Never wait for input while an unsafe tunnel may still be up.
+			return quarantineAfter(lab, ns, fmt.Errorf("isolation verification failed: %w", err))
 		}
+
+		fmt.Printf("Probe through tunnel failed: %v\n", err)
 		fmt.Println("No egress candidate was recorded. Inspect the namespace, then press Enter or Ctrl+C to clean up.")
 		session.WaitForEnter()
 
@@ -238,10 +247,20 @@ func run(file, probeURL string) (resultErr error) {
 	fmt.Printf("Check: sudo ip netns exec %s wg show wg0 latest-handshakes\n", ns)
 	fmt.Println(labcli.StopCommandsHint)
 	fmt.Println("Press Enter to simulate tunnel loss (peer removed), or Ctrl+C to clean up.")
+	fmt.Printf("While waiting, the namespace firewall, underlay and fwmark are re-verified every %s.\n", watchInterval)
 
-	if !session.WaitForEnter() {
+	// A polling lab diagnostic, not a production safety service: changes between two checks
+	// are not caught, and the watchdog only runs while this process runs.
+	entered, err := waitForEnterWatched(session, lab, ns)
+	if err != nil {
+		return err
+	}
+
+	if !entered {
 		return nil
 	}
+
+	fmt.Println("Removing the tunnel peer (simulated tunnel loss)...")
 
 	if err := session.Step("remove tunnel peer", func(ctx context.Context) error {
 		return lab.DropPeer(ctx, ns, cfg)
@@ -254,28 +273,86 @@ func run(file, probeURL string) (resultErr error) {
 		return err
 	}
 
+	// Without a peer, wg0 drops every packet, so the probe can only end by timing out. It is not
+	// cancelled by Ctrl+C: its result is the point of the test and must always be reported.
+	fmt.Printf("Probing %s with no tunnel peer; this must fail. Waiting up to %s (Ctrl+C waits too)...\n",
+		target.URL, leakProbeWait)
+
 	var leaked netip.Addr
+	var leakErr error
+	probed := false
+
 	probeErr := session.Step("probe after tunnel loss", func(ctx context.Context) error {
-		ip, err := lab.Probe(ctx, ns, target)
-		leaked = ip
-		return err
+		probed = true
+		leaked, leakErr = lab.Probe(ctx, ns, target)
+		return leakErr
 	})
 
-	switch {
-	case errors.Is(probeErr, labcli.ErrInterrupted):
-		return probeErr
-
-	case probeErr == nil:
+	// A completed probe that succeeded is a leak, even if the user interrupted meanwhile.
+	if probed && leakErr == nil {
 		return fmt.Errorf("LEAK: probe reached %s after the tunnel peer was removed (egress %s)", target.URL, leaked)
 	}
 
-	fmt.Println("Probe after tunnel loss: failed as expected (no fallback route).")
+	if probed {
+		fmt.Println("Probe after tunnel loss: failed as expected (no fallback route).")
+	}
+
+	if errors.Is(probeErr, labcli.ErrInterrupted) {
+		return probeErr
+	}
 	fmt.Printf("Candidate after tunnel loss: %s\n", registry.Snapshot(profileID).Status)
 	fmt.Println("Press Enter or Ctrl+C to clean up.")
 
 	session.WaitForEnter()
 
 	return nil
+}
+
+// quarantineAfter removes the tunnel right away after an isolation failure and returns cause,
+// joined with any quarantine error (in which case isolation must not be assumed restored).
+func quarantineAfter(lab *agent.VPNEgressLab, ns string, cause error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+
+	if err := lab.Quarantine(ctx, ns); err != nil {
+		return errors.Join(cause, fmt.Errorf("emergency quarantine: %w", err))
+	}
+
+	return fmt.Errorf("VPN tunnel quarantined: %w", cause)
+}
+
+// waitForEnterWatched waits for Enter (true) or Ctrl+C (false) while the isolation watchdog
+// runs. A watchdog failure (it has already quarantined the tunnel) is returned as an error,
+// including one that races with Enter, so it is never silently dropped.
+func waitForEnterWatched(session *labcli.Session, lab *agent.VPNEgressLab, ns string) (bool, error) {
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	defer stopWatch()
+
+	faults := lab.WatchIsolation(watchCtx, ns, watchInterval)
+
+	entered := make(chan bool, 1)
+	go func() { entered <- session.WaitForEnter() }()
+
+	select {
+	case ok := <-entered:
+		stopWatch()
+
+		// Wait for the watchdog to finish, so it never runs alongside the next lab step.
+		if watchErr, failed := <-faults; failed && watchErr != nil {
+			return false, fmt.Errorf("VPN isolation watchdog: %w", watchErr)
+		}
+
+		return ok, nil
+
+	case watchErr, failed := <-faults:
+		if !failed {
+			return false, errors.New("VPN isolation watchdog stopped unexpectedly")
+		}
+
+		fmt.Printf("Isolation watchdog: %v\n", watchErr)
+
+		return false, fmt.Errorf("VPN isolation watchdog stopped the tunnel: %w", watchErr)
+	}
 }
 
 // probeWithRetry runs probe up to probeAttempts times. It checks for Ctrl+C before every attempt

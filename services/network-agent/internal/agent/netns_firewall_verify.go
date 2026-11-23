@@ -261,6 +261,12 @@ func (f *LabFirewall) Reconcile(ctx context.Context, name string) error {
 		return fmt.Errorf("namespace %s was never sealed by this session", name)
 	}
 
+	// Never rebuild a firewall around a live WireGuard interface. The manager lock is held, so
+	// no other lab operation can attach a tunnel between this check and the apply below.
+	if err := f.requireOfflineForReconcileLocked(ctx, name); err != nil {
+		return err
+	}
+
 	// "add" makes the delete safe when the table vanished; the whole file is one nft transaction.
 	script := fmt.Sprintf("add table inet %[1]s\ndelete table inet %[1]s\n", labNFTTable) +
 		strings.Join(f.applied[name], "")
