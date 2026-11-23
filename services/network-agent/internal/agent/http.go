@@ -69,6 +69,11 @@ func newHTTPHandler(
 		handleLinks(listLinks),
 	)
 
+	mux.HandleFunc(
+		"GET /capabilities",
+		handleCapabilities(discoverCapabilities),
+	)
+
 	return protectLoopback(mux)
 }
 
