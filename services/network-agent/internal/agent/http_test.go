@@ -12,15 +12,21 @@ import (
 	"testing"
 )
 
+// newTestRequest builds a request addressed to the agent's loopback listener,
+// so it passes the Host check like a real local client would.
+func newTestRequest(method, path string) *http.Request {
+	return httptest.NewRequest(
+		method,
+		"http://127.0.0.1:8788"+path,
+		nil,
+	)
+}
+
 func TestHealthEndpoint(t *testing.T) {
 
 	handler := NewHTTPHandler()
 
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"/health",
-		nil,
-	)
+	request := newTestRequest(http.MethodGet, "/health")
 
 	recorder := httptest.NewRecorder()
 
@@ -31,6 +37,15 @@ func TestHealthEndpoint(t *testing.T) {
 			"expected status %d, got %d",
 			http.StatusOK,
 			recorder.Code,
+		)
+	}
+
+	contentType := recorder.Header().Get("Content-Type")
+
+	if !strings.HasPrefix(contentType, "application/json") {
+		t.Errorf(
+			"expected JSON content type, got %s",
+			contentType,
 		)
 	}
 
@@ -47,6 +62,10 @@ func TestHealthEndpoint(t *testing.T) {
 		t.Errorf("expected running, got %s", response.Status)
 	}
 
+	if response.Mode != "read-only" {
+		t.Errorf("expected read-only, got %s", response.Mode)
+	}
+
 	if response.NetworkReady {
 		t.Error("expected network_ready to be false")
 	}
@@ -56,11 +75,7 @@ func TestSystemInfoEndpoint(t *testing.T) {
 
 	handler := NewHTTPHandler()
 
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"/system/info",
-		nil,
-	)
+	request := newTestRequest(http.MethodGet, "/system/info")
 
 	recorder := httptest.NewRecorder()
 
@@ -104,6 +119,43 @@ func TestSystemInfoEndpoint(t *testing.T) {
 	}
 }
 
+func TestSystemInfoError(t *testing.T) {
+
+	handler := newHTTPHandler(
+		nil,
+		func() (SystemInfoResponse, error) {
+			return SystemInfoResponse{}, errors.New("simulated failure")
+		},
+	)
+
+	request := newTestRequest(http.MethodGet, "/system/info")
+
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusInternalServerError,
+			recorder.Code,
+		)
+	}
+
+	var response ErrorResponse
+
+	if err := json.Unmarshal(
+		recorder.Body.Bytes(),
+		&response,
+	); err != nil {
+		t.Fatalf("invalid JSON error response: %v", err)
+	}
+
+	if response.Error == "" {
+		t.Error("expected error message")
+	}
+}
+
 func TestNetworkInterfacesEndpoint(t *testing.T) {
 
 	expected := []NetworkInterface{
@@ -121,13 +173,10 @@ func TestNetworkInterfacesEndpoint(t *testing.T) {
 		func() ([]NetworkInterface, error) {
 			return expected, nil
 		},
-	)
-
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"/network/interfaces",
 		nil,
 	)
+
+	request := newTestRequest(http.MethodGet, "/network/interfaces")
 
 	recorder := httptest.NewRecorder()
 
@@ -150,28 +199,49 @@ func TestNetworkInterfacesEndpoint(t *testing.T) {
 		t.Fatalf("invalid JSON response: %v", err)
 	}
 
-	if len(response.Interfaces) != 1 {
+	if !reflect.DeepEqual(response.Interfaces, expected) {
+		t.Errorf(
+			"expected %+v, got %+v",
+			expected,
+			response.Interfaces,
+		)
+	}
+}
+
+func TestNetworkInterfacesNilBecomesEmptyArray(t *testing.T) {
+
+	handler := newHTTPHandler(
+		func() ([]NetworkInterface, error) {
+			return nil, nil
+		},
+		nil,
+	)
+
+	request := newTestRequest(http.MethodGet, "/network/interfaces")
+
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
 		t.Fatalf(
-			"expected 1 interface, got %d",
-			len(response.Interfaces),
+			"expected status %d, got %d",
+			http.StatusOK,
+			recorder.Code,
 		)
 	}
 
-	actual := response.Interfaces[0]
+	var response map[string]json.RawMessage
 
-	if actual.Name != "lo" {
-		t.Errorf("expected lo, got %s", actual.Name)
+	if err := json.Unmarshal(
+		recorder.Body.Bytes(),
+		&response,
+	); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
 	}
 
-	if actual.MTU != 65536 {
-		t.Errorf("expected MTU 65536, got %d", actual.MTU)
-	}
-
-	if !reflect.DeepEqual(
-		actual.Flags,
-		[]string{"up", "loopback"},
-	) {
-		t.Errorf("unexpected flags: %v", actual.Flags)
+	if got := string(response["interfaces"]); got != "[]" {
+		t.Errorf("expected interfaces to be [], got %s", got)
 	}
 }
 
@@ -181,13 +251,10 @@ func TestNetworkInterfacesError(t *testing.T) {
 		func() ([]NetworkInterface, error) {
 			return nil, errors.New("simulated failure")
 		},
-	)
-
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"/network/interfaces",
 		nil,
 	)
+
+	request := newTestRequest(http.MethodGet, "/network/interfaces")
 
 	recorder := httptest.NewRecorder()
 
@@ -217,18 +284,47 @@ func TestNetworkInterfacesError(t *testing.T) {
 
 func TestInterfaceFlags(t *testing.T) {
 
-	flags := net.FlagUp | net.FlagLoopback
+	tests := []struct {
+		name     string
+		flags    net.Flags
+		expected []string
+	}{
+		{
+			name:     "loopback up",
+			flags:    net.FlagUp | net.FlagLoopback,
+			expected: []string{"up", "loopback"},
+		},
+		{
+			name: "ethernet up and running",
+			flags: net.FlagUp | net.FlagRunning |
+				net.FlagBroadcast | net.FlagMulticast,
+			expected: []string{"up", "running", "broadcast", "multicast"},
+		},
+		{
+			name:     "down with other flags set",
+			flags:    net.FlagPointToPoint | net.FlagMulticast,
+			expected: []string{"down", "point-to-point", "multicast"},
+		},
+		{
+			name:     "no flags",
+			flags:    0,
+			expected: []string{"down"},
+		},
+	}
 
-	result := interfaceFlags(flags)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 
-	expected := []string{"up", "loopback"}
+			result := interfaceFlags(tt.flags)
 
-	if !reflect.DeepEqual(result, expected) {
-		t.Errorf(
-			"expected %v, got %v",
-			expected,
-			result,
-		)
+			if !reflect.DeepEqual(result, tt.expected) {
+				t.Errorf(
+					"expected %v, got %v",
+					tt.expected,
+					result,
+				)
+			}
+		})
 	}
 }
 
@@ -236,11 +332,7 @@ func TestUnknownEndpoint(t *testing.T) {
 
 	handler := NewHTTPHandler()
 
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"/unknown",
-		nil,
-	)
+	request := newTestRequest(http.MethodGet, "/unknown")
 
 	recorder := httptest.NewRecorder()
 
@@ -259,11 +351,7 @@ func TestHealthEndpointMethodNotAllowed(t *testing.T) {
 
 	handler := NewHTTPHandler()
 
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/health",
-		nil,
-	)
+	request := newTestRequest(http.MethodPost, "/health")
 
 	recorder := httptest.NewRecorder()
 
@@ -285,13 +373,10 @@ func TestNetworkInterfacesContentType(t *testing.T) {
 		func() ([]NetworkInterface, error) {
 			return []NetworkInterface{}, nil
 		},
-	)
-
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"/network/interfaces",
 		nil,
 	)
+
+	request := newTestRequest(http.MethodGet, "/network/interfaces")
 
 	recorder := httptest.NewRecorder()
 
@@ -304,5 +389,117 @@ func TestNetworkInterfacesContentType(t *testing.T) {
 			"expected JSON content type, got %s",
 			contentType,
 		)
+	}
+}
+
+func TestAllowsLoopbackHosts(t *testing.T) {
+
+	handler := NewHTTPHandler()
+
+	hosts := []string{
+		"127.0.0.1:8788",
+		"localhost:8788",
+		"LOCALHOST:8788",
+		"[::1]:8788",
+		"localhost",
+	}
+
+	for _, host := range hosts {
+		t.Run(host, func(t *testing.T) {
+
+			request := newTestRequest(http.MethodGet, "/health")
+			request.Host = host
+
+			recorder := httptest.NewRecorder()
+
+			handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusOK {
+				t.Errorf(
+					"expected status %d, got %d",
+					http.StatusOK,
+					recorder.Code,
+				)
+			}
+		})
+	}
+}
+
+// A DNS-rebinding page reaches 127.0.0.1 but the browser still sends the
+// attacker's hostname, so anything that is not a loopback Host is rejected.
+func TestRejectsNonLoopbackHost(t *testing.T) {
+
+	handler := NewHTTPHandler()
+
+	hosts := []string{
+		"attacker.example:8788",
+		"attacker.example",
+		"127.0.0.1.attacker.example:8788",
+		"localhost.attacker.example:8788",
+		"192.168.1.10:8788",
+		"",
+	}
+
+	for _, host := range hosts {
+		t.Run(host, func(t *testing.T) {
+
+			request := newTestRequest(http.MethodGet, "/system/info")
+			request.Host = host
+
+			recorder := httptest.NewRecorder()
+
+			handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusForbidden {
+				t.Errorf(
+					"expected status %d, got %d",
+					http.StatusForbidden,
+					recorder.Code,
+				)
+			}
+		})
+	}
+}
+
+func TestRejectsBrowserOrigin(t *testing.T) {
+
+	handler := NewHTTPHandler()
+
+	origins := []string{
+		"http://attacker.example",
+		"null",
+	}
+
+	for _, origin := range origins {
+		t.Run(origin, func(t *testing.T) {
+
+			request := newTestRequest(http.MethodGet, "/network/interfaces")
+			request.Header.Set("Origin", origin)
+
+			recorder := httptest.NewRecorder()
+
+			handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusForbidden {
+				t.Errorf(
+					"expected status %d, got %d",
+					http.StatusForbidden,
+					recorder.Code,
+				)
+			}
+
+			var response ErrorResponse
+
+			if err := json.Unmarshal(
+				recorder.Body.Bytes(),
+				&response,
+			); err != nil {
+				t.Fatalf("invalid JSON error response: %v", err)
+			}
+
+			if response.Error == "" {
+				t.Error("expected error message")
+			}
+		})
 	}
 }

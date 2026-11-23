@@ -65,10 +65,18 @@ func discoverNetworkInterfaces() ([]NetworkInterface, error) {
 
 func interfaceFlags(flags net.Flags) []string {
 
-	result := make([]string, 0, 5)
+	result := make([]string, 0, 6)
 
+	// Always report the administrative state first so clients can rely on
+	// "up"/"down" being present, even when other flags are set.
 	if flags&net.FlagUp != 0 {
 		result = append(result, "up")
+	} else {
+		result = append(result, "down")
+	}
+
+	if flags&net.FlagRunning != 0 {
+		result = append(result, "running")
 	}
 
 	if flags&net.FlagBroadcast != 0 {
@@ -85,10 +93,6 @@ func interfaceFlags(flags net.Flags) []string {
 
 	if flags&net.FlagMulticast != 0 {
 		result = append(result, "multicast")
-	}
-
-	if len(result) == 0 {
-		return []string{"down"}
 	}
 
 	return result

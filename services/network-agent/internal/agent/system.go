@@ -13,6 +13,8 @@ type SystemInfoResponse struct {
 	GoVersion    string `json:"go_version"`
 }
 
+type systemInfoProvider func() (SystemInfoResponse, error)
+
 func discoverSystemInfo() (SystemInfoResponse, error) {
 
 	hostname, err := os.Hostname()
