@@ -116,6 +116,20 @@ func TestParseWireGuardRejectsUnsafeDirectives(t *testing.T) {
 	}
 }
 
+func TestRejectedConfigIsWiped(t *testing.T) {
+	// PrivateKey and PresharedKey are copied before the unsafe directive at the end is seen.
+	src := withLine("PersistentKeepalive = 25", "PresharedKey = "+demoKey(3)) + "PostUp = x\n"
+
+	cfg := &ImportedWireGuardConfig{}
+	if err := cfg.parse([]byte(src)); err == nil {
+		t.Fatal("unsafe directive accepted")
+	}
+
+	if cfg.privateKey != nil || cfg.peerPresharedKey != nil || cfg.peerPublicKey != "" || cfg.addresses != nil {
+		t.Fatal("rejected config kept its contents")
+	}
+}
+
 func TestParseWireGuardRejectsMalformed(t *testing.T) {
 	tooManyAddresses := make([]string, maxWireGuardAddresses+1)
 	for i := range tooManyAddresses {

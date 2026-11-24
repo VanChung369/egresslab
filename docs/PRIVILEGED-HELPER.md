@@ -189,8 +189,9 @@ signatures for a fixed seed. OpenSSL 3 (`openssl pkeyutl -sign -rawin`) produces
 signatures, so a non-Go controller can implement the format. A `CreateLab` intent keeps
 `"namespace":""` in the signed JSON; dropping the empty field breaks the signature.
 
-- The helper holds only the public key: a root-owned file of 64 hex characters, in a root-owned
-  directory, neither writable by group or others. It is provisioned out of band.
+- The helper holds only the public key: a root-owned file of 64 hex characters at an absolute
+  path. The file and every directory up to `/` must be root-owned, not writable by group or
+  others, and not symlinks (so not under `/tmp`). It is provisioned out of band.
 - The request carries the intent separately. The helper accepts the capability only when the
   signed intent equals it exactly and `helper_id` matches its own.
 - `helper_id` is a random epoch that the helper generates at every start and logs. It cannot be

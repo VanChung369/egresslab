@@ -227,7 +227,14 @@ func (s *SealedWireGuardStore) save(entries map[string]wireGuardStage) error {
 		return err
 	}
 
-	return writePrivateFile(s.path, append(data, '\n'))
+	data = append(data, '\n')
+
+	// load refuses a larger file, so writing one would lock the vault on its next open.
+	if len(data) > maxSealedStoreBytes {
+		return fmt.Errorf("sealed WireGuard store would exceed %d bytes", maxSealedStoreBytes)
+	}
+
+	return writePrivateFile(s.path, data)
 }
 
 // renderWireGuardConfig produces a config that parseWireGuardBytes accepts and that is equivalent

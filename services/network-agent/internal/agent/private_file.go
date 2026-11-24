@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 )
 
 // readPrivateFile reads a regular, non-symlink file that only its owner can access.
@@ -82,7 +83,31 @@ func writePrivateFile(path string, data []byte) error {
 		return err
 	}
 
-	return os.Rename(name, path)
+	if err := os.Rename(name, path); err != nil {
+		return err
+	}
+
+	return syncDir(dir)
+}
+
+// syncDir makes a rename in dir survive a crash. Windows has no directory fsync, and a filesystem
+// that cannot sync a directory is left as it is.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+
+	err = d.Sync()
+	if errors.Is(err, syscall.EINVAL) || errors.Is(err, errors.ErrUnsupported) {
+		err = nil
+	}
+
+	return errors.Join(err, d.Close())
 }
 
 func writeAll(w io.Writer, data []byte) error {

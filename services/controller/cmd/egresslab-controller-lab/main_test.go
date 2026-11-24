@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,6 +60,7 @@ type fakeRuntime struct {
 	createErr    error
 	created      []control.LabCapability
 	calls        []string
+	afterChange  func() // runs after a successful CreateLab or DeleteLab
 }
 
 func (f *fakeRuntime) HelperInfo(context.Context) (control.LabHelperInfo, error) {
@@ -87,6 +89,10 @@ func (f *fakeRuntime) CreateLab(_ context.Context, profileID string, c control.L
 
 	f.labs[profileID] = labNS
 
+	if f.afterChange != nil {
+		f.afterChange()
+	}
+
 	return control.LabInfo{ProfileID: profileID, Namespace: labNS, State: control.LabSealed}, nil
 }
 
@@ -99,6 +105,10 @@ func (f *fakeRuntime) lab(op, p, n, state string) (control.LabInfo, error) {
 
 	if state == control.LabDeleted {
 		delete(f.labs, p)
+
+		if f.afterChange != nil {
+			f.afterChange()
+		}
 	}
 
 	return control.LabInfo{ProfileID: p, Namespace: n, State: state}, nil
@@ -310,6 +320,47 @@ func TestCreateLabRecordsBinding(t *testing.T) {
 	if b, _ := h.binding(); b.HelperEpoch != epoch2 || len(a.created) != 2 {
 		t.Fatalf("after restart: %+v", b)
 	}
+}
+
+func TestRecordSaveFailureIsReported(t *testing.T) {
+	h := newHarness(t)
+	a := h.runtimes["Ubuntu-A"]
+	h.mustRun("-approve", "-wsl-distro", "Ubuntu-A", "trust-runtime")
+
+	// A directory in place of runtimes.json makes the save after the helper call fail.
+	path := filepath.Join(h.dir, control.RuntimeStateFile)
+	var saved []byte
+
+	a.afterChange = func() {
+		var err error
+		if saved, err = os.ReadFile(path); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := errors.Join(os.Remove(path), os.MkdirAll(filepath.Join(path, "blocked"), 0o700)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	restore := func() {
+		if err := errors.Join(os.RemoveAll(path), os.WriteFile(path, saved, 0o600)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := h.run("-approve", "-wsl-distro", "Ubuntu-A", "create-lab", h.profile.ID)
+	if err == nil || !strings.Contains(err.Error(), "record was not saved") {
+		t.Fatalf("create-lab: %v", err)
+	}
+
+	restore()
+
+	err = h.run("-approve", "-wsl-distro", "Ubuntu-A", "delete-lab", h.profile.ID, labNS)
+	if err == nil || !strings.Contains(err.Error(), "record was not saved") {
+		t.Fatalf("delete-lab: %v", err)
+	}
+
+	restore()
 }
 
 func TestProfileStaysOnItsRuntime(t *testing.T) {

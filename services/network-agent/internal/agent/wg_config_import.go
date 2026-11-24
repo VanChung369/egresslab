@@ -161,12 +161,20 @@ func ParseWireGuardConfig(r io.Reader) (*ImportedWireGuardConfig, error) {
 
 // parseWireGuardBytes works on byte slices only, so key material never becomes an immutable
 // string. The scanner buffer is as large as the input limit (it never reallocates) and is cleared.
-func parseWireGuardBytes(data []byte) (cfg *ImportedWireGuardConfig, err error) {
-	cfg = &ImportedWireGuardConfig{}
+func parseWireGuardBytes(data []byte) (*ImportedWireGuardConfig, error) {
+	cfg := &ImportedWireGuardConfig{}
+	if err := cfg.parse(data); err != nil {
+		return nil, err
+	}
+
+	return cfg, nil
+}
+
+// parse fills an empty config. On failure it wipes what it already copied, key material included.
+func (c *ImportedWireGuardConfig) parse(data []byte) (err error) {
 	defer func() {
 		if err != nil {
-			releaseWireGuardConfig(cfg)
-			cfg = nil
+			releaseWireGuardConfig(c)
 		}
 	}()
 
@@ -193,16 +201,16 @@ func parseWireGuardBytes(data []byte) (cfg *ImportedWireGuardConfig, err error) 
 		if raw[0] == '[' {
 			line := string(raw)
 			if line != "[Interface]" && line != "[Peer]" {
-				return nil, fmt.Errorf("unsupported section at line %d", lineNo)
+				return fmt.Errorf("unsupported section at line %d", lineNo)
 			}
 
 			next := strings.Trim(line, "[]")
 			if next == "Peer" && sections["Peer"] {
-				return nil, fmt.Errorf("multiple [Peer] sections at line %d: only single-peer configs are supported", lineNo)
+				return fmt.Errorf("multiple [Peer] sections at line %d: only single-peer configs are supported", lineNo)
 			}
 
 			if sections[next] || (next == "Interface" && sections["Peer"]) || (next == "Peer" && !sections["Interface"]) {
-				return nil, fmt.Errorf("duplicate or out-of-order section at line %d", lineNo)
+				return fmt.Errorf("duplicate or out-of-order section at line %d", lineNo)
 			}
 
 			sections[next] = true
@@ -216,11 +224,11 @@ func parseWireGuardBytes(data []byte) (cfg *ImportedWireGuardConfig, err error) 
 		value = bytes.TrimSpace(value)
 
 		if !ok || key == "" || len(value) == 0 || section == "" {
-			return nil, fmt.Errorf("invalid configuration entry at line %d", lineNo)
+			return fmt.Errorf("invalid configuration entry at line %d", lineNo)
 		}
 
 		if seen[section][key] && key != "Address" && key != "DNS" {
-			return nil, fmt.Errorf("duplicate option at line %d", lineNo)
+			return fmt.Errorf("duplicate option at line %d", lineNo)
 		}
 
 		seen[section][key] = true
@@ -229,26 +237,26 @@ func parseWireGuardBytes(data []byte) (cfg *ImportedWireGuardConfig, err error) 
 
 		var applyErr error
 		if option == "Interface.PrivateKey" || option == "Peer.PresharedKey" {
-			applyErr = cfg.applySecret(option, value)
+			applyErr = c.applySecret(option, value)
 		} else {
-			applyErr = cfg.apply(option, string(value))
+			applyErr = c.apply(option, string(value))
 		}
 
 		if applyErr != nil {
-			return nil, fmt.Errorf("%s at line %d", applyErr, lineNo)
+			return fmt.Errorf("%s at line %d", applyErr, lineNo)
 		}
 	}
 
 	if scanner.Err() != nil {
-		return nil, errors.New("could not parse WireGuard configuration")
+		return errors.New("could not parse WireGuard configuration")
 	}
 
-	if !sections["Interface"] || !sections["Peer"] || len(cfg.privateKey) == 0 || len(cfg.addresses) == 0 ||
-		cfg.peerPublicKey == "" || cfg.endpointHost == "" || len(cfg.allowedIPs) == 0 {
-		return nil, errors.New("missing required WireGuard sections or fields")
+	if !sections["Interface"] || !sections["Peer"] || len(c.privateKey) == 0 || len(c.addresses) == 0 ||
+		c.peerPublicKey == "" || c.endpointHost == "" || len(c.allowedIPs) == 0 {
+		return errors.New("missing required WireGuard sections or fields")
 	}
 
-	return cfg, nil
+	return nil
 }
 
 // applySecret stores a copy of a key that the config owns and releaseWireGuardConfig clears.

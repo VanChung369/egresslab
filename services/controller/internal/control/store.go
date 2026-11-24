@@ -10,8 +10,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -321,5 +323,29 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 
-	return os.Rename(tmp.Name(), s.path)
+	if err = os.Rename(tmp.Name(), s.path); err != nil {
+		return err
+	}
+
+	return syncDir(filepath.Dir(s.path))
+}
+
+// syncDir makes a rename in dir survive a crash. Windows has no directory fsync, and a filesystem
+// that cannot sync a directory is left as it is.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+
+	err = d.Sync()
+	if errors.Is(err, syscall.EINVAL) || errors.Is(err, errors.ErrUnsupported) {
+		err = nil
+	}
+
+	return errors.Join(err, d.Close())
 }

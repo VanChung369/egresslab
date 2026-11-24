@@ -276,7 +276,7 @@ sudo /usr/local/bin/egresslab-helper -uid "$(id -u)" -gid "$(id -g)" \
   -auth-public-key-file /etc/egresslab/helper-auth.pub
 ```
 
-The public key file holds the controller's Ed25519 public key as 64 hex characters. Both the file and its directory must be owned by root and not writable by group or others; symlinks are refused. A refused configuration exits before touching `/run/egresslab`. The helper never loads a private key.
+The public key file holds the controller's Ed25519 public key as 64 hex characters. The path must be absolute. The file and every directory up to `/` must be owned by root, not writable by group or others, and not symlinks, so a key under `/tmp` is refused. A refused configuration exits before touching `/run/egresslab`. The helper never loads a private key.
 
 At every start, the helper generates a new random helper ID (epoch) and logs it with the key's SHA-256 fingerprint. `egresslab-helperctl helper-info` returns both. Capabilities minted for an earlier start are refused, so after a restart the controller must read the new ID first. The Step 23 `-helper-id` flag no longer exists, and the helper refuses to start with it. To replace the key, stop the helper, write the new public key file and start it again: the fingerprint changes.
 

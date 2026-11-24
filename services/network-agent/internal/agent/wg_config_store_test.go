@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -291,6 +292,41 @@ func TestPersistFailureLeavesVaultUnchanged(t *testing.T) {
 
 	if _, err := vault.Status(vaultProfileA); err != nil {
 		t.Fatal("failed revoke removed the stage from memory")
+	}
+}
+
+func TestSealedStoreRefusesOversizedWrite(t *testing.T) {
+	paths := newStorePaths(t)
+	store := openStore(t, paths)
+	cfg := vpnTestConfig(t)
+	stage := "wgstage_" + strings.Repeat("a", 32)
+
+	if err := store.save(map[string]wireGuardStage{vaultProfileA: {id: stage, cfg: cfg}}); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.ReadFile(paths.data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// An entry takes about 540 bytes, so 10000 of them pass the 4 MiB that load accepts.
+	large := make(map[string]wireGuardStage, 10000)
+	for i := range 10000 {
+		large[fmt.Sprintf("profile_%016x", i)] = wireGuardStage{id: stage, cfg: cfg}
+	}
+
+	if err := store.save(large); err == nil || !strings.Contains(err.Error(), "exceed") {
+		t.Fatalf("oversized store written: %v", err)
+	}
+
+	after, err := os.ReadFile(paths.data)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("store file changed: %v", err)
+	}
+
+	if entries, err := store.load(); err != nil || len(entries) != 1 {
+		t.Fatalf("store no longer opens: %d %v", len(entries), err)
 	}
 }
 

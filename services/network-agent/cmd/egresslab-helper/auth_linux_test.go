@@ -11,18 +11,34 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/VanChung369/egresslab/services/network-agent/internal/helperauth"
 )
 
-// keyDir returns a directory owned by the current user and not writable by others.
+// keyDir returns root/keys, both owned by the current user and not writable by others. The
+// directory checks stop at root (see loadOwned).
 func keyDir(t *testing.T) string {
 	t.Helper()
 
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o755); err != nil {
+	root := t.TempDir()
+	dir := filepath.Join(root, "keys")
+
+	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
+	for _, d := range []string{root, dir} {
+		if err := os.Chmod(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	return dir
+}
+
+// loadOwned loads a key from keyDir, checking directories up to the temporary root.
+func loadOwned(path string, owner uint32) (*helperauth.Verifier, error) {
+	return loadAuthVerifierOwnedBy(path, owner, filepath.Dir(filepath.Dir(path)))
 }
 
 func writeKey(t *testing.T, dir, content string, mode os.FileMode) string {
@@ -66,12 +82,12 @@ func TestLoadAuthVerifierAcceptsOwnedKey(t *testing.T) {
 	key := publicHex(t)
 	path := writeKey(t, keyDir(t), key+"\n", 0o644)
 
-	first, err := loadAuthVerifierOwnedBy(path, me)
+	first, err := loadOwned(path, me)
 	if err != nil || first == nil {
 		t.Fatalf("valid key rejected: %v", err)
 	}
 
-	second, err := loadAuthVerifierOwnedBy(path, me)
+	second, err := loadOwned(path, me)
 	if err != nil || second == nil {
 		t.Fatalf("key reload rejected: %v", err)
 	}
@@ -95,7 +111,7 @@ func TestLoadAuthVerifierAcceptsOwnedKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rotated, err := loadAuthVerifierOwnedBy(path, me)
+	rotated, err := loadOwned(path, me)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,20 +175,54 @@ func TestLoadAuthVerifierRejectsUnsafeKeys(t *testing.T) {
 		{"missing", func(t *testing.T) string {
 			return filepath.Join(keyDir(t), "absent.pub")
 		}, "inspect"},
+		{"group writable ancestor", func(t *testing.T) string {
+			dir := keyDir(t)
+			path := writeKey(t, dir, good, 0o644)
+			if err := os.Chmod(filepath.Dir(dir), 0o775); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}, "writable by group"},
+		{"symlinked directory", func(t *testing.T) string {
+			dir := keyDir(t)
+			path := writeKey(t, dir, good, 0o644)
+			moved := dir + ".real"
+			if err := os.Rename(dir, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(moved, dir); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}, "not a directory"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v, err := loadAuthVerifierOwnedBy(tt.setup(t), me)
+			v, err := loadOwned(tt.setup(t), me)
 			if err == nil || v != nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("got %v %v, want error containing %q", v, err, tt.wantErr)
 			}
 		})
 	}
 
+	t.Run("relative path", func(t *testing.T) {
+		if _, err := loadAuthVerifierOwnedBy("helper-auth.pub", me, "/"); err == nil || !strings.Contains(err.Error(), "absolute") {
+			t.Fatalf("relative path: %v", err)
+		}
+	})
+
+	// The walk passes the stop root and reaches the system temporary directory (sticky, 1777).
+	t.Run("outside the root", func(t *testing.T) {
+		path := writeKey(t, keyDir(t), good, 0o644)
+		if _, err := loadAuthVerifierOwnedBy(path, me, filepath.Join(filepath.Dir(path), "elsewhere")); err == nil {
+			t.Fatal("key outside the checked root accepted")
+		}
+	})
+
 	t.Run("owned by another UID", func(t *testing.T) {
 		path := writeKey(t, keyDir(t), good, 0o644)
-		if _, err := loadAuthVerifierOwnedBy(path, me+1); err == nil {
+		if _, err := loadOwned(path, me+1); err == nil {
 			t.Fatal("key owned by another UID accepted")
 		}
 	})

@@ -285,5 +285,9 @@ func (s *RuntimeState) Save() error {
 		return err
 	}
 
-	return os.Rename(tmp.Name(), s.path)
+	if err := os.Rename(tmp.Name(), s.path); err != nil {
+		return err
+	}
+
+	return syncDir(filepath.Dir(s.path))
 }

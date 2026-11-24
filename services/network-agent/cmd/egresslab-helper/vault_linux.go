@@ -36,31 +36,21 @@ type managedVault struct {
 	lock *os.File
 }
 
-// checkDir rejects symlinks and any directory up to root that another user could write to.
 func (l vaultLayout) checkDir(path string) error {
-	for current := path; ; current = filepath.Dir(current) {
-		info, err := os.Lstat(current)
-		if err != nil {
-			return err
-		}
-
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || !info.IsDir() || stat.Uid != l.owner || info.Mode().Perm()&0o022 != 0 {
-			return fmt.Errorf("unsafe vault directory: %s", current)
-		}
-
-		if current == path && info.Mode().Perm() != 0o700 {
-			return fmt.Errorf("vault directory must be mode 0700: %s", current)
-		}
-
-		if current == l.root {
-			return nil
-		}
-
-		if filepath.Dir(current) == current {
-			return fmt.Errorf("%s is not under %s", path, l.root)
-		}
+	if err := checkDirChain(path, l.root, l.owner); err != nil {
+		return fmt.Errorf("unsafe vault directory: %w", err)
 	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+
+	if info.Mode().Perm() != 0o700 {
+		return fmt.Errorf("vault directory must be mode 0700: %s", path)
+	}
+
+	return nil
 }
 
 func (l vaultLayout) validateFile(info os.FileInfo) error {

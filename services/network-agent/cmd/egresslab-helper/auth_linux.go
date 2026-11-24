@@ -23,23 +23,24 @@ const maxPublicKeyFileBytes = 128
 // controller's private key, and the operator cannot choose or reuse a helper ID. With no path,
 // authorization stays disabled.
 func loadAuthVerifier(path string) (*helperauth.Verifier, error) {
-	return loadAuthVerifierOwnedBy(path, 0)
+	return loadAuthVerifierOwnedBy(path, 0, "/")
 }
 
-// loadAuthVerifierOwnedBy is loadAuthVerifier with the required owner UID as a parameter, so the
-// accept path can be tested without root.
-func loadAuthVerifierOwnedBy(path string, owner uint32) (*helperauth.Verifier, error) {
+// loadAuthVerifierOwnedBy is loadAuthVerifier with the owner UID and the top directory to check as
+// parameters, so the accept path can be tested without root.
+func loadAuthVerifierOwnedBy(path string, owner uint32, root string) (*helperauth.Verifier, error) {
 	if path == "" {
 		return nil, nil
 	}
 
-	// The directory must not let anyone else swap the file.
-	dir, err := os.Lstat(filepath.Dir(path))
-	if err != nil {
-		return nil, fmt.Errorf("inspect authorization public key directory: %w", err)
+	if !filepath.IsAbs(path) {
+		return nil, errors.New("authorization public key path must be absolute")
 	}
 
-	if err := checkOwned(dir, owner, true); err != nil {
+	path = filepath.Clean(path)
+
+	// No directory on the way to the file may let anyone else swap it.
+	if err := checkDirChain(filepath.Dir(path), root, owner); err != nil {
 		return nil, fmt.Errorf("authorization public key directory: %w", err)
 	}
 
@@ -123,4 +124,27 @@ func checkOwned(info os.FileInfo, owner uint32, wantDir bool) error {
 	}
 
 	return nil
+}
+
+// checkDirChain requires dir and every directory above it, up to and including root, to be a real
+// directory (a symlink is refused) owned by owner and not writable by group or others.
+func checkDirChain(dir, root string, owner uint32) error {
+	for current := dir; ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err != nil {
+			return err
+		}
+
+		if err := checkOwned(info, owner, true); err != nil {
+			return fmt.Errorf("%s: %w", current, err)
+		}
+
+		if current == root {
+			return nil
+		}
+
+		if filepath.Dir(current) == current {
+			return fmt.Errorf("%s is not under %s", dir, root)
+		}
+	}
 }

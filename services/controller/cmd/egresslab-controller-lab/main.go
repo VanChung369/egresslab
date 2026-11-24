@@ -368,7 +368,7 @@ func (s *session) createLab(profileID string) (control.LabInfo, error) {
 	record := control.RuntimeBinding{ProfileID: profile.ID, RuntimeID: rt.ID, Namespace: lab.Namespace,
 		HelperEpoch: info.HelperID, UpdatedAt: s.d.now().UTC()}
 
-	if err := state.SetBinding(record); err == nil {
+	if err = state.SetBinding(record); err == nil {
 		err = state.Save()
 	}
 
@@ -432,7 +432,7 @@ func (s *session) existingLab(profileID, namespace string, remove bool) (control
 		binding.Namespace, binding.HelperEpoch = namespace, info.HelperID
 	}
 
-	if err := state.SetBinding(binding); err == nil {
+	if err = state.SetBinding(binding); err == nil {
 		err = state.Save()
 	}
 
