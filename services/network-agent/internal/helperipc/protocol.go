@@ -2,8 +2,10 @@
 // privileged network helper.
 //
 // Each connection carries one request and one response. A frame is a 4-byte big-endian length
-// followed by at most MaxFrameBytes of JSON. Only read-only operations and the AuthorizeCheck
-// dry-run exist; every network mutation is refused (docs/PRIVILEGED-HELPER.md).
+// followed by at most MaxFrameBytes of JSON. Besides read-only operations and the AuthorizeCheck
+// dry-run, a helper started with the lab lifecycle enabled creates (with a signed capability),
+// verifies and deletes sealed lab namespaces. Tunnel and probe operations are refused
+// (docs/PRIVILEGED-HELPER.md).
 package helperipc
 
 import (
@@ -54,6 +56,7 @@ type Response struct {
 	Error        string         `json:"error,omitempty"`
 	Items        []RecoveryItem `json:"items,omitempty"`
 	Info         *HelperInfo    `json:"helper_info,omitempty"`
+	Lab          *LabInfo       `json:"lab,omitempty"`
 }
 
 var ErrInvalidFrame = errors.New("invalid helper IPC frame")
@@ -145,7 +148,12 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 	}
 	defer conn.Close()
 
-	deadline := time.Now().Add(5 * time.Second)
+	timeout := 5 * time.Second
+	if isLifecycleOp(req.Operation) {
+		timeout = 60 * time.Second
+	}
+
+	deadline := time.Now().Add(timeout)
 	if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
 		deadline = end
 	}
@@ -180,6 +188,10 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 		return Response{}, errors.New("invalid helper identity metadata")
 	}
 
+	if !validLabResponse(req, resp) {
+		return Response{}, errors.New("invalid lab lifecycle response")
+	}
+
 	if !resp.OK {
 		if resp.Error == "" {
 			return Response{}, errors.New("helper denied request")
@@ -188,4 +200,34 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 	}
 
 	return resp, nil
+}
+
+// CreateSealedLab: the helper picks the namespace name.
+func CreateSealedLab(
+	ctx context.Context,
+	socketPath string,
+	profileID string,
+	capability helperauth.SignedCapability,
+) (Response, error) {
+	intent := helperauth.Intent{Operation: helperauth.OpCreateLab, ProfileID: profileID}
+
+	return callRequest(ctx, socketPath, Request{
+		Version:    Version,
+		Operation:  intent.Operation,
+		Intent:     &intent,
+		Capability: &capability,
+	})
+}
+
+func VerifySealedLab(ctx context.Context, socketPath, profileID, namespace string) (Response, error) {
+	intent := helperauth.Intent{Operation: OpVerifyLab, ProfileID: profileID, Namespace: namespace}
+
+	return callRequest(ctx, socketPath, Request{Version: Version, Operation: OpVerifyLab, Intent: &intent})
+}
+
+// DeleteSealedLab needs no capability, so cleanup works while the controller is unreachable.
+func DeleteSealedLab(ctx context.Context, socketPath, profileID, namespace string) (Response, error) {
+	intent := helperauth.Intent{Operation: OpDeleteLab, ProfileID: profileID, Namespace: namespace}
+
+	return callRequest(ctx, socketPath, Request{Version: Version, Operation: OpDeleteLab, Intent: &intent})
 }

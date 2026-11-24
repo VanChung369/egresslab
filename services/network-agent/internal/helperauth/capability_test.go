@@ -187,6 +187,11 @@ func TestInvalidIntents(t *testing.T) {
 		{Operation: OpPermitProbe, ProfileID: testProfile, Namespace: testLab, ProbeIPv4: "01.1.1.1"},
 		{Operation: OpPermitProbe, ProfileID: testProfile, Namespace: testLab, ProbeIPv4: "::ffff:1.1.1.1"},
 		{Operation: OpPermitProbe, ProfileID: testProfile, Namespace: testLab, ProbeIPv4: "1.1.1.1", StageID: testStage},
+		{Operation: OpCreateLab, ProfileID: testProfile, Namespace: testLab},
+		{Operation: OpCreateLab, ProfileID: testProfile, StageID: testStage},
+		{Operation: OpCreateLab, ProfileID: testProfile, ProbeIPv4: "1.1.1.1"},
+		{Operation: OpCreateLab, ProfileID: "profile_0123"},
+		{Operation: OpCreateLab},
 	}
 
 	for _, in := range bad {
@@ -197,6 +202,72 @@ func TestInvalidIntents(t *testing.T) {
 
 	if _, err := NewClaims(connectIntent(), "helper_1234", now); err == nil {
 		t.Fatal("invalid helper ID accepted")
+	}
+
+	if _, err := NewClaims(createLabIntent(), testHelper, now); err != nil {
+		t.Fatalf("CreateLab intent rejected: %v", err)
+	}
+}
+
+func createLabIntent() Intent {
+	return Intent{Operation: OpCreateLab, ProfileID: testProfile}
+}
+
+func TestCreateLabCapabilityBinding(t *testing.T) {
+	now := time.Unix(1795500000, 0)
+	token, v, _ := testToken(t, createLabIntent(), now)
+
+	wrong := createLabIntent()
+	wrong.ProfileID = "profile_ffffffffffffffff"
+	requireInvalid(t, v.VerifyAndConsume(token, wrong), "other profile")
+
+	requireInvalid(t, v.VerifyAndConsume(token, connectIntent()), "other operation")
+
+	if err := v.VerifyAndConsume(token, createLabIntent()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := v.VerifyAndConsume(token, createLabIntent()); !errors.Is(err, ErrCapabilityReplay) {
+		t.Fatalf("replay: got %v", err)
+	}
+}
+
+// Another implementation must keep the empty "namespace":"" field.
+func TestCreateLabSigningMessageGolden(t *testing.T) {
+	private := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, ed25519.SeedSize))
+
+	claims := Claims{
+		Version:  Version,
+		Intent:   createLabIntent(),
+		HelperID: testHelper,
+		Nonce:    "00112233445566778899aabbccddeeff",
+		IssuedAt: 1795500000,
+		NotAfter: 1795500030,
+	}
+
+	wantMessage := "egresslab/helper-capability/v1\x00" +
+		`{"version":1,"intent":{"operation":"CreateLab","profile_id":"profile_0123456789abcdef","namespace":""},` +
+		`"helper_id":"helper_0123456789abcdef0123456789abcdef","nonce":"00112233445566778899aabbccddeeff",` +
+		`"issued_at":1795500000,"not_after":1795500030}`
+
+	msg, err := signingMessage(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if string(msg) != wantMessage {
+		t.Fatalf("signing message changed:\n got %q\nwant %q", msg, wantMessage)
+	}
+
+	token, err := Mint(private, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Cross-checked with OpenSSL 3 (openssl pkeyutl -sign -rawin) using the same seed.
+	const wantSignature = "jYuiWZqwyviLOxTYGLcz_UXkxmrO-Gk_Q2kEc0-hKtSTm4r59a1u-a0QFI44sYJPe6XL8EuKbS0_5kjA_o-NDw"
+	if token.Signature != wantSignature {
+		t.Fatalf("signature changed: %s", token.Signature)
 	}
 }
 

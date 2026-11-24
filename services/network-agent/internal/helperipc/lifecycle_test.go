@@ -1,0 +1,455 @@
+package helperipc
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/VanChung369/egresslab/services/network-agent/internal/helperauth"
+)
+
+const lifecycleProfile = "profile_0123456789abcdef"
+
+type fakeLifecycleBackend struct {
+	created  int
+	sealed   int
+	verified int
+	deleted  int
+
+	createErr error
+	sealErr   error
+	verifyErr error
+	deleteErr error
+}
+
+func (f *fakeLifecycleBackend) Create(context.Context) (string, error) {
+	f.created++
+
+	if f.createErr != nil {
+		return "", f.createErr
+	}
+
+	return fmt.Sprintf("egresslab-lab-%016x", f.created), nil
+}
+
+func (f *fakeLifecycleBackend) Seal(context.Context, string) error {
+	f.sealed++
+	return f.sealErr
+}
+
+func (f *fakeLifecycleBackend) Verify(context.Context, string) error {
+	f.verified++
+	return f.verifyErr
+}
+
+func (f *fakeLifecycleBackend) Delete(context.Context, string) error {
+	f.deleted++
+	return f.deleteErr
+}
+
+func lifecycleSigner(t *testing.T) (*helperauth.Verifier, func(string) Request) {
+	t.Helper()
+
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := helperauth.NewHelperID()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v, err := helperauth.NewVerifier(public, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mint := func(profileID string) Request {
+		t.Helper()
+
+		intent := helperauth.Intent{Operation: helperauth.OpCreateLab, ProfileID: profileID}
+
+		claims, err := helperauth.NewClaims(intent, id, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		token, err := helperauth.Mint(private, claims)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return Request{Version: Version, Operation: intent.Operation, Intent: &intent, Capability: &token}
+	}
+
+	return v, mint
+}
+
+func newLifecycleFixture(t *testing.T) (*LabLifecycle, *fakeLifecycleBackend, *helperauth.Verifier, func(string) Request) {
+	t.Helper()
+
+	backend := &fakeLifecycleBackend{}
+	v, mint := lifecycleSigner(t)
+
+	return NewLabLifecycle(backend), backend, v, mint
+}
+
+func existingLabRequest(op string, lab LabInfo) Request {
+	return Request{
+		Version:   Version,
+		Operation: op,
+		Intent:    &helperauth.Intent{Operation: op, ProfileID: lab.ProfileID, Namespace: lab.Namespace},
+	}
+}
+
+func TestLabLifecycleCreateVerifyDelete(t *testing.T) {
+	labs, backend, v, mint := newLifecycleFixture(t)
+	ctx := context.Background()
+	req := mint(lifecycleProfile)
+
+	unsigned := req
+	unsigned.Capability = nil
+
+	if _, err := labs.execute(ctx, unsigned, v); !errors.Is(err, errLabAuthorization) {
+		t.Fatalf("unsigned creation accepted: %v", err)
+	}
+
+	if backend.created != 0 {
+		t.Fatal("backend called without authorization")
+	}
+
+	lab, err := labs.execute(ctx, req, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if lab.State != LabSealed || lab.ProfileID != lifecycleProfile || backend.created != 1 || backend.sealed != 1 {
+		t.Fatalf("unexpected creation: %+v", lab)
+	}
+
+	if _, err := labs.execute(ctx, mint(lifecycleProfile), v); err == nil {
+		t.Fatal("duplicate profile accepted")
+	}
+
+	foreign := existingLabRequest(OpDeleteLab, lab)
+	foreign.Intent.ProfileID = "profile_ffffffffffffffff"
+
+	if _, err := labs.execute(ctx, foreign, v); !errors.Is(err, errLabOwnership) {
+		t.Fatalf("foreign deletion accepted: %v", err)
+	}
+
+	other := existingLabRequest(OpVerifyLab, lab)
+	other.Intent.Namespace = "egresslab-lab-ffffffffffffffff"
+
+	if _, err := labs.execute(ctx, other, v); !errors.Is(err, errLabOwnership) {
+		t.Fatalf("other namespace accepted: %v", err)
+	}
+
+	verified, err := labs.execute(ctx, existingLabRequest(OpVerifyLab, lab), v)
+	if err != nil || verified.State != LabSealed || backend.verified != 1 {
+		t.Fatalf("verification failed: %v", err)
+	}
+
+	deleted, err := labs.execute(ctx, existingLabRequest(OpDeleteLab, lab), v)
+	if err != nil || deleted.State != LabDeleted || len(labs.labs) != 0 {
+		t.Fatalf("deletion failed: %v", err)
+	}
+
+	// Deletion does not make the original signed capability reusable.
+	if _, err := labs.execute(ctx, req, v); !errors.Is(err, errLabAuthorization) {
+		t.Fatalf("creation replay accepted: %v", err)
+	}
+
+	if backend.created != 1 {
+		t.Fatal("replay reached kernel backend")
+	}
+}
+
+func TestLabLifecycleRejectsMalformedRequests(t *testing.T) {
+	labs, backend, v, mint := newLifecycleFixture(t)
+	ctx := context.Background()
+
+	lab, err := labs.execute(ctx, mint(lifecycleProfile), v)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	withNamespace := mint("profile_ffffffffffffffff")
+	withNamespace.Intent.Namespace = lab.Namespace
+
+	mismatched := existingLabRequest(OpVerifyLab, lab)
+	mismatched.Intent.Operation = OpDeleteLab
+
+	signedVerify := existingLabRequest(OpVerifyLab, lab)
+	signedVerify.Capability = mint(lifecycleProfile).Capability
+
+	signedDelete := existingLabRequest(OpDeleteLab, lab)
+	signedDelete.Capability = signedVerify.Capability
+
+	for name, tt := range map[string]struct {
+		req  Request
+		want error
+	}{
+		"CreateLab naming a namespace":       {withNamespace, errLabUnavailable},
+		"intent for another operation":       {mismatched, errLabUnavailable},
+		"missing intent":                     {Request{Version: Version, Operation: OpVerifyLab}, errLabUnavailable},
+		"VerifyLab carrying a capability":    {signedVerify, errLabAuthorization},
+		"DeleteLab carrying a capability":    {signedDelete, errLabAuthorization},
+		"ConnectTunnel is not lifecycle":     {Request{Version: Version, Operation: helperauth.OpConnectTunnel}, errLabUnavailable},
+		"unsupported version":                {Request{Version: 2, Operation: OpVerifyLab, Intent: mismatched.Intent}, errLabUnavailable},
+		"VerifyLab with a malformed profile": {existingLabRequest(OpVerifyLab, LabInfo{ProfileID: "x", Namespace: lab.Namespace}), errLabUnavailable},
+	} {
+		if _, err := labs.execute(ctx, tt.req, v); !errors.Is(err, tt.want) {
+			t.Fatalf("%s: got %v, want %v", name, err, tt.want)
+		}
+	}
+
+	if backend.created != 1 || backend.verified != 0 || backend.deleted != 0 {
+		t.Fatalf("refused requests reached the backend: %+v", backend)
+	}
+}
+
+func TestLabLifecycleRollsBackSealFailure(t *testing.T) {
+	labs, backend, v, mint := newLifecycleFixture(t)
+	backend.sealErr = errors.New("nft readback failed")
+
+	if _, err := labs.execute(context.Background(), mint(lifecycleProfile), v); err == nil {
+		t.Fatal("seal failure accepted")
+	}
+
+	if backend.deleted != 1 || len(labs.labs) != 0 || labs.blockCreation {
+		t.Fatal("creation was not rolled back")
+	}
+}
+
+func TestLabLifecycleRetainsFailedRollback(t *testing.T) {
+	labs, backend, v, mint := newLifecycleFixture(t)
+	backend.sealErr = errors.New("seal failed")
+	backend.deleteErr = errors.New("namespace busy")
+
+	if _, err := labs.execute(context.Background(), mint(lifecycleProfile), v); err == nil {
+		t.Fatal("failed rollback accepted")
+	}
+
+	lab := labs.labs[lifecycleProfile]
+	if lab.State != LabFaulted || !labs.blockCreation {
+		t.Fatal("failed resource was forgotten")
+	}
+
+	other := mint("profile_ffffffffffffffff")
+	if _, err := labs.execute(context.Background(), other, v); err == nil {
+		t.Fatal("allocation allowed after failed rollback")
+	}
+
+	backend.deleteErr = nil
+
+	if _, err := labs.execute(context.Background(), existingLabRequest(OpDeleteLab, lab), v); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(labs.labs) != 0 {
+		t.Fatal("failed lab not removed")
+	}
+
+	// The block is not lifted by cleanup in the same process, and the refused request above did
+	// not consume its capability.
+	if _, err := labs.execute(context.Background(), other, v); !errors.Is(err, errLabUnavailable) {
+		t.Fatalf("creation unblocked: %v", err)
+	}
+
+	if backend.created != 1 {
+		t.Fatal("unsafe second allocation attempted")
+	}
+}
+
+func TestLabLifecycleFaultsOnVerificationFailure(t *testing.T) {
+	labs, backend, v, mint := newLifecycleFixture(t)
+	ctx := context.Background()
+
+	lab, err := labs.execute(ctx, mint(lifecycleProfile), v)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backend.verifyErr = errors.New("firewall drift")
+
+	if _, err := labs.execute(ctx, existingLabRequest(OpVerifyLab, lab), v); err == nil {
+		t.Fatal("firewall drift accepted")
+	}
+
+	if labs.labs[lab.ProfileID].State != LabFaulted {
+		t.Fatal("lab not marked faulted")
+	}
+
+	// A later successful backend check must not silently restore a faulted lab.
+	backend.verifyErr = nil
+
+	if _, err := labs.execute(ctx, existingLabRequest(OpVerifyLab, lab), v); err == nil {
+		t.Fatal("faulted lab restored automatically")
+	}
+
+	if _, err := labs.execute(ctx, existingLabRequest(OpDeleteLab, lab), v); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLabLifecycleFailedDeleteKeepsOwnership(t *testing.T) {
+	labs, backend, v, mint := newLifecycleFixture(t)
+	ctx := context.Background()
+
+	lab, err := labs.execute(ctx, mint(lifecycleProfile), v)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backend.deleteErr = errors.New("namespace has processes")
+
+	if _, err := labs.execute(ctx, existingLabRequest(OpDeleteLab, lab), v); err == nil {
+		t.Fatal("failed deletion reported success")
+	}
+
+	if got := labs.labs[lab.ProfileID]; got.State != LabFaulted || got.Namespace != lab.Namespace {
+		t.Fatalf("lab after failed deletion: %+v", got)
+	}
+
+	backend.deleteErr = nil
+
+	if _, err := labs.execute(ctx, existingLabRequest(OpDeleteLab, lab), v); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLabLifecycleCapacityAndClose(t *testing.T) {
+	labs, backend, v, mint := newLifecycleFixture(t)
+	ctx := context.Background()
+
+	for i := 0; i < maxManagedLabs; i++ {
+		if _, err := labs.execute(ctx, mint(fmt.Sprintf("profile_%016x", i)), v); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := labs.execute(ctx, mint("profile_ffffffffffffffff"), v); err == nil {
+		t.Fatal("resource limit ignored")
+	}
+
+	if backend.created != maxManagedLabs {
+		t.Fatal("too many namespaces allocated")
+	}
+
+	if err := labs.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(labs.labs) != 0 || backend.deleted != maxManagedLabs {
+		t.Fatal("shutdown cleanup incomplete")
+	}
+
+	if _, err := labs.execute(ctx, mint("profile_ffffffffffffffff"), v); !errors.Is(err, errLabUnavailable) {
+		t.Fatalf("operation after close: %v", err)
+	}
+}
+
+func TestLabLifecycleCloseKeepsUndeletableLabs(t *testing.T) {
+	labs, backend, v, mint := newLifecycleFixture(t)
+
+	if _, err := labs.execute(context.Background(), mint(lifecycleProfile), v); err != nil {
+		t.Fatal(err)
+	}
+
+	backend.deleteErr = errors.New("unexpected device")
+
+	if err := labs.Close(); err == nil {
+		t.Fatal("failed cleanup not reported")
+	}
+
+	if len(labs.labs) != 1 {
+		t.Fatal("undeletable lab forgotten")
+	}
+}
+
+func TestLabLifecycleRejectsConcurrentOperations(t *testing.T) {
+	labs, backend, v, mint := newLifecycleFixture(t)
+	req := mint(lifecycleProfile)
+
+	labs.mu.Lock()
+	_, err := labs.execute(context.Background(), req, v)
+	labs.mu.Unlock()
+
+	if !errors.Is(err, errLabBusy) || backend.created != 0 {
+		t.Fatalf("busy operation accepted: %v", err)
+	}
+
+	// A busy refusal did not consume the nonce.
+	if _, err := labs.execute(context.Background(), req, v); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLabLifecycleRejectsUncertainCreation(t *testing.T) {
+	labs, backend, v, mint := newLifecycleFixture(t)
+	backend.createErr = errors.New("namespace state uncertain")
+
+	if _, err := labs.execute(context.Background(), mint(lifecycleProfile), v); err == nil {
+		t.Fatal("uncertain creation accepted")
+	}
+
+	backend.createErr = nil
+
+	if _, err := labs.execute(context.Background(), mint(lifecycleProfile), v); err == nil {
+		t.Fatal("creation not blocked after uncertain state")
+	}
+
+	if backend.created != 1 {
+		t.Fatal("unsafe second allocation attempted")
+	}
+}
+
+func TestValidLabResponse(t *testing.T) {
+	const ns = "egresslab-lab-0123456789abcdef"
+
+	create := Request{Version: Version, Operation: helperauth.OpCreateLab,
+		Intent: &helperauth.Intent{Operation: helperauth.OpCreateLab, ProfileID: lifecycleProfile}}
+	verify := existingLabRequest(OpVerifyLab, LabInfo{ProfileID: lifecycleProfile, Namespace: ns})
+	del := existingLabRequest(OpDeleteLab, LabInfo{ProfileID: lifecycleProfile, Namespace: ns})
+	ping := Request{Version: Version, Operation: OpPing}
+
+	lab := func(profile, namespace, state string) *LabInfo {
+		return &LabInfo{ProfileID: profile, Namespace: namespace, State: state}
+	}
+
+	tests := []struct {
+		name string
+		req  Request
+		resp Response
+		want bool
+	}{
+		{"created", create, Response{OK: true, Lab: lab(lifecycleProfile, ns, LabSealed)}, true},
+		{"verified", verify, Response{OK: true, Lab: lab(lifecycleProfile, ns, LabSealed)}, true},
+		{"deleted", del, Response{OK: true, Lab: lab(lifecycleProfile, ns, LabDeleted)}, true},
+		{"refusal without metadata", create, Response{Error: "authorization denied"}, true},
+		{"ping without metadata", ping, Response{OK: true}, true},
+
+		{"metadata on ping", ping, Response{OK: true, Lab: lab(lifecycleProfile, ns, LabSealed)}, false},
+		{"metadata on a refusal", create, Response{Error: "x", Lab: lab(lifecycleProfile, ns, LabSealed)}, false},
+		{"missing metadata", create, Response{OK: true}, false},
+		{"other profile", create, Response{OK: true, Lab: lab("profile_ffffffffffffffff", ns, LabSealed)}, false},
+		{"invalid namespace", create, Response{OK: true, Lab: lab(lifecycleProfile, "../default", LabSealed)}, false},
+		{"created but faulted", create, Response{OK: true, Lab: lab(lifecycleProfile, ns, LabFaulted)}, false},
+		{"created but deleted", create, Response{OK: true, Lab: lab(lifecycleProfile, ns, LabDeleted)}, false},
+		{"verified other namespace", verify,
+			Response{OK: true, Lab: lab(lifecycleProfile, "egresslab-lab-ffffffffffffffff", LabSealed)}, false},
+		{"deleted but sealed", del, Response{OK: true, Lab: lab(lifecycleProfile, ns, LabSealed)}, false},
+	}
+
+	for _, tt := range tests {
+		if got := validLabResponse(tt.req, tt.resp); got != tt.want {
+			t.Errorf("%s: got %t, want %t", tt.name, got, tt.want)
+		}
+	}
+}

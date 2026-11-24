@@ -195,7 +195,7 @@ Observed results:
 
 The Network Agent's HTTP API is read-only: every route is `GET`, and the controller treats the agent as healthy only when it reports `mode=read-only` and `network_ready=false`. The agent refuses to start as root or with `CAP_NET_ADMIN`, `CAP_NET_RAW` or `CAP_SYS_ADMIN`.
 
-Privileged networking exists only as **lab CLIs**. You run them by hand with `sudo` on the VM, and nothing triggers them over HTTP:
+Privileged networking exists as **lab CLIs** that you run by hand with `sudo` on the VM, plus the helper's opt-in sealed lab lifecycle. Nothing triggers either over HTTP:
 
 | Command | What it exercises |
 |---|---|
@@ -206,7 +206,7 @@ Privileged networking exists only as **lab CLIs**. You run them by hand with `su
 | `egresslab-vpn-lab -file vpn.conf` | Real VPN egress through a sealed namespace (details below) |
 | `egresslab-wg-inspect`, `egresslab-wg-vault-lab` | Config import summary; in-memory or opt-in encrypted staging |
 | `egresslab-lab-recover [-delete]` | Report (default) leftovers of a crashed session; `-delete` removes only orphan namespaces holding nothing but `lo`/lab veth (never one with WireGuard) and stale markers. Underlay tables are never removed automatically |
-| `egresslab-helper -uid <UID> -gid <GID>`, `egresslab-helperctl ping\|recover-scan\|helper-info` | Helper IPC: Unix socket with `SO_PEERCRED`, read-only `Ping`/`RecoverScan`/`HelperInfo`, optional `AuthorizeCheck` dry-run (details below) |
+| `egresslab-helper -uid <UID> -gid <GID>`, `egresslab-helperctl ping\|recover-scan\|helper-info` | Helper IPC: Unix socket with `SO_PEERCRED`, read-only `Ping`/`RecoverScan`/`HelperInfo`, optional `AuthorizeCheck` dry-run and sealed lab lifecycle (details below) |
 
 `egresslab-vpn-lab` runs these steps:
 
@@ -219,7 +219,7 @@ Privileged networking exists only as **lab CLIs**. You run them by hand with `su
 
 Still not implemented:
 
-- Network changes through the privileged helper. Its IPC, the Ed25519 capability check and per-start helper epochs exist (read-only `Ping`, `RecoverScan`, `HelperInfo` and the `AuthorizeCheck` dry-run). Mutations still need controller key management and trust provisioning, and per-operation policy checks. The design is in `docs/PRIVILEGED-HELPER.md`.
+- Tunnels and probes through the privileged helper. The helper can already create, verify and delete sealed, loopback-only lab namespaces when started with `-enable-lab-lifecycle`, but no CLI or controller calls those operations yet. The design is in `docs/PRIVILEGED-HELPER.md`.
 - DNS through the tunnel. DNS (port 53) and IPv6 are explicitly dropped inside lab namespaces.
 - Multi-peer configs, and hostname endpoints in the VPN lab. The importer reports `vpn_lab_compatible=false` for these.
 - SOCKS5 runtime activation.
@@ -247,7 +247,7 @@ The firewall readback tests use real `nft -j` captures from nft 1.0.2 (Ubuntu 22
 sudo ip netns exec <egresslab-lab-...> nft -j list ruleset
 ```
 
-### Helper IPC (Steps 22–24)
+### Helper IPC (Steps 22–25)
 
 The helper runs as root in this lab step. The production design keeps only `CAP_NET_ADMIN`. Install the binaries as root-owned files:
 
@@ -284,7 +284,9 @@ If the WSL clock steps backwards between two checks, the helper refuses all capa
 
 `egresslab-helperctl` cannot send `AuthorizeCheck`. Later the controller will mint capabilities and the agent will forward them over the socket.
 
-Run the socket tests in `internal/helperipc` as a non-root user. Under root, only `TestPeerRejection`, `TestServeRejectsRootClientUID` and `TestClientValidatesHelperInfo` run; the others skip. The key-loader tests in `cmd/egresslab-helper` run under both.
+Add `-enable-lab-lifecycle` (it requires `-auth-public-key-file`) to let the helper create, verify and delete sealed lab namespaces, at most 8, one per profile. `egresslab-helperctl` cannot call these operations; the Go client functions (`CreateSealedLab`, `VerifySealedLab`, `DeleteSealedLab`) are not wired to a CLI or the controller yet. On Ctrl+C the helper deletes its labs. After a `SIGKILL`, `sudo egresslab-lab-recover` reports them as orphans and `-delete` removes them.
+
+Run the socket tests in `internal/helperipc` as a non-root user. Under root, the tests that need a non-root socket client skip. The key-loader tests in `cmd/egresslab-helper` run under both.
 
 ## Security Notes
 
@@ -297,4 +299,4 @@ Run the socket tests in `internal/helperipc` as a non-root user. Under root, onl
 
 ## Next Milestone
 
-Implement safe Network Namespace lifecycle management after establishing appropriate authorization and privilege boundaries.
+Connect the controller and the agent to the helper's sealed lab lifecycle (controller signing key, capability minting), then move tunnel operations behind the helper.

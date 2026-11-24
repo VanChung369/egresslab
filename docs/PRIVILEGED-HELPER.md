@@ -1,7 +1,8 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 24 — restart-safe helper authorization.** Network changes through the helper are
-still not implemented; the sections from "Typed operations only" on are partly design.
+Status: **Step 25 — opt-in sealed lab lifecycle implemented.** The helper can create, verify and
+delete sealed lab namespaces. Tunnels and probes through the helper are still not implemented;
+the sections from "Typed operations only" on are partly design.
 
 ## Implemented
 
@@ -28,7 +29,14 @@ still not implemented; the sections from "Typed operations only" on are partly d
 - Optional root-owned public-key loading in the helper (`-auth-public-key-file`).
 - Operator-managed, offline public-key replacement (see "Key replacement").
 - Unit tests for signatures, expiry, binding, concurrency, replay, epochs, clock rollback, the
-  signing-message golden vector, `HelperInfo` validation and the key loader.
+  signing-message golden vectors, `HelperInfo` validation and the key loader.
+- Sealed lab lifecycle behind `-enable-lab-lifecycle` (see "Sealed lab lifecycle"):
+  - signed `CreateLab`, with helper-generated namespace names;
+  - automatic firewall sealing and verification, plus a loopback-only topology check;
+  - one namespace per profile, at most eight per helper process;
+  - `VerifyLab` and `DeleteLab` with ownership checks;
+  - serialized lifecycle operations;
+  - rollback, cleanup at normal shutdown, and retention of faulted resources.
 
 ## Not implemented
 
@@ -37,10 +45,11 @@ still not implemented; the sections from "Typed operations only" on are partly d
   own implementation of the format below, checked against `TestSigningMessageGolden`.
 - A controller approval workflow for individual operations.
 - Live key rotation and automatic key distribution.
-- Network-changing operations through IPC (`CreateLab`, `ConnectTunnel`, `PermitProbe`,
-  `RecoverClean`, ...).
+- `ConnectTunnel`, `PermitProbe` and `RecoverClean` through IPC.
+- Persistent profile-to-namespace ownership, and coordination with other processes that manage
+  lab namespaces.
 - Per-operation kernel and policy authorization.
-- A `CAP_NET_ADMIN`-only helper runtime and systemd hardening.
+- Production privilege hardening: a `CAP_NET_ADMIN`-only helper runtime and systemd.
 - A persistent audit log.
 - Production route readiness and proxy activation.
 - The agent does not call the helper yet.
@@ -51,7 +60,9 @@ still not implemented; the sections from "Typed operations only" on are partly d
 - A successful dry-run consumes its nonce. It does not authorize a later operation with the same
   capability.
 - A request named `ConnectTunnel` or `PermitProbe` gets `operation not enabled`, even with a valid
-  capability, and the capability stays unused.
+  capability and with the lab lifecycle enabled, and the capability stays unused.
+- A sealed lab is a namespace with a verified default-deny firewall and only `lo`. It is not a
+  connected VPN and not a verified egress IP.
 - Every IPC response sets `network_ready=false`, and the client rejects a response that does not.
 - `HelperInfo` returns only public metadata. It is not authenticated to the client, so the
   controller must compare the fingerprint with the key it pinned, and must never start trusting a
@@ -71,11 +82,13 @@ still not implemented; the sections from "Typed operations only" on are partly d
 - The controller still answers `POST /api/v1/endpoints/{id}/start` with `409 ROUTE_NOT_VERIFIED`.
   It treats the agent as healthy only when the agent reports `mode=read-only` and
   `network_ready=false`.
-- Privileged changes run only from the `egresslab-*-lab` CLIs. An operator starts those with `sudo`
-  in a terminal on the VM.
-- The helper socket accepts only the configured agent UID. It answers only `Ping`, `RecoverScan`,
-  `HelperInfo` and the `AuthorizeCheck` dry-run (`TestPeerRejection`,
-  `TestPeerIdentityAndReadOnlyOperations`, `TestMutationWithValidCapabilityIsRefused`).
+- Privileged changes run from the `egresslab-*-lab` CLIs, which an operator starts with `sudo` in
+  a terminal on the VM. The only exception is the helper's sealed lab lifecycle, and only when
+  the helper was started with `-enable-lab-lifecycle` and a public key.
+- The helper socket accepts only the configured agent UID. It answers `Ping`, `RecoverScan`,
+  `HelperInfo`, the `AuthorizeCheck` dry-run and, with the lifecycle flag, `CreateLab`,
+  `VerifyLab` and `DeleteLab` (`TestPeerRejection`, `TestPeerIdentityAndReadOnlyOperations`,
+  `TestMutationWithValidCapabilityIsRefused`, `TestLabLifecycleIPCRefusals`).
 
 Changing any of these needs the helper below first.
 
@@ -107,7 +120,7 @@ Changing any of these needs the helper below first.
 
 The helper exposes a fixed set of operations, never a command line:
 
-`CreateLab`, `SealLab`, `ConnectTunnel{profile_id, stage_id}`, `PermitProbe{ipv4}`,
+`CreateLab` (creates and seals), `ConnectTunnel{profile_id, stage_id}`, `PermitProbe{ipv4}`,
 `VerifyLab`, `Disconnect`, `DeleteLab`, `RecoverScan`, `RecoverClean`.
 
 Every argument is validated with the existing patterns: `egresslab-lab-<16 hex>`,
@@ -116,13 +129,13 @@ Every argument is validated with the existing patterns: `egresslab-lab-<16 hex>`
 
 ## Authorization
 
-Each operation that opens traffic (`ConnectTunnel`, `PermitProbe`) needs a capability that the
-controller mints. Implemented format, version 1:
+`CreateLab` and each operation that opens traffic (`ConnectTunnel`, `PermitProbe`) need a
+capability that the controller mints. Implemented format, version 1:
 
 ```text
 claims = {"version":1,
           "intent":{"operation":..., "profile_id":"profile_<16 hex>",
-                    "namespace":"egresslab-lab-<16 hex>",
+                    "namespace":"egresslab-lab-<16 hex>",  ("" for CreateLab)
                     "stage_id":"wgstage_<32 hex>"          (ConnectTunnel only)
                     "probe_ipv4":"<dotted IPv4>"},          (PermitProbe only)
           "helper_id":"helper_<32 hex>", "nonce":"<32 hex>",
@@ -132,9 +145,10 @@ message   = "egresslab/helper-capability/v1" || 0x00 || compact JSON of claims, 
 signature = base64url(Ed25519-sign(controller_key, message)), no padding
 ```
 
-`TestSigningMessageGolden` pins the exact message and signature for a fixed seed. OpenSSL 3
-(`openssl pkeyutl -sign -rawin`) produces the same signature, so a non-Go controller can implement
-the format.
+`TestSigningMessageGolden` and `TestCreateLabSigningMessageGolden` pin the exact messages and
+signatures for a fixed seed. OpenSSL 3 (`openssl pkeyutl -sign -rawin`) produces the same
+signatures, so a non-Go controller can implement the format. A `CreateLab` intent keeps
+`"namespace":""` in the signed JSON; dropping the empty field breaks the signature.
 
 - The helper holds only the public key: a root-owned file of 64 hex characters, in a root-owned
   directory, neither writable by group or others. It is provisioned out of band.
@@ -162,8 +176,9 @@ the format.
 - The controller mints a capability only after the desktop user confirms the action, and only
   when the profile passes its invariants (unique IP, kill-switch). (Not implemented.)
 
-Operations that only close or remove traffic (`Disconnect`, `DeleteLab`) need just the peer UID
-check. This keeps cleanup possible even when the controller is down.
+Operations that only read or remove (`VerifyLab`, `Disconnect`, `DeleteLab`) need just the peer
+UID check, and refuse a capability if one is attached. This keeps cleanup possible even when the
+controller is down.
 
 ### Key replacement
 
@@ -177,6 +192,42 @@ Rotation is offline and operator-managed:
 
 The controller must not trust a new key only because the helper reports a new fingerprint. Live
 rotation, automatic key distribution and production private-key management are not implemented.
+
+## Sealed lab lifecycle
+
+| `-auth-public-key-file` | `-enable-lab-lifecycle` | Helper mode |
+|---|---|---|
+| no | no | read-only |
+| yes | no | read-only + `AuthorizeCheck` dry-run |
+| no | yes | refuses to start |
+| yes | yes | signed sealed lab lifecycle |
+
+`CreateLab` creates a namespace with a generated name and an ownership marker. It checks that only
+`lo` exists, installs the sealed firewall and reads it back. The capability is consumed just
+before the kernel work starts. Refusals for a duplicate profile, a full helper (8 labs) or a busy
+helper leave it unused.
+
+- **Seal fails:** the helper deletes the namespace. If that fails too, the lab stays tracked as
+  faulted and creation is blocked for the rest of the process.
+- **Create fails:** creation is blocked as well, because the kernel state may be uncertain. The
+  block shows only in the helper log; check `egresslab-lab-recover`, then restart the helper.
+- **`VerifyLab`** re-reads the topology and the firewall. Any difference marks the lab faulted.
+  It never repairs, and a faulted lab is never restored; only `DeleteLab` clears it.
+- **`DeleteLab`** refuses a namespace that holds any device besides `lo` or has processes, and
+  leaves it for inspection. A namespace removed outside the helper is released.
+- **Normal shutdown** (`SIGINT`, `SIGTERM`, `SIGHUP`) waits for a running operation, then deletes
+  every lab it safely can. After a `SIGKILL` or crash, the labs and their markers remain;
+  `egresslab-lab-recover` reports them as orphans, and `-delete` removes them.
+
+Ownership lives in memory only. The client sees `authorization denied` or `lab operation failed`;
+the cause (busy, duplicate, drift, topology) is only in the helper log. If a `CreateLab` response
+is lost, the lab is stranded: `DeleteLab` needs the namespace name, and no operation lists labs.
+Only a helper restart frees it.
+
+On kernels that have `sit`, `ipip` or `ip_gre` loaded, every new namespace gets fallback tunnel
+devices (`sit0`, `tunl0`, ...), so every `CreateLab` rolls back. The sysctl
+`net.core.fb_tunnels_only_for_init_net` should prevent that (not tested here). The tested WSL
+kernel creates none.
 
 ## Invariants the helper keeps
 

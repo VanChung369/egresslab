@@ -26,6 +26,9 @@ const (
 	OpConnectTunnel = "ConnectTunnel"
 	OpPermitProbe   = "PermitProbe"
 
+	// The helper picks the namespace, so a CreateLab intent signs "namespace":"".
+	OpCreateLab = "CreateLab"
+
 	maxLiveNonces = 4096
 )
 
@@ -68,8 +71,28 @@ type SignedCapability struct {
 	Signature string `json:"signature"` // base64url without padding, 64 bytes decoded
 }
 
+func ValidProfileID(id string) bool {
+	return profilePattern.MatchString(id)
+}
+
+func ValidLabNamespace(name string) bool {
+	return labPattern.MatchString(name)
+}
+
 func validateIntent(in Intent) error {
-	if !profilePattern.MatchString(in.ProfileID) || !labPattern.MatchString(in.Namespace) {
+	if !ValidProfileID(in.ProfileID) {
+		return ErrInvalidCapability
+	}
+
+	if in.Operation == OpCreateLab {
+		if in.Namespace != "" || in.StageID != "" || in.ProbeIPv4 != "" {
+			return ErrInvalidCapability
+		}
+
+		return nil
+	}
+
+	if !ValidLabNamespace(in.Namespace) {
 		return ErrInvalidCapability
 	}
 

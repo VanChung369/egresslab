@@ -69,7 +69,7 @@ var (
 	routePattern      = regexp.MustCompile(`HandleFunc\("([A-Z]+) `)
 	anyRoutePattern   = regexp.MustCompile(`\.Handle(Func)?\(`)
 	privilegedPattern = regexp.MustCompile(
-		`NetNSLabManager|LabFirewall|VPNEgressLab|WireGuardLab|WireGuardConfigVault|SealedWireGuardStore|` +
+		`NetNSLabManager|LabFirewall|SealedLabBackend|VPNEgressLab|WireGuardLab|WireGuardConfigVault|SealedWireGuardStore|` +
 			`EgressCandidateRegistry|LabRecovery|newSystemWGRunner|newSystemUnderlayNFT|` +
 			`findSystemBinary\("(wg|nft)"\)`)
 )

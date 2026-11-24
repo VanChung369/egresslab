@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"regexp"
 	"sync"
@@ -31,7 +32,7 @@ type RecoveryScanner func(context.Context) ([]RecoveryItem, error)
 // authorization: AuthorizeCheck answers "authorization unavailable".
 //
 // The caller owns socket creation and permissions. A peer whose SO_PEERCRED UID is not
-// allowedUID is closed before anything is read from it. No network-changing operation exists.
+// allowedUID is closed before anything is read from it. Serve dispatches no network change.
 func Serve(ctx context.Context, listener *net.UnixListener, allowedUID uint32, scan RecoveryScanner) error {
 	return ServeAuthorized(ctx, listener, allowedUID, scan, nil)
 }
@@ -45,6 +46,23 @@ func ServeAuthorized(
 	scan RecoveryScanner,
 	v *helperauth.Verifier,
 ) error {
+	return ServeLifecycle(ctx, listener, allowedUID, scan, v, nil)
+}
+
+// ServeLifecycle adds CreateLab, VerifyLab and DeleteLab when labs is not nil. It returns after
+// all workers finish; the caller then runs labs.Close.
+func ServeLifecycle(
+	ctx context.Context,
+	listener *net.UnixListener,
+	allowedUID uint32,
+	scan RecoveryScanner,
+	v *helperauth.Verifier,
+	labs *LabLifecycle,
+) error {
+	if labs != nil && v == nil {
+		return errors.New("lab lifecycle requires authorization")
+	}
+
 	if listener == nil || allowedUID == 0 {
 		return errors.New("invalid helper listener or client UID")
 	}
@@ -83,7 +101,7 @@ func ServeAuthorized(
 				defer workers.Done()
 				defer func() { <-slots }()
 
-				handle(ctx, conn, allowedUID, scan, v)
+				handle(ctx, conn, allowedUID, scan, v, labs)
 			}()
 
 		default:
@@ -115,7 +133,14 @@ func peerUID(conn *net.UnixConn) (uint32, error) {
 	return uid, optErr
 }
 
-func handle(ctx context.Context, conn *net.UnixConn, allowedUID uint32, scan RecoveryScanner, v *helperauth.Verifier) {
+func handle(
+	ctx context.Context,
+	conn *net.UnixConn,
+	allowedUID uint32,
+	scan RecoveryScanner,
+	v *helperauth.Verifier,
+	labs *LabLifecycle,
+) {
 	defer conn.Close()
 
 	// Authenticate the peer before reading or parsing anything from the socket.
@@ -136,7 +161,13 @@ func handle(ctx context.Context, conn *net.UnixConn, allowedUID uint32, scan Rec
 		return
 	}
 
-	resp := respond(ctx, req, scan, v)
+	if isLifecycleOp(req.Operation) {
+		if err := conn.SetWriteDeadline(time.Now().Add(lifecycleResponseTimeout)); err != nil {
+			return
+		}
+	}
+
+	resp := respond(ctx, req, scan, v, labs)
 
 	if err := WriteFrame(conn, resp); errors.Is(err, ErrInvalidFrame) {
 		_ = WriteFrame(conn, Response{
@@ -147,7 +178,13 @@ func handle(ctx context.Context, conn *net.UnixConn, allowedUID uint32, scan Rec
 	}
 }
 
-func respond(ctx context.Context, req Request, scan RecoveryScanner, v *helperauth.Verifier) Response {
+func respond(
+	ctx context.Context,
+	req Request,
+	scan RecoveryScanner,
+	v *helperauth.Verifier,
+	labs *LabLifecycle,
+) Response {
 	resp := Response{Version: Version, NetworkReady: false}
 
 	if echoableOperation.MatchString(req.Operation) {
@@ -224,6 +261,37 @@ func respond(ctx context.Context, req Request, scan RecoveryScanner, v *helperau
 
 		// Dry-run only: nothing is executed for an accepted capability.
 		resp.OK = true
+
+	case helperauth.OpCreateLab, OpVerifyLab, OpDeleteLab:
+		if labs == nil {
+			resp.Error = "operation not enabled"
+			return resp
+		}
+
+		if ctx.Err() != nil {
+			resp.Error = "helper is shutting down"
+			return resp
+		}
+
+		// Shutdown must not kill a kernel command halfway (after "ip netns add" but before
+		// ownership is recorded); the server waits for the operation instead.
+		labCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lifecycleTimeout)
+		lab, err := labs.execute(labCtx, req, v)
+		cancel()
+
+		if err != nil {
+			if errors.Is(err, errLabAuthorization) {
+				resp.Error = "authorization denied"
+			} else {
+				log.Printf("lab lifecycle %s: %v", req.Operation, err)
+				resp.Error = "lab operation failed"
+			}
+
+			return resp
+		}
+
+		resp.OK = true
+		resp.Lab = &lab
 
 	default:
 		// Network mutations stay disabled, with or without a valid capability.

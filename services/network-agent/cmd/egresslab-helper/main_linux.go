@@ -4,7 +4,8 @@
 // /run/egresslab/helper.sock, accepts only the configured agent UID (SO_PEERCRED) and answers
 // read-only operations: Ping, RecoverScan and HelperInfo. With -auth-public-key-file it also
 // answers the AuthorizeCheck dry-run, under a random helper ID (epoch) generated at every start.
-// Network-changing operations are not implemented.
+// With -enable-lab-lifecycle as well, it creates (signed), verifies and deletes sealed lab
+// namespaces. Tunnel and probe operations are not implemented.
 //
 // In this step it runs as root under sudo; the production design keeps only CAP_NET_ADMIN.
 package main
@@ -30,23 +31,40 @@ func main() {
 	gid := flag.Int("gid", -1, "agent's primary group ID (gets socket access)")
 	publicKeyFile := flag.String("auth-public-key-file", "",
 		"root-owned file with the controller's Ed25519 public key (64 hex characters); enables AuthorizeCheck")
+	enableLifecycle := flag.Bool("enable-lab-lifecycle", false,
+		"enable signed sealed lab lifecycle operations (requires -auth-public-key-file)")
 	flag.Parse()
 
 	if os.Geteuid() != 0 || *uid <= 0 || *gid <= 0 || flag.NArg() != 0 {
 		log.Fatal("usage: sudo egresslab-helper -uid <non-root UID> -gid <non-root GID> " +
-			"[-auth-public-key-file <path>]")
+			"[-auth-public-key-file <path> [-enable-lab-lifecycle]]")
 	}
 
-	if err := run(*uid, *gid, *publicKeyFile); err != nil {
+	if err := run(*uid, *gid, *publicKeyFile, *enableLifecycle); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(uid, gid int, publicKeyFile string) error {
+func run(uid, gid int, publicKeyFile string, enableLifecycle bool) error {
 	// Load the key before touching /run/egresslab, so a bad configuration changes nothing.
 	verifier, err := loadAuthVerifier(publicKeyFile)
 	if err != nil {
 		return fmt.Errorf("authorization configuration: %w", err)
+	}
+
+	var labs *helperipc.LabLifecycle
+
+	if enableLifecycle {
+		if verifier == nil {
+			return errors.New("lab lifecycle requires a configured authorization public key")
+		}
+
+		backend, err := agent.NewSealedLabBackend()
+		if err != nil {
+			return fmt.Errorf("initialize sealed lab backend: %w", err)
+		}
+
+		labs = helperipc.NewLabLifecycle(backend)
 	}
 
 	listener, cleanup, err := prepareSocket(gid)
@@ -67,9 +85,19 @@ func run(uid, gid int, publicKeyFile string) error {
 		log.Printf("Helper epoch: %s; controller public-key SHA256: %s", helperID, fingerprint)
 	}
 
+	if labs != nil {
+		mode = "signed sealed lab lifecycle enabled; VPN operations disabled"
+	}
+
 	log.Printf("EgressLab helper listening on %s (UID %d; %s)", helperipc.SocketPath, uid, mode)
 
-	err = helperipc.ServeAuthorized(ctx, listener, uint32(uid), scanRecovery, verifier)
+	err = helperipc.ServeLifecycle(ctx, listener, uint32(uid), scanRecovery, verifier, labs)
+
+	// Labs that cannot be deleted stay, with their markers, for egresslab-lab-recover.
+	if labs != nil {
+		err = errors.Join(err, labs.Close())
+	}
+
 	log.Print("EgressLab helper stopped")
 
 	return err
