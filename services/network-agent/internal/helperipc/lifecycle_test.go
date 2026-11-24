@@ -15,15 +15,22 @@ import (
 const lifecycleProfile = "profile_0123456789abcdef"
 
 type fakeLifecycleBackend struct {
-	created  int
-	sealed   int
-	verified int
-	deleted  int
+	preflights int
+	created    int
+	sealed     int
+	verified   int
+	deleted    int
 
-	createErr error
-	sealErr   error
-	verifyErr error
-	deleteErr error
+	preflightErr error
+	createErr    error
+	sealErr      error
+	verifyErr    error
+	deleteErr    error
+}
+
+func (f *fakeLifecycleBackend) Preflight(context.Context) error {
+	f.preflights++
+	return f.preflightErr
 }
 
 func (f *fakeLifecycleBackend) Create(context.Context) (string, error) {
@@ -139,7 +146,7 @@ func TestLabLifecycleCreateVerifyDelete(t *testing.T) {
 	foreign := existingLabRequest(OpDeleteLab, lab)
 	foreign.Intent.ProfileID = "profile_ffffffffffffffff"
 
-	if _, err := labs.execute(ctx, foreign, v); !errors.Is(err, errLabOwnership) {
+	if _, err := labs.execute(ctx, foreign, v); !errors.Is(err, errLabNotFound) {
 		t.Fatalf("foreign deletion accepted: %v", err)
 	}
 
@@ -195,14 +202,14 @@ func TestLabLifecycleRejectsMalformedRequests(t *testing.T) {
 		req  Request
 		want error
 	}{
-		"CreateLab naming a namespace":       {withNamespace, errLabUnavailable},
-		"intent for another operation":       {mismatched, errLabUnavailable},
-		"missing intent":                     {Request{Version: Version, Operation: OpVerifyLab}, errLabUnavailable},
+		"CreateLab naming a namespace":       {withNamespace, errLabInvalid},
+		"intent for another operation":       {mismatched, errLabInvalid},
+		"missing intent":                     {Request{Version: Version, Operation: OpVerifyLab}, errLabInvalid},
 		"VerifyLab carrying a capability":    {signedVerify, errLabAuthorization},
 		"DeleteLab carrying a capability":    {signedDelete, errLabAuthorization},
-		"ConnectTunnel is not lifecycle":     {Request{Version: Version, Operation: helperauth.OpConnectTunnel}, errLabUnavailable},
-		"unsupported version":                {Request{Version: 2, Operation: OpVerifyLab, Intent: mismatched.Intent}, errLabUnavailable},
-		"VerifyLab with a malformed profile": {existingLabRequest(OpVerifyLab, LabInfo{ProfileID: "x", Namespace: lab.Namespace}), errLabUnavailable},
+		"ConnectTunnel is not lifecycle":     {Request{Version: Version, Operation: helperauth.OpConnectTunnel}, errLabInvalid},
+		"unsupported version":                {Request{Version: 2, Operation: OpVerifyLab, Intent: mismatched.Intent}, errLabInvalid},
+		"VerifyLab with a malformed profile": {existingLabRequest(OpVerifyLab, LabInfo{ProfileID: "x", Namespace: lab.Namespace}), errLabInvalid},
 	} {
 		if _, err := labs.execute(ctx, tt.req, v); !errors.Is(err, tt.want) {
 			t.Fatalf("%s: got %v, want %v", name, err, tt.want)
@@ -258,7 +265,7 @@ func TestLabLifecycleRetainsFailedRollback(t *testing.T) {
 
 	// The block is not lifted by cleanup in the same process, and the refused request above did
 	// not consume its capability.
-	if _, err := labs.execute(context.Background(), other, v); !errors.Is(err, errLabUnavailable) {
+	if _, err := labs.execute(context.Background(), other, v); !errors.Is(err, errLabUncertain) {
 		t.Fatalf("creation unblocked: %v", err)
 	}
 
@@ -334,8 +341,8 @@ func TestLabLifecycleCapacityAndClose(t *testing.T) {
 		}
 	}
 
-	if _, err := labs.execute(ctx, mint("profile_ffffffffffffffff"), v); err == nil {
-		t.Fatal("resource limit ignored")
+	if _, err := labs.execute(ctx, mint("profile_ffffffffffffffff"), v); !errors.Is(err, errLabLimit) {
+		t.Fatalf("resource limit ignored: %v", err)
 	}
 
 	if backend.created != maxManagedLabs {
@@ -495,6 +502,78 @@ func TestValidLabListResponse(t *testing.T) {
 	for _, tt := range tests {
 		if got := validLabListResponse(tt.req, tt.resp); got != tt.want {
 			t.Errorf("%s: got %t, want %t", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestLabLifecyclePreflightGate(t *testing.T) {
+	labs, backend, v, mint := newLifecycleFixture(t)
+	ctx := context.Background()
+	req := mint(lifecycleProfile)
+
+	for _, tt := range []struct {
+		err  error
+		code string
+	}{
+		{fmt.Errorf("%w: orphan egresslab-lab-00000000000000a1", ErrLabRecoveryRequired), CodeRecoveryRequired},
+		{errors.New("scan failed"), CodeRecoveryRequired},
+		{fmt.Errorf("%w: sit0", ErrLabKernelIncompatible), CodeKernelIncompatible},
+	} {
+		backend.preflightErr = tt.err
+
+		if _, err := labs.execute(ctx, req, v); labCode(err) != tt.code {
+			t.Fatalf("%v: got %v (%s), want %s", tt.err, err, labCode(err), tt.code)
+		}
+	}
+
+	if backend.created != 0 {
+		t.Fatal("namespace created despite the gate")
+	}
+
+	// The refusals did not consume the capability.
+	backend.preflightErr = nil
+
+	if _, err := labs.execute(ctx, req, v); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify and delete stay possible whatever the gate says.
+	backend.preflightErr = ErrLabRecoveryRequired
+	lab := labs.labs[lifecycleProfile]
+
+	if _, err := labs.execute(ctx, existingLabRequest(OpDeleteLab, lab), v); err != nil {
+		t.Fatalf("delete blocked by the gate: %v", err)
+	}
+}
+
+func TestLabCodes(t *testing.T) {
+	wrap := func(err error) error { return fmt.Errorf("context: %w", err) }
+
+	tests := map[string]error{
+		CodeAuthorizationDenied: wrap(errLabAuthorization),
+		CodeLabBusy:             errLabBusy,
+		CodeLabNotFound:         errLabNotFound,
+		CodeOwnershipMismatch:   errLabOwnership,
+		CodeLabExists:           errLabExists,
+		CodeLabLimit:            errLabLimit,
+		CodeInvalidRequest:      errLabInvalid,
+		CodeRuntimeUnavailable:  errLabUnavailable,
+		CodeRecoveryRequired:    wrap(ErrLabRecoveryRequired),
+		CodeKernelIncompatible:  wrap(ErrLabKernelIncompatible),
+		CodeFirewallDrift:       fmt.Errorf("%w: %w", errLabFaulted, ErrLabFirewallDrift),
+		CodeLabFaulted:          fmt.Errorf("%w: %w", errLabFaulted, ErrLabTopology),
+		// A failed rollback joins the seal error with an uncertain state.
+		CodeStateUncertain: errors.Join(fmt.Errorf("%w: seal: %w", errLabUncertain, ErrLabFirewallDrift), errors.New("busy")),
+		CodeInternal:       errors.New("seal namespace (rolled back): nft failed"),
+	}
+
+	for want, err := range tests {
+		if got := labCode(err); got != want {
+			t.Errorf("%v: got %s, want %s", err, got, want)
+		}
+
+		if !knownCodes[want] || labMessages[want] == "" {
+			t.Errorf("%s has no message", want)
 		}
 	}
 }

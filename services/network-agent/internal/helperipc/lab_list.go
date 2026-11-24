@@ -1,7 +1,6 @@
 package helperipc
 
 import (
-	"errors"
 	"sort"
 
 	"github.com/VanChung369/egresslab/services/network-agent/internal/helperauth"
@@ -21,7 +20,7 @@ func (l *LabLifecycle) snapshot() ([]LabInfo, error) {
 	defer l.mu.Unlock()
 
 	if l.closed {
-		return nil, errors.New("lab lifecycle closed")
+		return nil, errLabUnavailable
 	}
 
 	items := make([]LabInfo, 0, len(l.labs))

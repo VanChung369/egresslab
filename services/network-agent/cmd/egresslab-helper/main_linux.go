@@ -53,18 +53,30 @@ func run(uid, gid int, publicKeyFile string, enableLifecycle bool) error {
 	}
 
 	var labs *helperipc.LabLifecycle
+	var backend labBackend
 
 	if enableLifecycle {
 		if verifier == nil {
 			return errors.New("lab lifecycle requires a configured authorization public key")
 		}
 
-		backend, err := agent.NewSealedLabBackend()
+		// Read-only: EgressLab never changes this sysctl or loads/unloads modules.
+		if err := agent.CheckSealedLabKernel(); err != nil {
+			return fmt.Errorf("lab lifecycle: %w", err)
+		}
+
+		sealed, err := agent.NewSealedLabBackend()
 		if err != nil {
 			return fmt.Errorf("initialize sealed lab backend: %w", err)
 		}
 
+		backend = labBackend{sealed}
 		labs = helperipc.NewLabLifecycle(backend)
+	}
+
+	runtimeID, err := runtimeIDFrom(machineIDPath)
+	if err != nil {
+		log.Printf("no runtime ID (%v); the controller will not trust this runtime", err)
 	}
 
 	listener, cleanup, err := prepareSocket(gid)
@@ -87,11 +99,24 @@ func run(uid, gid int, publicKeyFile string, enableLifecycle bool) error {
 
 	if labs != nil {
 		mode = "signed sealed lab lifecycle enabled; VPN operations disabled"
+
+		if err := backend.Preflight(ctx); err != nil {
+			log.Printf("CreateLab is refused until this is resolved: %v", err)
+		}
+	}
+
+	if runtimeID != "" {
+		log.Printf("Runtime ID: %s", runtimeID)
 	}
 
 	log.Printf("EgressLab helper listening on %s (UID %d; %s)", helperipc.SocketPath, uid, mode)
 
-	err = helperipc.ServeLifecycle(ctx, listener, uint32(uid), scanRecovery, verifier, labs)
+	err = helperipc.ServeWith(ctx, listener, uint32(uid), helperipc.ServerOptions{
+		Scan:      scanRecovery,
+		Verifier:  verifier,
+		Labs:      labs,
+		RuntimeID: runtimeID,
+	})
 
 	// Labs that cannot be deleted stay, with their markers, for egresslab-lab-recover.
 	if labs != nil {

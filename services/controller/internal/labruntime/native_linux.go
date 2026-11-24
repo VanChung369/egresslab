@@ -13,7 +13,9 @@ type nativeLauncher struct{ path string }
 
 func newNative() (launcher, error) { return nativeLauncher{path: HelperctlPath}, nil }
 
-func (nativeLauncher) name() string { return "native" }
+func (nativeLauncher) kind() string   { return "native" }
+func (nativeLauncher) target() string { return "" }
+func (nativeLauncher) name() string   { return "native" }
 
 func (l nativeLauncher) detect() error {
 	info, err := os.Stat(l.path)

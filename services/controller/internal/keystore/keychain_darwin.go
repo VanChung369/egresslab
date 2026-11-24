@@ -4,6 +4,7 @@ package keystore
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Unverified: written from the security(1) man page, not yet run on macOS.
@@ -20,6 +22,7 @@ const (
 	keychainService = "dev.egresslab.controller-signing"
 	securityPath    = "/usr/bin/security"
 	maxSecurityOut  = 4096
+	securityTimeout = 15 * time.Second
 )
 
 type keychainStore struct{ account string }
@@ -45,13 +48,25 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 
-func (s keychainStore) load() ([]byte, error) {
-	var stdout, stderr limitedBuffer
-	defer clear(stdout.Bytes())
+// newSecretBuffer is sized up front so the secret is never copied into a grown buffer.
+func newSecretBuffer() *limitedBuffer {
+	b := &limitedBuffer{}
+	b.Grow(maxSecurityOut)
 
-	cmd := exec.Command(securityPath, "find-generic-password", "-a", s.account, "-s", keychainService, "-w")
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	return b
+}
+
+func (s keychainStore) load() ([]byte, error) {
+	stdout, stderr := newSecretBuffer(), &limitedBuffer{}
+	defer func() { clear(stdout.Bytes()) }()
+
+	// A locked Keychain can wait for a confirmation that never comes.
+	ctx, cancel := context.WithTimeout(context.Background(), securityTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, securityPath, "find-generic-password", "-a", s.account, "-s", keychainService, "-w")
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
@@ -92,11 +107,16 @@ func (s keychainStore) create(seed []byte) error {
 	command = append(command, '\n')
 	defer clear(command)
 
-	var output limitedBuffer
-	cmd := exec.Command(securityPath, "-i")
+	output := newSecretBuffer()
+	defer func() { clear(output.Bytes()) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), securityTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, securityPath, "-i")
 	cmd.Stdin = bytes.NewReader(command)
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	cmd.Stdout = output
+	cmd.Stderr = output
 
 	runErr := cmd.Run()
 

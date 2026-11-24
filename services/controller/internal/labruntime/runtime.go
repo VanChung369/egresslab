@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
-	"strings"
 
 	"github.com/VanChung369/egresslab/services/controller/internal/control"
 )
@@ -33,6 +32,10 @@ type Capabilities struct {
 
 type RuntimeProvider interface {
 	Name() string
+	// Kind and Target identify how the runtime is reached ("wsl" and a distribution, "lima" and an
+	// instance, "native" and ""). They are what a trusted runtime is pinned to.
+	Kind() string
+	Target() string
 	Detect(ctx context.Context) error
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
@@ -56,6 +59,8 @@ type Options struct {
 
 // launcher builds the command that runs helperctl inside the runtime.
 type launcher interface {
+	kind() string
+	target() string
 	name() string
 	detect() error
 	command(ctx context.Context, args ...string) (*exec.Cmd, error)
@@ -115,6 +120,8 @@ func newCommandProvider(l launcher) *commandProvider {
 }
 
 func (p *commandProvider) Name() string                 { return p.l.name() }
+func (p *commandProvider) Kind() string                 { return p.l.kind() }
+func (p *commandProvider) Target() string               { return p.l.target() }
 func (p *commandProvider) Detect(context.Context) error { return p.l.detect() }
 func (p *commandProvider) Transport() HelperTransport   { return p.transport }
 func (p *commandProvider) Start(ctx context.Context) error {
@@ -152,7 +159,7 @@ func (p *commandProvider) Capabilities(ctx context.Context) (Capabilities, error
 
 	if _, err := p.transport.ListLabs(ctx); err == nil {
 		caps.LabLifecycle = true
-	} else if !strings.Contains(err.Error(), "operation not enabled") {
+	} else if ErrorCode(err) != CodeOperationDisabled {
 		return Capabilities{}, err
 	}
 

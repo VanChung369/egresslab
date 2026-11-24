@@ -27,6 +27,10 @@ type deps struct {
 	stdout     io.Writer
 }
 
+var approvalRequired = map[string]bool{
+	"create-lab": true, "delete-lab": true, "trust-runtime": true, "untrust-runtime": true, "unbind-profile": true,
+}
+
 func main() {
 	if err := run(os.Args[1:], deps{keystore.Open, labruntime.New, time.Now, os.Stdout}); err != nil {
 		fmt.Fprintln(os.Stderr, "controller-lab:", err)
@@ -34,12 +38,19 @@ func main() {
 	}
 }
 
+type session struct {
+	d        deps
+	dataDir  string
+	provider labruntime.RuntimeProvider
+	ctx      context.Context
+}
+
 func run(argv []string, d deps) error {
 	flags := flag.NewFlagSet("egresslab-controller-lab", flag.ContinueOnError)
 	kind := flags.String("runtime", "auto", "network runtime: auto, wsl, lima, native or remote")
-	distro := flags.String("wsl-distro", "", "WSL distribution (default: the WSL default distribution)")
+	distro := flags.String("wsl-distro", "", "WSL distribution (required to trust a WSL runtime)")
 	instance := flags.String("lima-instance", "", "Lima instance (default: egresslab)")
-	approve := flags.Bool("approve", false, "approve a lab mutation (create-lab, delete-lab)")
+	approve := flags.Bool("approve", false, "approve a mutation (create-lab, delete-lab, trust-runtime, untrust-runtime, unbind-profile)")
 
 	if err := flags.Parse(argv); err != nil {
 		return err
@@ -55,15 +66,27 @@ func run(argv []string, d deps) error {
 		return err
 	}
 
-	if args[0] == "init-key" || args[0] == "public-key" {
+	s := &session{d: d, dataDir: dataDir}
+
+	switch args[0] {
+	case "init-key", "public-key":
 		if len(args) != 1 {
 			return usageError()
 		}
+		return s.printPublicKey(args[0] == "init-key")
 
-		return printPublicKey(d, dataDir, args[0] == "init-key")
+	case "runtimes":
+		if len(args) != 1 {
+			return usageError()
+		}
+		state, err := control.LoadRuntimeState(dataDir)
+		if err != nil {
+			return err
+		}
+		return s.print(state)
 	}
 
-	if (args[0] == "create-lab" || args[0] == "delete-lab") && !*approve {
+	if approvalRequired[args[0]] && !*approve {
 		return fmt.Errorf("%s requires -approve", args[0])
 	}
 
@@ -71,77 +94,60 @@ func run(argv []string, d deps) error {
 		return err
 	}
 
-	provider, err := d.newRuntime(*kind, labruntime.Options{WSLDistro: *distro, LimaInstance: *instance})
-	if err != nil {
+	if s.provider, err = d.newRuntime(*kind, labruntime.Options{WSLDistro: *distro, LimaInstance: *instance}); err != nil {
 		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+	s.ctx = ctx
 
-	transport := provider.Transport()
 	var result any
 
 	switch args[0] {
 	case "runtime-status":
-		status, err := provider.Status(ctx)
-		if err != nil {
-			return err
-		}
-
-		report := struct {
-			labruntime.Status
-			Capabilities *labruntime.Capabilities `json:"capabilities,omitempty"`
-		}{Status: status}
-
-		if status.Reachable {
-			caps, err := provider.Capabilities(ctx)
-			if err != nil {
-				return err
-			}
-			report.Capabilities = &caps
-		}
-
-		result = report
-
+		result, err = s.runtimeStatus()
 	case "helper-info":
-		result, err = transport.HelperInfo(ctx)
-
+		result, err = s.provider.Transport().HelperInfo(ctx)
 	case "list-labs":
 		var labs []control.LabInfo
-		labs, err = transport.ListLabs(ctx)
+		labs, err = s.provider.Transport().ListLabs(ctx)
 		result = struct {
 			Labs []control.LabInfo `json:"labs"`
 		}{append([]control.LabInfo{}, labs...)}
-
+	case "trust-runtime":
+		result, err = s.trustRuntime()
+	case "untrust-runtime":
+		result, err = s.untrustRuntime(args[1])
 	case "create-lab":
-		result, err = createLab(ctx, d, dataDir, transport, args[1])
-
+		result, err = s.createLab(args[1])
 	case "verify-lab":
-		result, err = transport.VerifyLab(ctx, args[1], args[2])
-
+		result, err = s.existingLab(args[1], args[2], false)
 	case "delete-lab":
-		result, err = transport.DeleteLab(ctx, args[1], args[2])
+		result, err = s.existingLab(args[1], args[2], true)
+	case "unbind-profile":
+		result, err = s.unbindProfile(args[1])
 	}
 
 	if err != nil {
 		return err
 	}
 
-	encoder := json.NewEncoder(d.stdout)
-	encoder.SetIndent("", "  ")
-
-	return encoder.Encode(result)
+	return s.print(result)
 }
 
 func checkArgs(args []string) error {
 	switch args[0] {
-	case "runtime-status", "helper-info", "list-labs":
+	case "runtime-status", "helper-info", "list-labs", "trust-runtime":
 		if len(args) == 1 {
 			return nil
 		}
-	case "create-lab":
+	case "create-lab", "unbind-profile":
 		if len(args) == 2 && control.ValidProfileID(args[1]) {
+			return nil
+		}
+	case "untrust-runtime":
+		if len(args) == 2 && control.ValidRuntimeID(args[1]) {
 			return nil
 		}
 	case "verify-lab", "delete-lab":
@@ -153,8 +159,15 @@ func checkArgs(args []string) error {
 	return usageError()
 }
 
-func printPublicKey(d deps, dataDir string, initialize bool) error {
-	keys, err := d.openKeys(dataDir)
+func (s *session) print(value any) error {
+	encoder := json.NewEncoder(s.d.stdout)
+	encoder.SetIndent("", "  ")
+
+	return encoder.Encode(value)
+}
+
+func (s *session) printPublicKey(initialize bool) error {
+	keys, err := s.d.openKeys(s.dataDir)
 	if err != nil {
 		return err
 	}
@@ -170,39 +183,303 @@ func printPublicKey(d deps, dataDir string, initialize bool) error {
 		return err
 	}
 
-	_, err = fmt.Fprintln(d.stdout, hex.EncodeToString(public))
+	_, err = fmt.Fprintln(s.d.stdout, hex.EncodeToString(public))
 
 	return err
 }
 
-// createLab fetches the current helper epoch right before signing and never retries.
-func createLab(ctx context.Context, d deps, dataDir string, transport labruntime.HelperTransport, profileID string) (control.LabInfo, error) {
-	profile, err := loadProfile(dataDir, profileID)
+func (s *session) runtimeStatus() (any, error) {
+	status, err := s.provider.Status(s.ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	report := struct {
+		labruntime.Status
+		Capabilities *labruntime.Capabilities `json:"capabilities,omitempty"`
+	}{Status: status}
+
+	if status.Reachable {
+		caps, err := s.provider.Capabilities(s.ctx)
+		if err != nil {
+			return nil, err
+		}
+		report.Capabilities = &caps
+	}
+
+	return report, nil
+}
+
+func (s *session) trustRuntime() (control.TrustedRuntime, error) {
+	if s.provider.Kind() == "wsl" && s.provider.Target() == "" {
+		return control.TrustedRuntime{}, labruntime.Errorf(labruntime.CodeInvalidRequest,
+			"trust-runtime needs -wsl-distro: the default WSL distribution can change")
+	}
+
+	info, err := s.provider.Transport().HelperInfo(s.ctx)
+	if err != nil {
+		return control.TrustedRuntime{}, err
+	}
+
+	keys, err := s.d.openKeys(s.dataDir)
+	if err != nil {
+		return control.TrustedRuntime{}, err
+	}
+
+	public, err := keys.PublicKey()
+	if err != nil {
+		return control.TrustedRuntime{}, err
+	}
+
+	fingerprint := control.LabPublicKeySHA256(public)
+
+	if !info.AuthorizationConfigured || info.PublicKeySHA256 != fingerprint {
+		return control.TrustedRuntime{}, labruntime.Errorf(labruntime.CodeRuntimeUntrusted,
+			"the helper does not hold this controller's public key")
+	}
+
+	if info.RuntimeID == "" {
+		return control.TrustedRuntime{}, labruntime.Errorf(labruntime.CodeRuntimeUntrusted,
+			"the helper reports no runtime ID (it needs /etc/machine-id)")
+	}
+
+	state, err := control.LoadRuntimeState(s.dataDir)
+	if err != nil {
+		return control.TrustedRuntime{}, err
+	}
+
+	rt := control.TrustedRuntime{
+		ID:              info.RuntimeID,
+		Provider:        s.provider.Kind(),
+		Target:          s.provider.Target(),
+		PublicKeySHA256: fingerprint,
+		TrustedAt:       s.d.now().UTC(),
+	}
+
+	if err := state.Trust(rt); err != nil {
+		return control.TrustedRuntime{}, labruntime.Errorf(labruntime.CodeRuntimeUntrusted, err.Error())
+	}
+
+	trusted, _ := state.RuntimeFor(rt.Provider, rt.Target)
+
+	return trusted, state.Save()
+}
+
+func (s *session) untrustRuntime(id string) (any, error) {
+	state, err := control.LoadRuntimeState(s.dataDir)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := state.Untrust(id); err != nil {
+		return nil, labruntime.Errorf(labruntime.CodeInvalidRequest, err.Error())
+	}
+
+	return state, state.Save()
+}
+
+// currentRuntime checks that the runtime reached now is the trusted one for this provider target.
+func (s *session) currentRuntime(state *control.RuntimeState) (control.TrustedRuntime, control.LabHelperInfo, error) {
+	rt, ok := state.RuntimeFor(s.provider.Kind(), s.provider.Target())
+	if !ok {
+		hint := "run trust-runtime first"
+		if s.provider.Kind() == "wsl" && s.provider.Target() == "" {
+			hint = "name the distribution with -wsl-distro"
+		}
+
+		return control.TrustedRuntime{}, control.LabHelperInfo{}, labruntime.Errorf(labruntime.CodeRuntimeUntrusted,
+			fmt.Sprintf("%s is not a trusted runtime; %s", s.provider.Name(), hint))
+	}
+
+	info, err := s.provider.Transport().HelperInfo(s.ctx)
+	if err != nil {
+		return control.TrustedRuntime{}, control.LabHelperInfo{}, err
+	}
+
+	if info.RuntimeID != rt.ID {
+		return control.TrustedRuntime{}, control.LabHelperInfo{}, labruntime.Errorf(labruntime.CodeRuntimeUntrusted,
+			fmt.Sprintf("%s reports runtime %q, but %s is trusted there", s.provider.Name(), info.RuntimeID, rt.ID))
+	}
+
+	return rt, info, nil
+}
+
+func (s *session) createLab(profileID string) (control.LabInfo, error) {
+	profile, err := loadProfile(s.dataDir, profileID)
 	if err != nil {
 		return control.LabInfo{}, err
 	}
 
-	keys, err := d.openKeys(dataDir)
+	state, err := control.LoadRuntimeState(s.dataDir)
 	if err != nil {
 		return control.LabInfo{}, err
 	}
 
-	info, err := transport.HelperInfo(ctx)
+	rt, info, err := s.currentRuntime(state)
 	if err != nil {
 		return control.LabInfo{}, err
 	}
 
-	capability, err := control.MintCreateLab(keys, profile, info, d.now())
+	binding, bound := state.Binding(profile.ID)
+
+	if bound && binding.RuntimeID != rt.ID {
+		return control.LabInfo{}, labruntime.Errorf(labruntime.CodeOwnershipMismatch,
+			fmt.Sprintf("profile is bound to runtime %s; run unbind-profile there first", binding.RuntimeID))
+	}
+
+	// A record from an earlier helper process is stale: a normal stop deleted that lab, and a
+	// crash left an orphan that the helper's recovery gate refuses until it is cleaned up.
+	if bound && binding.Namespace != "" && binding.HelperEpoch == info.HelperID {
+		return control.LabInfo{}, labruntime.Errorf(labruntime.CodeLabExists,
+			fmt.Sprintf("profile already has lab %s; delete-lab first", binding.Namespace))
+	}
+
+	keys, err := s.d.openKeys(s.dataDir)
 	if err != nil {
 		return control.LabInfo{}, err
 	}
 
-	lab, err := transport.CreateLab(ctx, profile.ID, capability)
+	capability, err := control.MintCreateLab(keys, profile, info, s.d.now())
 	if err != nil {
-		return control.LabInfo{}, fmt.Errorf("CreateLab result uncertain; run list-labs before retrying: %w", err)
+		return control.LabInfo{}, err
+	}
+
+	// The profile is bound before the kernel changes, so an uncertain result can only ever be
+	// a lab on this runtime.
+	if err := state.SetBinding(control.RuntimeBinding{ProfileID: profile.ID, RuntimeID: rt.ID, UpdatedAt: s.d.now().UTC()}); err != nil {
+		return control.LabInfo{}, err
+	}
+
+	if err := state.Save(); err != nil {
+		return control.LabInfo{}, err
+	}
+
+	lab, err := s.provider.Transport().CreateLab(s.ctx, profile.ID, capability)
+	if err != nil {
+		switch labruntime.ErrorCode(err) {
+		case labruntime.CodeRuntimeUnavailable, labruntime.CodeInternal, labruntime.CodeStateUncertain:
+			return control.LabInfo{}, labruntime.Errorf(labruntime.CodeStateUncertain,
+				"CreateLab result uncertain; run list-labs before retrying: "+err.Error())
+		}
+
+		return control.LabInfo{}, err
+	}
+
+	record := control.RuntimeBinding{ProfileID: profile.ID, RuntimeID: rt.ID, Namespace: lab.Namespace,
+		HelperEpoch: info.HelperID, UpdatedAt: s.d.now().UTC()}
+
+	if err := state.SetBinding(record); err == nil {
+		err = state.Save()
+	}
+
+	if err != nil {
+		return lab, fmt.Errorf("lab %s created but its record was not saved (delete-lab still works): %w", lab.Namespace, err)
 	}
 
 	return lab, nil
+}
+
+// existingLab verifies or deletes. Without a current record (an uncertain create, or a record
+// from an earlier helper process) the helper's own registry decides, so cleanup never depends on
+// controller state.
+func (s *session) existingLab(profileID, namespace string, remove bool) (control.LabInfo, error) {
+	state, err := control.LoadRuntimeState(s.dataDir)
+	if err != nil {
+		return control.LabInfo{}, err
+	}
+
+	rt, info, err := s.currentRuntime(state)
+	if err != nil {
+		return control.LabInfo{}, err
+	}
+
+	// An unbound profile (for example after untrust-runtime) is judged by the helper alone.
+	binding, bound := state.Binding(profileID)
+	if !bound {
+		binding = control.RuntimeBinding{ProfileID: profileID, RuntimeID: rt.ID}
+	}
+
+	if binding.RuntimeID != rt.ID {
+		return control.LabInfo{}, labruntime.Errorf(labruntime.CodeOwnershipMismatch,
+			fmt.Sprintf("profile is bound to runtime %s, not %s", binding.RuntimeID, rt.ID))
+	}
+
+	current := binding.Namespace != "" && binding.HelperEpoch == info.HelperID
+	if current && binding.Namespace != namespace {
+		return control.LabInfo{}, labruntime.Errorf(labruntime.CodeOwnershipMismatch,
+			fmt.Sprintf("profile's lab is %s", binding.Namespace))
+	}
+
+	transport := s.provider.Transport()
+
+	var lab control.LabInfo
+	if remove {
+		lab, err = transport.DeleteLab(s.ctx, profileID, namespace)
+	} else {
+		lab, err = transport.VerifyLab(s.ctx, profileID, namespace)
+	}
+
+	if err != nil {
+		return control.LabInfo{}, err
+	}
+
+	if remove && !bound {
+		return lab, nil
+	}
+
+	binding.Namespace, binding.HelperEpoch, binding.UpdatedAt = "", "", s.d.now().UTC()
+	if !remove {
+		binding.Namespace, binding.HelperEpoch = namespace, info.HelperID
+	}
+
+	if err := state.SetBinding(binding); err == nil {
+		err = state.Save()
+	}
+
+	if err != nil {
+		return lab, fmt.Errorf("lab %s: the helper succeeded but the controller record was not saved: %w", namespace, err)
+	}
+
+	return lab, nil
+}
+
+// unbindProfile releases a profile from its runtime once that runtime's helper owns no lab for it.
+// If the runtime is gone for good, untrust-runtime removes its bindings instead.
+func (s *session) unbindProfile(profileID string) (any, error) {
+	state, err := control.LoadRuntimeState(s.dataDir)
+	if err != nil {
+		return nil, err
+	}
+
+	binding, bound := state.Binding(profileID)
+	if !bound {
+		return nil, labruntime.Errorf(labruntime.CodeLabNotFound, "profile is not bound to a runtime")
+	}
+
+	rt, _, err := s.currentRuntime(state)
+	if err != nil {
+		return nil, err
+	}
+
+	if binding.RuntimeID != rt.ID {
+		return nil, labruntime.Errorf(labruntime.CodeOwnershipMismatch,
+			fmt.Sprintf("profile is bound to runtime %s; reach that runtime, or untrust it", binding.RuntimeID))
+	}
+
+	labs, err := s.provider.Transport().ListLabs(s.ctx)
+	if err != nil && labruntime.ErrorCode(err) != labruntime.CodeOperationDisabled {
+		return nil, err
+	}
+
+	for _, lab := range labs {
+		if lab.ProfileID == profileID {
+			return nil, labruntime.Errorf(labruntime.CodeLabExists, fmt.Sprintf("the helper still owns lab %s; delete-lab first", lab.Namespace))
+		}
+	}
+
+	state.RemoveBinding(profileID)
+
+	return state, state.Save()
 }
 
 func dataDirectory() (string, error) {
@@ -236,6 +513,7 @@ func loadProfile(dataDir, id string) (control.RoutingProfile, error) {
 
 func usageError() error {
 	return errors.New("usage: egresslab-controller-lab [-runtime auto|wsl|lima|native] [-wsl-distro NAME] [-lima-instance NAME] [-approve] COMMAND\n" +
-		"  init-key | public-key | runtime-status | helper-info | list-labs\n" +
+		"  init-key | public-key | runtimes | runtime-status | helper-info | list-labs\n" +
+		"  trust-runtime | untrust-runtime RUNTIME_ID | unbind-profile PROFILE_ID\n" +
 		"  create-lab PROFILE_ID | verify-lab PROFILE_ID NAMESPACE | delete-lab PROFILE_ID NAMESPACE")
 }

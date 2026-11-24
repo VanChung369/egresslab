@@ -284,7 +284,7 @@ If the WSL clock steps backwards between two checks, the helper refuses all capa
 
 `egresslab-helperctl` cannot send `AuthorizeCheck`. The controller mints capabilities (see "Controller lab CLI" below); the agent does not forward them yet.
 
-Add `-enable-lab-lifecycle` (it requires `-auth-public-key-file`) to let the helper create, verify and delete sealed lab namespaces, at most 8, one per profile. `egresslab-helperctl list-labs`, `verify-lab` and `delete-lab` work directly; `create-lab` reads a signed capability from stdin, which the controller produces. On Ctrl+C the helper deletes its labs. After a `SIGKILL`, `sudo egresslab-lab-recover` reports them as orphans and `-delete` removes them.
+Add `-enable-lab-lifecycle` (it requires `-auth-public-key-file`) to let the helper create, verify and delete sealed lab namespaces, at most 8, one per profile. The helper refuses the flag if the kernel would add fallback tunnel devices to new namespaces, and refuses `create-lab` while any lab resource it does not own exists (run `egresslab-lab-recover`). `egresslab-helperctl list-labs`, `verify-lab` and `delete-lab` work directly; `create-lab` reads a signed capability from stdin, which the controller produces. On Ctrl+C the helper deletes its labs. After a `SIGKILL`, `sudo egresslab-lab-recover` reports them as orphans and `-delete` removes them.
 
 ### Controller lab CLI (Step 26)
 
@@ -295,17 +295,18 @@ egresslab-controller-lab init-key            # never replaces an existing key
 egresslab-controller-lab public-key          # 64 hex characters: copy them to the helper's key file
 ```
 
-Then start the helper with `-auth-public-key-file <that file> -enable-lab-lifecycle` and run:
+Then start the helper with `-auth-public-key-file <that file> -enable-lab-lifecycle`, trust the runtime once, and run:
 
 ```bash
 egresslab-controller-lab runtime-status
+egresslab-controller-lab -wsl-distro Ubuntu-22.04 -approve trust-runtime   # Windows; on macOS/Linux omit -wsl-distro
 egresslab-controller-lab -approve create-lab <profile ID from the desktop>
 egresslab-controller-lab list-labs
 egresslab-controller-lab verify-lab <profile ID> <namespace>
 egresslab-controller-lab -approve delete-lab <profile ID> <namespace>
 ```
 
-`-runtime auto` uses WSL on Windows (`-wsl-distro`, default: the WSL default distribution), Lima on macOS (`-lima-instance`, default `egresslab`) and the host itself on Linux. Install `egresslab-helper` and `egresslab-helperctl` in `/usr/local/bin` inside the runtime (see above). The Lima path is written from the Lima docs but not yet run; see `docs/PRIVILEGED-HELPER.md`. If `create-lab` reports an uncertain result, run `list-labs` before retrying.
+`-runtime auto` uses WSL on Windows (`-wsl-distro`; trust and lab commands need it named), Lima on macOS (`-lima-instance`, default `egresslab`) and the host itself on Linux. A profile stays bound to the runtime it was first used on (`unbind-profile` and `untrust-runtime` release it). Every failure carries a code such as `RECOVERY_REQUIRED` or `RUNTIME_UNTRUSTED`. Install `egresslab-helper` and `egresslab-helperctl` in `/usr/local/bin` inside the runtime (see above). The Lima and Keychain paths are written from the docs but have not been run on a Mac; see `docs/PRIVILEGED-HELPER.md`. If `create-lab` reports an uncertain result, run `list-labs` before retrying.
 
 Run the socket tests in `internal/helperipc` as a non-root user. Under root, the tests that need a non-root socket client skip. The key-loader tests in `cmd/egresslab-helper` run under both.
 

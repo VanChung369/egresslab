@@ -1,5 +1,6 @@
 // Command egresslab-helperctl is the unprivileged client of the privileged network helper. It
-// prints each response as JSON. A capability is read from stdin only, never from argv.
+// prints each response as JSON. On failure it exits 1 and still prints a JSON response whose
+// "code" says why. A capability is read from stdin only, never from argv.
 package main
 
 import (
@@ -29,11 +30,11 @@ var readOnlyOperations = map[string]string{
 
 func main() {
 	if runtime.GOOS != "linux" {
-		fail(errors.New("helperctl requires Linux"))
+		fail(invalid("helperctl requires Linux"))
 	}
 
 	if err := agent.RequireUnprivilegedAgent(); err != nil {
-		fail(err)
+		fail(invalid(err.Error()))
 	}
 
 	if err := run(os.Args[1:], os.Stdin, os.Stdout); err != nil {
@@ -41,9 +42,25 @@ func main() {
 	}
 }
 
+func invalid(message string) error {
+	return &helperipc.Error{Code: helperipc.CodeInvalidRequest, Message: message}
+}
+
 func fail(err error) {
+	writeFailure(os.Stdout, err)
 	fmt.Fprintln(os.Stderr, "helperctl:", err)
 	os.Exit(1)
+}
+
+func writeFailure(w io.Writer, err error) {
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+
+	_ = encoder.Encode(helperipc.Response{
+		Version: helperipc.Version,
+		Code:    helperipc.ErrorCode(err),
+		Error:   err.Error(),
+	})
 }
 
 func run(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -107,26 +124,26 @@ func readCapability(r io.Reader) (helperauth.SignedCapability, error) {
 
 	data, err := io.ReadAll(io.LimitReader(r, maxCapabilityBytes+1))
 	if err != nil || len(data) == 0 || len(data) > maxCapabilityBytes {
-		return capability, errors.New("invalid capability input")
+		return capability, invalid("invalid capability input")
 	}
 
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&capability); err != nil {
-		return capability, errors.New("invalid capability JSON")
+		return capability, invalid("invalid capability JSON")
 	}
 
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return capability, errors.New("trailing capability data")
+		return capability, invalid("trailing capability data")
 	}
 
 	return capability, nil
 }
 
 func usageError() error {
-	return errors.New("usage: egresslab-helperctl ping|helper-info|recover-scan|list-labs\n" +
+	return invalid("usage: egresslab-helperctl ping|helper-info|recover-scan|list-labs\n" +
 		"       egresslab-helperctl create-lab PROFILE_ID < capability.json\n" +
 		"       egresslab-helperctl verify-lab PROFILE_ID NAMESPACE\n" +
 		"       egresslab-helperctl delete-lab PROFILE_ID NAMESPACE")

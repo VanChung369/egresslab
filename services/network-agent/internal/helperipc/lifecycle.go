@@ -28,11 +28,72 @@ const (
 var (
 	errLabAuthorization = errors.New("lab authorization denied")
 	errLabBusy          = errors.New("another lab operation is in progress")
+	errLabNotFound      = errors.New("no lab for this profile")
 	errLabOwnership     = errors.New("lab ownership mismatch")
+	errLabExists        = errors.New("profile already owns a lab")
+	errLabLimit         = errors.New("lab limit reached")
+	errLabInvalid       = errors.New("invalid lab request")
 	errLabUnavailable   = errors.New("lab lifecycle unavailable")
+	errLabUncertain     = errors.New("kernel state uncertain")
+	errLabFaulted       = errors.New("lab is faulted")
 )
 
+// labCode maps a lifecycle error to its wire code. Order matters: a failed rollback joins the
+// seal error with an uncertain state, and the uncertain state wins.
+func labCode(err error) string {
+	switch {
+	case errors.Is(err, errLabAuthorization):
+		return CodeAuthorizationDenied
+	case errors.Is(err, errLabBusy):
+		return CodeLabBusy
+	case errors.Is(err, errLabNotFound):
+		return CodeLabNotFound
+	case errors.Is(err, errLabOwnership):
+		return CodeOwnershipMismatch
+	case errors.Is(err, errLabExists):
+		return CodeLabExists
+	case errors.Is(err, errLabLimit):
+		return CodeLabLimit
+	case errors.Is(err, errLabInvalid):
+		return CodeInvalidRequest
+	case errors.Is(err, errLabUnavailable):
+		return CodeRuntimeUnavailable
+	case errors.Is(err, ErrLabKernelIncompatible):
+		return CodeKernelIncompatible
+	case errors.Is(err, ErrLabRecoveryRequired):
+		return CodeRecoveryRequired
+	case errors.Is(err, errLabUncertain):
+		return CodeStateUncertain
+	case errors.Is(err, ErrLabFirewallDrift):
+		return CodeFirewallDrift
+	case errors.Is(err, errLabFaulted), errors.Is(err, ErrLabTopology):
+		return CodeLabFaulted
+	default:
+		return CodeInternal
+	}
+}
+
+var labMessages = map[string]string{
+	CodeAuthorizationDenied: "authorization denied",
+	CodeLabBusy:             "another lab operation is in progress",
+	CodeLabNotFound:         "no lab for this profile",
+	CodeOwnershipMismatch:   "lab ownership mismatch",
+	CodeLabExists:           "profile already owns a lab",
+	CodeLabLimit:            "lab limit reached",
+	CodeInvalidRequest:      "invalid lab request",
+	CodeRuntimeUnavailable:  "lab lifecycle unavailable",
+	CodeKernelIncompatible:  "kernel adds devices to new namespaces; see the helper log",
+	CodeRecoveryRequired:    "leftover lab resources; run egresslab-lab-recover",
+	CodeStateUncertain:      "kernel state uncertain; check recovery and restart the helper",
+	CodeFirewallDrift:       "lab firewall drifted; delete the lab",
+	CodeLabFaulted:          "lab is faulted; delete the lab",
+	CodeInternal:            "lab operation failed",
+}
+
 type LabBackend interface {
+	// Preflight runs before a capability is consumed. Implementations wrap
+	// ErrLabRecoveryRequired or ErrLabKernelIncompatible.
+	Preflight(context.Context) error
 	Create(context.Context) (string, error)
 	Seal(context.Context, string) error
 	Verify(context.Context, string) error
@@ -95,7 +156,7 @@ func (l *LabLifecycle) execute(ctx context.Context, req Request, v *helperauth.V
 		l.backend == nil ||
 		req.Version != Version ||
 		!validLifecycleIntent(req.Operation, req.Intent) {
-		return LabInfo{}, errLabUnavailable
+		return LabInfo{}, errLabInvalid
 	}
 
 	// Refuse rather than queue: a queued capability may expire.
@@ -120,7 +181,11 @@ func (l *LabLifecycle) execute(ctx context.Context, req Request, v *helperauth.V
 		}
 
 		lab, exists := l.labs[intent.ProfileID]
-		if !exists || lab.Namespace != intent.Namespace {
+		if !exists {
+			return LabInfo{}, errLabNotFound
+		}
+
+		if lab.Namespace != intent.Namespace {
 			return LabInfo{}, errLabOwnership
 		}
 
@@ -131,7 +196,7 @@ func (l *LabLifecycle) execute(ctx context.Context, req Request, v *helperauth.V
 		return l.deleteLocked(ctx, lab)
 
 	default:
-		return LabInfo{}, errLabUnavailable
+		return LabInfo{}, errLabInvalid
 	}
 }
 
@@ -145,12 +210,25 @@ func (l *LabLifecycle) createLocked(
 		return LabInfo{}, errLabAuthorization
 	}
 
-	if l.blockCreation || len(l.labs) >= maxManagedLabs {
-		return LabInfo{}, errLabUnavailable
+	if l.blockCreation {
+		return LabInfo{}, errLabUncertain
+	}
+
+	if len(l.labs) >= maxManagedLabs {
+		return LabInfo{}, errLabLimit
 	}
 
 	if _, exists := l.labs[intent.ProfileID]; exists {
-		return LabInfo{}, errors.New("profile already owns a lab")
+		return LabInfo{}, errLabExists
+	}
+
+	// Anything the preflight cannot prove clean blocks creation.
+	if err := l.backend.Preflight(ctx); err != nil {
+		if !errors.Is(err, ErrLabKernelIncompatible) && !errors.Is(err, ErrLabRecoveryRequired) {
+			err = fmt.Errorf("%w: %w", ErrLabRecoveryRequired, err)
+		}
+
+		return LabInfo{}, err
 	}
 
 	if err := v.VerifyAndConsume(*capability, intent); err != nil {
@@ -160,12 +238,12 @@ func (l *LabLifecycle) createLocked(
 	name, err := l.backend.Create(ctx)
 	if err != nil {
 		l.blockCreation = true
-		return LabInfo{}, fmt.Errorf("create namespace: %w", err)
+		return LabInfo{}, fmt.Errorf("%w: create namespace: %w", errLabUncertain, err)
 	}
 
 	if !helperauth.ValidLabNamespace(name) {
 		l.blockCreation = true
-		return LabInfo{}, errors.New("backend returned an invalid namespace")
+		return LabInfo{}, fmt.Errorf("%w: backend returned an invalid namespace", errLabUncertain)
 	}
 
 	lab := LabInfo{ProfileID: intent.ProfileID, Namespace: name, State: LabFaulted}
@@ -180,11 +258,12 @@ func (l *LabLifecycle) createLocked(
 
 		if cleanupErr == nil {
 			delete(l.labs, lab.ProfileID)
-		} else {
-			l.blockCreation = true
+			return LabInfo{}, fmt.Errorf("seal namespace %s (rolled back): %w", name, err)
 		}
 
-		return LabInfo{}, errors.Join(fmt.Errorf("seal namespace %s: %w", name, err), cleanupErr)
+		l.blockCreation = true
+
+		return LabInfo{}, errors.Join(fmt.Errorf("%w: seal namespace %s: %w", errLabUncertain, name, err), cleanupErr)
 	}
 
 	lab.State = LabSealed
@@ -196,14 +275,14 @@ func (l *LabLifecycle) createLocked(
 // A faulted lab is never restored; only DeleteLab clears it.
 func (l *LabLifecycle) verifyLocked(ctx context.Context, lab LabInfo) (LabInfo, error) {
 	if lab.State != LabSealed {
-		return LabInfo{}, errors.New("lab is faulted; cleanup required")
+		return LabInfo{}, errLabFaulted
 	}
 
 	if err := l.backend.Verify(ctx, lab.Namespace); err != nil {
 		lab.State = LabFaulted
 		l.labs[lab.ProfileID] = lab
 
-		return LabInfo{}, err
+		return LabInfo{}, fmt.Errorf("%w: %w", errLabFaulted, err)
 	}
 
 	return lab, nil
@@ -214,7 +293,7 @@ func (l *LabLifecycle) deleteLocked(ctx context.Context, lab LabInfo) (LabInfo, 
 		lab.State = LabFaulted
 		l.labs[lab.ProfileID] = lab
 
-		return LabInfo{}, err
+		return LabInfo{}, fmt.Errorf("%w: %w", errLabFaulted, err)
 	}
 
 	delete(l.labs, lab.ProfileID)

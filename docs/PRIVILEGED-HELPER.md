@@ -1,9 +1,10 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 26 — cross-platform controller signing and runtime bridge.** A controller CLI on
-Windows, macOS or Linux signs `CreateLab` and drives the helper's sealed lab lifecycle in the
-Linux runtime. Tunnels and probes through the helper are still not implemented; the sections
-from "Typed operations only" on are partly design.
+Status: **Step 26 — cross-platform controller signing and runtime bridge.** A controller CLI signs
+`CreateLab` and drives the helper's sealed lab lifecycle in the Linux runtime. Windows (WSL2) and
+Linux are verified end to end; macOS (Lima, Keychain) is implemented but has not been run. Tunnels
+and probes through the helper are still not implemented; the sections from "Typed operations only"
+on are partly design.
 
 ## Implemented
 
@@ -25,7 +26,8 @@ from "Typed operations only" on are partly design.
 - An observed wall-clock rollback permanently disables authorization for the current helper
   process.
 - Public-key SHA-256 fingerprints.
-- `HelperInfo`, a read-only IPC operation that returns the helper ID and the key fingerprint.
+- `HelperInfo`, a read-only IPC operation that returns the helper ID, the key fingerprint and the
+  runtime ID.
 - `AuthorizeCheck`, a dry-run IPC operation.
 - Optional root-owned public-key loading in the helper (`-auth-public-key-file`).
 - Operator-managed, offline public-key replacement (see "Key replacement").
@@ -48,7 +50,12 @@ from "Typed operations only" on are partly design.
   - an Ed25519 signer that can mint only `CreateLab`, checked against both golden vectors;
   - signing-key storage per platform;
   - runtime providers that reach the helper from each host OS;
-  - `egresslab-controller-lab`, which needs `-approve` for `create-lab` and `delete-lab`.
+  - `egresslab-controller-lab`, which needs `-approve` for every mutation;
+  - trusted runtimes and persistent profile-to-runtime bindings (see "Trusted runtimes and
+    profile bindings").
+- A recovery gate and a kernel compatibility check before `CreateLab` (see "Sealed lab
+  lifecycle").
+- An error code on every refusal (see "Error codes").
 
 ## Not implemented
 
@@ -57,13 +64,19 @@ from "Typed operations only" on are partly design.
   fingerprint.
 - A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
-- Runtime `Start`/`Stop` (they return "not implemented").
+- Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
+- A macOS run of the Lima and Keychain paths.
+- Open from earlier steps: firewall readback compared with the intended policy (today it is
+  compared with the state read right after sealing); egress-IP leases across runtimes; a
+  kill-switch independent of the controller; refusing to delete a profile that still has
+  runtime resources.
 - WireGuard configuration binding to a lab.
 - A controller approval workflow for individual operations.
 - Live key rotation and automatic key distribution.
 - `ConnectTunnel`, `PermitProbe` and `RecoverClean` through IPC.
-- Persistent profile-to-namespace ownership, and coordination with other processes that manage
-  lab namespaces.
+- Persistent lab ownership inside the helper. The controller keeps profile-to-runtime bindings;
+  other processes that manage lab namespaces are not coordinated, only refused by the recovery
+  gate.
 - Per-operation kernel and policy authorization.
 - Production privilege hardening: a `CAP_NET_ADMIN`-only helper runtime and systemd.
 - A persistent audit log.
@@ -230,8 +243,8 @@ helper leave it unused.
 
 - **Seal fails:** the helper deletes the namespace. If that fails too, the lab stays tracked as
   faulted and creation is blocked for the rest of the process.
-- **Create fails:** creation is blocked as well, because the kernel state may be uncertain. The
-  block shows only in the helper log; check `egresslab-lab-recover`, then restart the helper.
+- **Create fails:** creation is blocked as well, because the kernel state may be uncertain. Later
+  creates get `STATE_UNCERTAIN`; check `egresslab-lab-recover`, then restart the helper.
 - **`VerifyLab`** re-reads the topology and the firewall. Any difference marks the lab faulted.
   It never repairs, and a faulted lab is never restored; only `DeleteLab` clears it.
 - **`DeleteLab`** refuses a namespace that holds any device besides `lo` or has processes, and
@@ -240,14 +253,46 @@ helper leave it unused.
   every lab it safely can. After a `SIGKILL` or crash, the labs and their markers remain;
   `egresslab-lab-recover` reports them as orphans, and `-delete` removes them.
 
-Ownership lives in memory only. The client sees `authorization denied` or `lab operation failed`;
-the cause (busy, duplicate, drift, topology) is only in the helper log. If a `CreateLab` response
-is lost, `ListLabs` shows the namespace, and `DeleteLab` removes it.
+Ownership lives in memory only. If a `CreateLab` response is lost, `ListLabs` shows the namespace,
+and `DeleteLab` removes it.
 
-On kernels that have `sit`, `ipip` or `ip_gre` loaded, every new namespace gets fallback tunnel
-devices (`sit0`, `tunl0`, ...), so every `CreateLab` rolls back. The sysctl
-`net.core.fb_tunnels_only_for_init_net` should prevent that (not tested here). The tested WSL
-kernel creates none.
+**Recovery gate.** Before consuming a capability, `CreateLab` scans with the helper's own namespace
+manager. Any lab resource this helper does not own refuses creation with `RECOVERY_REQUIRED`: a
+crashed session's orphans, another live process's labs, unmarked namespaces, stale markers and
+underlay tables. The gate never cleans. The helper logs the leftovers at startup. Way out:
+`egresslab-lab-recover -delete` for orphans and stale markers; stopping the other process; or
+inspecting and removing the rest by hand. `ListLabs`, `VerifyLab` and `DeleteLab` stay available.
+
+**Kernel check.** If a tunnel module is loaded, the kernel adds fallback devices (`tunl0`, `gre0`,
+`gretap0`, `erspan0`, `sit0`, `ip6tnl0`, `ip6gre0`, ...) to every new namespace while
+`net.core.fb_tunnels_only_for_init_net` is 0, its default. `1` keeps them in the initial namespace
+only, and `2` creates none (kernel sysctl documentation). The helper reads both and refuses
+`-enable-lab-lifecycle` with `KERNEL_INCOMPATIBLE`; it re-checks before each `CreateLab`. It never
+sets the sysctl or loads or unloads modules, and the lo-only rule stays strict. The incompatible
+path is unit-tested only; the tested WSL kernel loads no tunnel modules.
+
+### Error codes
+
+Every refusal carries a `code`. Clients act on it; the message is for people. On failure,
+`egresslab-helperctl` exits 1 and still prints the response, with its code, on stdout.
+
+| Code | Meaning |
+|---|---|
+| `AUTHORIZATION_DENIED` | capability refused; the check that failed is not disclosed |
+| `OPERATION_DISABLED` | not enabled on this helper (no key, no lifecycle flag, tunnel operations) |
+| `RUNTIME_UNAVAILABLE` | helper unreachable, shutting down, or not served by root |
+| `INVALID_REQUEST` | malformed frame, version, fields or arguments |
+| `LAB_BUSY` | another lab operation is running |
+| `LAB_NOT_FOUND` / `LAB_EXISTS` / `LAB_LIMIT` | no lab for the profile / one already / 8 reached |
+| `OWNERSHIP_MISMATCH` | the profile's lab is another namespace |
+| `FIREWALL_DRIFT` / `LAB_FAULTED` | the lab no longer matches (firewall / topology, or already faulted); delete it |
+| `RECOVERY_REQUIRED` | leftover lab resources block creation |
+| `KERNEL_INCOMPATIBLE` | new namespaces would get extra devices |
+| `STATE_UNCERTAIN` | a create or rollback may have left kernel state behind; check recovery, restart the helper |
+| `INTERNAL` | anything else; details are in the helper log |
+
+The controller adds `RUNTIME_UNTRUSTED`, and reports a `CreateLab` that failed without a definite
+refusal as `STATE_UNCERTAIN`.
 
 ## Controller and runtimes
 
@@ -278,6 +323,34 @@ right before each signature.
 - **Clocks:** the Windows controller mints with the Windows clock, and the helper checks with
   the WSL clock. With no skew allowance, a WSL clock behind Windows across a second boundary
   refuses a fresh capability.
+
+### Trusted runtimes and profile bindings
+
+The helper reports a **runtime ID**: `runtime_` plus 128 bits of HMAC-SHA256 keyed with
+`/etc/machine-id`, so the raw machine ID is never disclosed. It names the Linux installation: it
+is stable across helper restarts and differs between installations that hold the same public
+key. Images cloned from one installation share it. One installation reached two ways (WSL and
+native) reports the same ID. A missing machine ID means no runtime ID, and no trust.
+
+The controller lab CLI keeps `runtimes.json` next to `state.json`:
+
+- **`trust-runtime`** (with `-approve`) pins the reported runtime ID to the provider and target it
+  was reached through. It requires a named WSL distribution, because the default can change, and a
+  helper that holds this controller's key. Lab commands refuse an untrusted target, or one that now
+  answers with another ID, with `RUNTIME_UNTRUSTED`.
+- **A profile is bound to one runtime for good**, from its first `create-lab`. The binding is saved
+  before the kernel changes, so an uncertain result can only be a lab on that runtime.
+- **The lab record** (namespace and helper epoch) is valid only while that helper process runs. A
+  record from an earlier epoch is stale: a normal stop deleted that lab, and the recovery gate
+  covers a crash. So a restart never strands a profile.
+- **`verify-lab` and `delete-lab`** never depend on the controller's record: without a current
+  one (or without any binding, for example after `untrust-runtime`), the helper's registry decides,
+  and `verify-lab` writes the record back.
+- **`unbind-profile`** releases a profile once its runtime owns no lab for it. **`untrust-runtime`**
+  removes a runtime that is gone, with its bindings. Labs inside it are not touched.
+
+Concurrent lab CLI runs are not coordinated. The HTTP controller does not read `runtimes.json`
+yet.
 
 ## Invariants the helper keeps
 

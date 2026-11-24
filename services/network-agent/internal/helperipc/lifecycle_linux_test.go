@@ -96,7 +96,7 @@ func TestLabLifecycleIPCRefusals(t *testing.T) {
 	}{
 		"DeleteLab with a capability": {signedDelete, "authorization denied"},
 		"CreateLab without one":       {unsigned, "authorization denied"},
-		"foreign profile":             {foreign, "lab operation failed"},
+		"foreign profile":             {foreign, "no lab for this profile"},
 	} {
 		if resp := rawRequest(t, socket, tt.req); resp.OK || resp.Error != tt.want || resp.Lab != nil {
 			t.Fatalf("%s: %+v", name, resp)
@@ -145,7 +145,9 @@ func TestShutdownDoesNotInterruptLabOperation(t *testing.T) {
 	result := make(chan Response, 1)
 	req := mint(lifecycleProfile)
 
-	go func() { result <- respond(ctx, req, nil, v, labs) }()
+	opts := ServerOptions{Verifier: v, Labs: labs}
+
+	go func() { result <- respond(ctx, req, opts) }()
 
 	opCtx := <-backend.started
 	shutdown()
@@ -164,7 +166,7 @@ func TestShutdownDoesNotInterruptLabOperation(t *testing.T) {
 		t.Fatalf("interrupted operation: %+v", resp)
 	}
 
-	if resp := respond(ctx, mint("profile_ffffffffffffffff"), nil, v, labs); resp.OK ||
+	if resp := respond(ctx, mint("profile_ffffffffffffffff"), opts); resp.OK ||
 		resp.Error != "helper is shutting down" {
 		t.Fatalf("operation during shutdown: %+v", resp)
 	}

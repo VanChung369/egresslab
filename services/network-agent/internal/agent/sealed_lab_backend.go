@@ -11,8 +11,10 @@ var ErrLabNotLoopbackOnly = errors.New("sealed lab must contain only a loopback 
 
 // SealedLabBackend is the helper's narrow kernel API: it cannot attach a tunnel or open traffic.
 type SealedLabBackend struct {
-	manager  *NetNSLabManager
-	firewall *LabFirewall
+	manager     *NetNSLabManager
+	firewall    *LabFirewall
+	recovery    *LabRecovery
+	kernelCheck func() error
 }
 
 func NewSealedLabBackend() (*SealedLabBackend, error) {
@@ -26,7 +28,13 @@ func NewSealedLabBackend() (*SealedLabBackend, error) {
 		return nil, err
 	}
 
-	return &SealedLabBackend{manager: manager, firewall: firewall}, nil
+	// Built on the backend's own manager, so the gate can tell this helper's labs from others.
+	recovery, err := NewLabRecovery(manager)
+	if err != nil {
+		return nil, err
+	}
+
+	return &SealedLabBackend{manager: manager, firewall: firewall, recovery: recovery, kernelCheck: CheckSealedLabKernel}, nil
 }
 
 func (b *SealedLabBackend) Create(ctx context.Context) (string, error) {

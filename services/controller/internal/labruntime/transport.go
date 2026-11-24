@@ -29,6 +29,7 @@ type helperResponse struct {
 	Operation    string                 `json:"operation"`
 	OK           bool                   `json:"ok"`
 	NetworkReady bool                   `json:"network_ready"`
+	Code         string                 `json:"code,omitempty"`
 	Error        string                 `json:"error,omitempty"`
 	Info         *control.LabHelperInfo `json:"helper_info,omitempty"`
 	Lab          *control.LabInfo       `json:"lab,omitempty"`
@@ -71,7 +72,13 @@ func (t *commandTransport) run(ctx context.Context, expected string, input []byt
 	cmd.WaitDelay = 2 * time.Second
 
 	if err := cmd.Run(); err != nil {
-		return helperResponse{}, fmt.Errorf("%s: helperctl %s failed: %w%s", t.l.name(), args[0], err, stderrDetail(stderr.buf.String()))
+		// helperctl prints a coded failure document; anything else means the runtime itself failed.
+		if refusal, ok := decodeFailure(stdout.buf.Bytes()); ok {
+			return helperResponse{}, refusal
+		}
+
+		return helperResponse{}, Errorf(CodeRuntimeUnavailable,
+			fmt.Sprintf("%s: helperctl %s failed: %v%s", t.l.name(), args[0], err, stderrDetail(stderr.buf.String())))
 	}
 
 	return decodeResponse(stdout.buf.Bytes(), expected)
@@ -98,22 +105,52 @@ func stderrDetail(stderr string) string {
 	return ": " + line
 }
 
-func decodeResponse(data []byte, expected string) (helperResponse, error) {
+func decodeStrict(data []byte) (helperResponse, error) {
 	var resp helperResponse
 
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&resp); err != nil {
-		return helperResponse{}, errors.New("invalid helper response")
+		return helperResponse{}, Errorf(CodeInternal, "invalid helper response")
 	}
 
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return helperResponse{}, errors.New("trailing helper response")
+		return helperResponse{}, Errorf(CodeInternal, "trailing helper response")
 	}
 
-	if resp.Version != 1 || resp.Operation != expected || !resp.OK || resp.NetworkReady || resp.Error != "" {
+	return resp, nil
+}
+
+// decodeFailure reads helperctl's failure document. Unknown codes become INTERNAL.
+func decodeFailure(data []byte) (error, bool) {
+	resp, err := decodeStrict(data)
+	if err != nil || resp.Version != 1 || resp.OK || resp.NetworkReady || resp.Error == "" ||
+		resp.Info != nil || resp.Lab != nil || resp.Labs != nil {
+		return nil, false
+	}
+
+	code := resp.Code
+	if !helperCodes[code] {
+		code = CodeInternal
+	}
+
+	message := strings.TrimPrefix(stderrDetail(resp.Error), ": ")
+	if message == "" {
+		message = "helper refused the request"
+	}
+
+	return Errorf(code, message), true
+}
+
+func decodeResponse(data []byte, expected string) (helperResponse, error) {
+	resp, err := decodeStrict(data)
+	if err != nil {
+		return helperResponse{}, err
+	}
+
+	if resp.Version != 1 || resp.Operation != expected || !resp.OK || resp.NetworkReady || resp.Error != "" || resp.Code != "" {
 		return helperResponse{}, errors.New("unexpected helper response")
 	}
 

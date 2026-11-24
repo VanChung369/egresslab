@@ -19,6 +19,7 @@ var (
 	labHelperIDPattern    = regexp.MustCompile(`^helper_[0-9a-f]{32}$`)
 	labNamespacePattern   = regexp.MustCompile(`^egresslab-lab-[0-9a-f]{16}$`)
 	labFingerprintPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	labRuntimeIDPattern   = regexp.MustCompile(`^runtime_[0-9a-f]{32}$`)
 )
 
 const (
@@ -31,9 +32,14 @@ type LabHelperInfo struct {
 	AuthorizationConfigured bool   `json:"authorization_configured"`
 	HelperID                string `json:"helper_id,omitempty"`
 	PublicKeySHA256         string `json:"public_key_sha256,omitempty"`
+	RuntimeID               string `json:"runtime_id,omitempty"`
 }
 
 func (i LabHelperInfo) Valid() bool {
+	if i.RuntimeID != "" && !ValidRuntimeID(i.RuntimeID) {
+		return false
+	}
+
 	if !i.AuthorizationConfigured {
 		return i.HelperID == "" && i.PublicKeySHA256 == ""
 	}
@@ -80,6 +86,8 @@ type LabSigner interface {
 func ValidProfileID(id string) bool { return profileIDPattern.MatchString(id) }
 
 func ValidLabNamespace(name string) bool { return labNamespacePattern.MatchString(name) }
+
+func ValidRuntimeID(id string) bool { return labRuntimeIDPattern.MatchString(id) }
 
 // LabPublicKeySHA256 is the fingerprint the helper reports in HelperInfo.
 func LabPublicKeySHA256(public ed25519.PublicKey) string {

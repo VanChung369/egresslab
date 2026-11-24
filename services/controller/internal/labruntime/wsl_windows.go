@@ -28,6 +28,9 @@ func newWSL(distro string) (launcher, error) {
 	return wslLauncher{wsl: filepath.Join(root, "System32", "wsl.exe"), distro: distro}, nil
 }
 
+func (wslLauncher) kind() string     { return "wsl" }
+func (l wslLauncher) target() string { return l.distro }
+
 func (l wslLauncher) name() string {
 	if l.distro == "" {
 		return "wsl"

@@ -29,7 +29,9 @@ func newLima(instance string) (launcher, error) {
 	return limaLauncher{instance: instance}, nil
 }
 
-func (l limaLauncher) name() string { return "lima:" + l.instance }
+func (limaLauncher) kind() string     { return "lima" }
+func (l limaLauncher) target() string { return l.instance }
+func (l limaLauncher) name() string   { return "lima:" + l.instance }
 
 func (l limaLauncher) detect() error {
 	if _, err := exec.LookPath("limactl"); err != nil {

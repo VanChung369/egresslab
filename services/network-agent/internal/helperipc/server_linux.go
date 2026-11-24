@@ -28,29 +28,30 @@ var echoableOperation = regexp.MustCompile(`^[A-Za-z]{1,32}$`)
 
 type RecoveryScanner func(context.Context) ([]RecoveryItem, error)
 
+// ServerOptions selects what the helper answers. A nil Verifier disables authorization; a nil
+// Labs disables the lab lifecycle.
+type ServerOptions struct {
+	Scan      RecoveryScanner
+	Verifier  *helperauth.Verifier
+	Labs      *LabLifecycle
+	RuntimeID string
+}
+
 // Serve answers local, single-request connections until ctx is cancelled, without
 // authorization: AuthorizeCheck answers "authorization unavailable".
 //
 // The caller owns socket creation and permissions. A peer whose SO_PEERCRED UID is not
 // allowedUID is closed before anything is read from it. Serve dispatches no network change.
 func Serve(ctx context.Context, listener *net.UnixListener, allowedUID uint32, scan RecoveryScanner) error {
-	return ServeAuthorized(ctx, listener, allowedUID, scan, nil)
+	return ServeWith(ctx, listener, allowedUID, ServerOptions{Scan: scan})
 }
 
-// ServeAuthorized is Serve plus the AuthorizeCheck dry-run when v is not nil. It never
-// dispatches a network mutation, whatever the capability says.
-func ServeAuthorized(
-	ctx context.Context,
-	listener *net.UnixListener,
-	allowedUID uint32,
-	scan RecoveryScanner,
-	v *helperauth.Verifier,
-) error {
-	return ServeLifecycle(ctx, listener, allowedUID, scan, v, nil)
+// ServeAuthorized is Serve plus the AuthorizeCheck dry-run when v is not nil.
+func ServeAuthorized(ctx context.Context, listener *net.UnixListener, allowedUID uint32, scan RecoveryScanner, v *helperauth.Verifier) error {
+	return ServeWith(ctx, listener, allowedUID, ServerOptions{Scan: scan, Verifier: v})
 }
 
-// ServeLifecycle adds CreateLab, VerifyLab and DeleteLab when labs is not nil. It returns after
-// all workers finish; the caller then runs labs.Close.
+// ServeLifecycle adds CreateLab, VerifyLab, DeleteLab and ListLabs when labs is not nil.
 func ServeLifecycle(
 	ctx context.Context,
 	listener *net.UnixListener,
@@ -59,8 +60,17 @@ func ServeLifecycle(
 	v *helperauth.Verifier,
 	labs *LabLifecycle,
 ) error {
-	if labs != nil && v == nil {
+	return ServeWith(ctx, listener, allowedUID, ServerOptions{Scan: scan, Verifier: v, Labs: labs})
+}
+
+// ServeWith returns after all workers finish; the caller then runs Labs.Close.
+func ServeWith(ctx context.Context, listener *net.UnixListener, allowedUID uint32, opts ServerOptions) error {
+	if opts.Labs != nil && opts.Verifier == nil {
 		return errors.New("lab lifecycle requires authorization")
+	}
+
+	if opts.RuntimeID != "" && !ValidRuntimeID(opts.RuntimeID) {
+		return errors.New("invalid runtime ID")
 	}
 
 	if listener == nil || allowedUID == 0 {
@@ -101,7 +111,7 @@ func ServeLifecycle(
 				defer workers.Done()
 				defer func() { <-slots }()
 
-				handle(ctx, conn, allowedUID, scan, v, labs)
+				handle(ctx, conn, allowedUID, opts)
 			}()
 
 		default:
@@ -133,14 +143,7 @@ func peerUID(conn *net.UnixConn) (uint32, error) {
 	return uid, optErr
 }
 
-func handle(
-	ctx context.Context,
-	conn *net.UnixConn,
-	allowedUID uint32,
-	scan RecoveryScanner,
-	v *helperauth.Verifier,
-	labs *LabLifecycle,
-) {
+func handle(ctx context.Context, conn *net.UnixConn, allowedUID uint32, opts ServerOptions) {
 	defer conn.Close()
 
 	// Authenticate the peer before reading or parsing anything from the socket.
@@ -157,7 +160,7 @@ func handle(
 	var req Request
 	if err := ReadFrame(conn, &req); err != nil {
 		// Do not echo anything from a frame that failed to parse.
-		_ = WriteFrame(conn, Response{Version: Version, Error: "invalid request frame"})
+		_ = WriteFrame(conn, Response{Version: Version, Code: CodeInvalidRequest, Error: "invalid request frame"})
 		return
 	}
 
@@ -167,76 +170,66 @@ func handle(
 		}
 	}
 
-	resp := respond(ctx, req, scan, v, labs)
+	resp := respond(ctx, req, opts)
 
 	if err := WriteFrame(conn, resp); errors.Is(err, ErrInvalidFrame) {
 		_ = WriteFrame(conn, Response{
 			Version:   Version,
 			Operation: resp.Operation,
+			Code:      CodeInternal,
 			Error:     "response too large",
 		})
 	}
 }
 
-func respond(
-	ctx context.Context,
-	req Request,
-	scan RecoveryScanner,
-	v *helperauth.Verifier,
-	labs *LabLifecycle,
-) Response {
+func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 	resp := Response{Version: Version, NetworkReady: false}
 
 	if echoableOperation.MatchString(req.Operation) {
 		resp.Operation = req.Operation
 	}
 
-	if req.Version != Version {
-		resp.Error = "unsupported protocol version"
+	refuse := func(code, message string) Response {
+		resp.Code, resp.Error = code, message
 		return resp
 	}
 
+	if req.Version != Version {
+		return refuse(CodeInvalidRequest, "unsupported protocol version")
+	}
+
 	hasAuthFields := req.Intent != nil || req.Capability != nil
+	v, labs := opts.Verifier, opts.Labs
+
+	switch req.Operation {
+	case OpPing, OpRecoverScan, OpHelperInfo, OpListLabs:
+		if hasAuthFields {
+			return refuse(CodeInvalidRequest, "unexpected authorization fields")
+		}
+	}
 
 	switch req.Operation {
 	case OpPing:
-		if hasAuthFields {
-			resp.Error = "unexpected authorization fields"
-			return resp
-		}
-
 		resp.OK = true
 
 	case OpRecoverScan:
-		if hasAuthFields {
-			resp.Error = "unexpected authorization fields"
-			return resp
-		}
-
-		if scan == nil {
-			resp.Error = "recovery scanner unavailable"
-			return resp
+		if opts.Scan == nil {
+			return refuse(CodeOperationDisabled, "recovery scanner unavailable")
 		}
 
 		scanCtx, cancel := context.WithTimeout(ctx, scanTimeout)
-		items, err := scan(scanCtx)
+		items, err := opts.Scan(scanCtx)
 		cancel()
 
 		// Scanner errors stay on the helper side; they can name internal paths.
 		if err != nil || len(items) > maxRecoveryItems {
-			resp.Error = "recovery scan failed"
-			return resp
+			return refuse(CodeInternal, "recovery scan failed")
 		}
 
 		resp.OK = true
 		resp.Items = items
 
 	case OpHelperInfo:
-		if hasAuthFields {
-			resp.Error = "unexpected authorization fields"
-			return resp
-		}
-
 		// Identity handles a nil verifier: an unconfigured helper still answers.
 		helperID, fingerprint := v.Identity()
 
@@ -244,39 +237,31 @@ func respond(
 			AuthorizationConfigured: v != nil,
 			HelperID:                helperID,
 			PublicKeySHA256:         fingerprint,
+			RuntimeID:               opts.RuntimeID,
 		}
 		resp.OK = true
 
 	case OpAuthorizeCheck:
 		if v == nil || req.Intent == nil || req.Capability == nil {
-			resp.Error = "authorization unavailable"
-			return resp
+			return refuse(CodeOperationDisabled, "authorization unavailable")
 		}
 
 		// Do not tell the client whether the signature, binding, expiry or nonce failed.
 		if err := v.VerifyAndConsume(*req.Capability, *req.Intent); err != nil {
-			resp.Error = "authorization denied"
-			return resp
+			return refuse(CodeAuthorizationDenied, "authorization denied")
 		}
 
 		// Dry-run only: nothing is executed for an accepted capability.
 		resp.OK = true
 
 	case OpListLabs:
-		if hasAuthFields {
-			resp.Error = "unexpected authorization fields"
-			return resp
-		}
-
 		if labs == nil {
-			resp.Error = "operation not enabled"
-			return resp
+			return refuse(CodeOperationDisabled, "operation not enabled")
 		}
 
 		items, err := labs.snapshot()
 		if err != nil {
-			resp.Error = "lab registry unavailable"
-			return resp
+			return refuse(labCode(err), "lab registry unavailable")
 		}
 
 		resp.OK = true
@@ -284,13 +269,11 @@ func respond(
 
 	case helperauth.OpCreateLab, OpVerifyLab, OpDeleteLab:
 		if labs == nil {
-			resp.Error = "operation not enabled"
-			return resp
+			return refuse(CodeOperationDisabled, "operation not enabled")
 		}
 
 		if ctx.Err() != nil {
-			resp.Error = "helper is shutting down"
-			return resp
+			return refuse(CodeRuntimeUnavailable, "helper is shutting down")
 		}
 
 		// Shutdown must not kill a kernel command halfway (after "ip netns add" but before
@@ -300,14 +283,12 @@ func respond(
 		cancel()
 
 		if err != nil {
-			if errors.Is(err, errLabAuthorization) {
-				resp.Error = "authorization denied"
-			} else {
-				log.Printf("lab lifecycle %s: %v", req.Operation, err)
-				resp.Error = "lab operation failed"
+			code := labCode(err)
+			if code != CodeAuthorizationDenied {
+				log.Printf("lab lifecycle %s: %s: %v", req.Operation, code, err)
 			}
 
-			return resp
+			return refuse(code, labMessages[code])
 		}
 
 		resp.OK = true
@@ -315,7 +296,7 @@ func respond(
 
 	default:
 		// Network mutations stay disabled, with or without a valid capability.
-		resp.Error = "operation not enabled"
+		return refuse(CodeOperationDisabled, "operation not enabled")
 	}
 
 	return resp

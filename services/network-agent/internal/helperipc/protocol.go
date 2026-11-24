@@ -53,6 +53,7 @@ type Response struct {
 	Operation    string         `json:"operation"`
 	OK           bool           `json:"ok"`
 	NetworkReady bool           `json:"network_ready"`
+	Code         string         `json:"code,omitempty"`
 	Error        string         `json:"error,omitempty"`
 	Items        []RecoveryItem `json:"items,omitempty"`
 	Info         *HelperInfo    `json:"helper_info,omitempty"`
@@ -145,14 +146,14 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 
 	conn, err := dialer.DialContext(ctx, "unix", socketPath)
 	if err != nil {
-		return Response{}, err
+		return Response{}, &Error{Code: CodeRuntimeUnavailable, Message: "helper unreachable: " + err.Error()}
 	}
 	defer conn.Close()
 
 	// Test servers on temporary paths run unprivileged.
 	if socketPath == SocketPath {
 		if err := verifyProductionPeer(conn); err != nil {
-			return Response{}, err
+			return Response{}, &Error{Code: CodeRuntimeUnavailable, Message: err.Error()}
 		}
 	}
 
@@ -182,7 +183,7 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 	if resp.Version != Version ||
 		resp.Operation != req.Operation ||
 		resp.NetworkReady ||
-		(resp.OK && resp.Error != "") ||
+		(resp.OK && (resp.Error != "" || resp.Code != "")) ||
 		(len(resp.Items) != 0 && req.Operation != OpRecoverScan) {
 		return Response{}, errors.New("helper returned an invalid response")
 	}
@@ -205,10 +206,16 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 	}
 
 	if !resp.OK {
-		if resp.Error == "" {
-			return Response{}, errors.New("helper denied request")
+		code, message := resp.Code, resp.Error
+		if !knownCodes[code] {
+			code = CodeInternal
 		}
-		return Response{}, errors.New(resp.Error)
+
+		if message == "" {
+			message = "helper denied request"
+		}
+
+		return Response{}, &Error{Code: code, Message: message}
 	}
 
 	return resp, nil

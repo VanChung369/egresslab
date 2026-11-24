@@ -37,13 +37,22 @@ func TestFakeHelperctl(t *testing.T) {
 		}
 	}
 
-	fail := func(msg string) {
+	// Like the real helperctl: a coded failure document on stdout, the message on stderr.
+	failWith := func(code, msg string) {
+		fmt.Printf("{\n  \"version\": 1,\n  \"operation\": \"\",\n  \"ok\": false,\n  \"network_ready\": false,\n  \"code\": %q,\n  \"error\": %q\n}\n", code, msg)
 		fmt.Fprintln(os.Stderr, "helperctl:", msg)
 		os.Exit(1)
 	}
+	fail := func(msg string) { failWith(CodeInvalidRequest, msg) }
 
-	if mode == "denied" {
-		fail("authorization denied")
+	switch mode {
+	case "denied":
+		failWith(CodeAuthorizationDenied, "authorization denied")
+	case "unknown-code":
+		failWith("SOMETHING_NEW", "new failure")
+	case "crash":
+		fmt.Fprintln(os.Stderr, "wsl: the distribution is not installed")
+		os.Exit(1)
 	}
 
 	respond := func(op string, extra string) {
@@ -63,7 +72,7 @@ func TestFakeHelperctl(t *testing.T) {
 			testHelperID, testFingerprint))
 	case "list-labs":
 		if mode == "no-lifecycle" {
-			fail("operation not enabled")
+			failWith(CodeOperationDisabled, "operation not enabled")
 		}
 		respond("ListLabs", fmt.Sprintf(",\n  \"labs\": [{\"profile_id\": %q, \"namespace\": %q, \"state\": \"sealed\"}]", testProfile, testNamespace))
 	case "create-lab":
@@ -91,8 +100,10 @@ type fakeLauncher struct {
 	calls [][]string
 }
 
-func (f *fakeLauncher) name() string  { return "fake" }
-func (f *fakeLauncher) detect() error { return nil }
+func (f *fakeLauncher) kind() string   { return "fake" }
+func (f *fakeLauncher) target() string { return "" }
+func (f *fakeLauncher) name() string   { return "fake" }
+func (f *fakeLauncher) detect() error  { return nil }
 
 func (f *fakeLauncher) command(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	f.calls = append(f.calls, args)
@@ -150,9 +161,20 @@ func TestCommandTransportFailures(t *testing.T) {
 	ctx := context.Background()
 
 	denied := newCommandProvider(&fakeLauncher{mode: "denied"})
-	if _, err := denied.Transport().CreateLab(ctx, testProfile, capabilityFor(testProfile)); err == nil ||
-		!strings.HasSuffix(err.Error(), ": helperctl: authorization denied") {
+	if _, err := denied.Transport().CreateLab(ctx, testProfile, capabilityFor(testProfile)); ErrorCode(err) != CodeAuthorizationDenied ||
+		err.Error() != "AUTHORIZATION_DENIED: authorization denied" {
 		t.Fatalf("denied: %v", err)
+	}
+
+	crash := newCommandProvider(&fakeLauncher{mode: "crash"})
+	if _, err := crash.Transport().HelperInfo(ctx); ErrorCode(err) != CodeRuntimeUnavailable ||
+		!strings.HasSuffix(err.Error(), ": wsl: the distribution is not installed") {
+		t.Fatalf("runtime failure: %v", err)
+	}
+
+	unknown := newCommandProvider(&fakeLauncher{mode: "unknown-code"})
+	if _, err := unknown.Transport().HelperInfo(ctx); ErrorCode(err) != CodeInternal {
+		t.Fatalf("unknown code: %v", err)
 	}
 
 	if status, err := denied.Status(ctx); err != nil || status.Reachable {
@@ -160,8 +182,8 @@ func TestCommandTransportFailures(t *testing.T) {
 	}
 
 	garbage := newCommandProvider(&fakeLauncher{mode: "garbage"})
-	if _, err := garbage.Transport().CreateLab(ctx, testProfile, capabilityFor(testProfile)); err == nil ||
-		err.Error() != "invalid helper response" {
+	if _, err := garbage.Transport().CreateLab(ctx, testProfile, capabilityFor(testProfile)); ErrorCode(err) != CodeInternal ||
+		!strings.Contains(err.Error(), "invalid helper response") {
 		t.Fatalf("garbage: %v", err)
 	}
 
@@ -242,6 +264,7 @@ func TestDecodeResponse(t *testing.T) {
 		"deleted lab in list":  {"ListLabs", doc("ListLabs", labs(item(testProfile, testNamespace, "deleted")))},
 		"malformed list entry": {"ListLabs", doc("ListLabs", labs(item("profile_x", testNamespace, "sealed")))},
 		"error with ok":        {"CreateLab", doc("CreateLab", lab("sealed"), `"error": "x"`)},
+		"code with ok":         {"CreateLab", doc("CreateLab", lab("sealed"), `"code": "LAB_BUSY"`)},
 		"not JSON":             {"CreateLab", "helperctl: authorization denied"},
 	}
 
@@ -285,5 +308,31 @@ func TestProviders(t *testing.T) {
 
 	if kind, err := DefaultKind(); err != nil || kind == "" {
 		t.Errorf("default kind: %q %v", kind, err)
+	}
+}
+
+func TestDecodeFailure(t *testing.T) {
+	failure := func(code, message string) []byte {
+		data, _ := json.Marshal(helperResponse{Version: 1, Code: code, Error: message})
+		return data
+	}
+
+	for name, tt := range map[string]struct {
+		data []byte
+		code string
+		ok   bool
+	}{
+		"coded refusal":         {failure(CodeLabBusy, "busy"), CodeLabBusy, true},
+		"unknown code":          {failure("NEW_CODE", "x"), CodeInternal, true},
+		"whitespace message":    {failure(CodeLabBusy, " \n\t"), CodeLabBusy, true},
+		"control characters":    {failure(CodeLabBusy, "\x1b[2J"), CodeLabBusy, true},
+		"success is no failure": {[]byte(`{"version":1,"operation":"Ping","ok":true,"network_ready":false}`), "", false},
+		"empty message":         {failure(CodeLabBusy, ""), "", false},
+		"not JSON":              {[]byte("wsl: error"), "", false},
+	} {
+		err, ok := decodeFailure(tt.data)
+		if ok != tt.ok || (ok && (ErrorCode(err) != tt.code || strings.TrimSpace(err.Error()) == tt.code+":")) {
+			t.Errorf("%s: %v %t", name, err, ok)
+		}
 	}
 }
