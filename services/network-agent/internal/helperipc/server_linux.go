@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/VanChung369/egresslab/services/network-agent/internal/helperauth"
 )
 
 const (
@@ -25,11 +27,24 @@ var echoableOperation = regexp.MustCompile(`^[A-Za-z]{1,32}$`)
 
 type RecoveryScanner func(context.Context) ([]RecoveryItem, error)
 
-// Serve answers local, single-request connections until ctx is cancelled.
+// Serve answers local, single-request connections until ctx is cancelled, without
+// authorization: AuthorizeCheck answers "authorization unavailable".
 //
 // The caller owns socket creation and permissions. A peer whose SO_PEERCRED UID is not
 // allowedUID is closed before anything is read from it. No network-changing operation exists.
 func Serve(ctx context.Context, listener *net.UnixListener, allowedUID uint32, scan RecoveryScanner) error {
+	return ServeAuthorized(ctx, listener, allowedUID, scan, nil)
+}
+
+// ServeAuthorized is Serve plus the AuthorizeCheck dry-run when v is not nil. It never
+// dispatches a network mutation, whatever the capability says.
+func ServeAuthorized(
+	ctx context.Context,
+	listener *net.UnixListener,
+	allowedUID uint32,
+	scan RecoveryScanner,
+	v *helperauth.Verifier,
+) error {
 	if listener == nil || allowedUID == 0 {
 		return errors.New("invalid helper listener or client UID")
 	}
@@ -68,7 +83,7 @@ func Serve(ctx context.Context, listener *net.UnixListener, allowedUID uint32, s
 				defer workers.Done()
 				defer func() { <-slots }()
 
-				handle(ctx, conn, allowedUID, scan)
+				handle(ctx, conn, allowedUID, scan, v)
 			}()
 
 		default:
@@ -100,7 +115,7 @@ func peerUID(conn *net.UnixConn) (uint32, error) {
 	return uid, optErr
 }
 
-func handle(ctx context.Context, conn *net.UnixConn, allowedUID uint32, scan RecoveryScanner) {
+func handle(ctx context.Context, conn *net.UnixConn, allowedUID uint32, scan RecoveryScanner, v *helperauth.Verifier) {
 	defer conn.Close()
 
 	// Authenticate the peer before reading or parsing anything from the socket.
@@ -121,7 +136,7 @@ func handle(ctx context.Context, conn *net.UnixConn, allowedUID uint32, scan Rec
 		return
 	}
 
-	resp := respond(ctx, req, scan)
+	resp := respond(ctx, req, scan, v)
 
 	if err := WriteFrame(conn, resp); errors.Is(err, ErrInvalidFrame) {
 		_ = WriteFrame(conn, Response{
@@ -132,7 +147,7 @@ func handle(ctx context.Context, conn *net.UnixConn, allowedUID uint32, scan Rec
 	}
 }
 
-func respond(ctx context.Context, req Request, scan RecoveryScanner) Response {
+func respond(ctx context.Context, req Request, scan RecoveryScanner, v *helperauth.Verifier) Response {
 	resp := Response{Version: Version, NetworkReady: false}
 
 	if echoableOperation.MatchString(req.Operation) {
@@ -144,11 +159,23 @@ func respond(ctx context.Context, req Request, scan RecoveryScanner) Response {
 		return resp
 	}
 
+	hasAuthFields := req.Intent != nil || req.Capability != nil
+
 	switch req.Operation {
 	case OpPing:
+		if hasAuthFields {
+			resp.Error = "unexpected authorization fields"
+			return resp
+		}
+
 		resp.OK = true
 
 	case OpRecoverScan:
+		if hasAuthFields {
+			resp.Error = "unexpected authorization fields"
+			return resp
+		}
+
 		if scan == nil {
 			resp.Error = "recovery scanner unavailable"
 			return resp
@@ -167,8 +194,23 @@ func respond(ctx context.Context, req Request, scan RecoveryScanner) Response {
 		resp.OK = true
 		resp.Items = items
 
+	case OpAuthorizeCheck:
+		if v == nil || req.Intent == nil || req.Capability == nil {
+			resp.Error = "authorization unavailable"
+			return resp
+		}
+
+		// Do not tell the client whether the signature, binding, expiry or nonce failed.
+		if err := v.VerifyAndConsume(*req.Capability, *req.Intent); err != nil {
+			resp.Error = "authorization denied"
+			return resp
+		}
+
+		// Dry-run only: nothing is executed for an accepted capability.
+		resp.OK = true
+
 	default:
-		// All network mutations are disabled until capability authorization exists.
+		// Network mutations stay disabled, with or without a valid capability.
 		resp.Error = "operation not enabled"
 	}
 

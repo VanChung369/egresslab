@@ -2,8 +2,8 @@
 // privileged network helper.
 //
 // Each connection carries one request and one response. A frame is a 4-byte big-endian length
-// followed by at most MaxFrameBytes of JSON. Only read-only operations exist; every network
-// mutation is refused until an authorization protocol is in place (docs/PRIVILEGED-HELPER.md).
+// followed by at most MaxFrameBytes of JSON. Only read-only operations and the AuthorizeCheck
+// dry-run exist; every network mutation is refused (docs/PRIVILEGED-HELPER.md).
 package helperipc
 
 import (
@@ -16,6 +16,8 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/VanChung369/egresslab/services/network-agent/internal/helperauth"
 )
 
 const (
@@ -24,11 +26,17 @@ const (
 	OpPing        = "Ping"
 	OpRecoverScan = "RecoverScan"
 	SocketPath    = "/run/egresslab/helper.sock"
+
+	// OpAuthorizeCheck verifies and consumes a capability. It is a dry-run: it changes nothing in
+	// the kernel and does not authorize a later operation.
+	OpAuthorizeCheck = "AuthorizeCheck"
 )
 
 type Request struct {
-	Version   int    `json:"version"`
-	Operation string `json:"operation"`
+	Version    int                          `json:"version"`
+	Operation  string                       `json:"operation"`
+	Intent     *helperauth.Intent           `json:"intent,omitempty"`
+	Capability *helperauth.SignedCapability `json:"capability,omitempty"`
 }
 
 type RecoveryItem struct {
@@ -107,6 +115,26 @@ func Call(ctx context.Context, socketPath string, op string) (Response, error) {
 		return Response{}, errors.New("operation is not available to the helper client")
 	}
 
+	return callRequest(ctx, socketPath, Request{Version: Version, Operation: op})
+}
+
+// CheckCapability asks the helper to verify capability against intent. Success consumes the
+// nonce but creates no namespace, configures no tunnel and enables no network access.
+func CheckCapability(
+	ctx context.Context,
+	socketPath string,
+	intent helperauth.Intent,
+	capability helperauth.SignedCapability,
+) (Response, error) {
+	return callRequest(ctx, socketPath, Request{
+		Version:    Version,
+		Operation:  OpAuthorizeCheck,
+		Intent:     &intent,
+		Capability: &capability,
+	})
+}
+
+func callRequest(ctx context.Context, socketPath string, req Request) (Response, error) {
 	dialer := net.Dialer{Timeout: 3 * time.Second}
 
 	conn, err := dialer.DialContext(ctx, "unix", socketPath)
@@ -124,7 +152,7 @@ func Call(ctx context.Context, socketPath string, op string) (Response, error) {
 		return Response{}, err
 	}
 
-	if err := WriteFrame(conn, Request{Version: Version, Operation: op}); err != nil {
+	if err := WriteFrame(conn, req); err != nil {
 		return Response{}, err
 	}
 
@@ -134,9 +162,10 @@ func Call(ctx context.Context, socketPath string, op string) (Response, error) {
 	}
 
 	if resp.Version != Version ||
-		resp.Operation != op ||
+		resp.Operation != req.Operation ||
 		resp.NetworkReady ||
-		(resp.OK && resp.Error != "") {
+		(resp.OK && resp.Error != "") ||
+		(len(resp.Items) != 0 && req.Operation != OpRecoverScan) {
 		return Response{}, errors.New("helper returned an invalid response")
 	}
 

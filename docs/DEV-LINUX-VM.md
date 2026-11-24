@@ -206,7 +206,7 @@ Privileged networking exists only as **lab CLIs**. You run them by hand with `su
 | `egresslab-vpn-lab -file vpn.conf` | Real VPN egress through a sealed namespace (details below) |
 | `egresslab-wg-inspect`, `egresslab-wg-vault-lab` | Config import summary; in-memory or opt-in encrypted staging |
 | `egresslab-lab-recover [-delete]` | Report (default) leftovers of a crashed session; `-delete` removes only orphan namespaces holding nothing but `lo`/lab veth (never one with WireGuard) and stale markers. Underlay tables are never removed automatically |
-| `egresslab-helper -uid <UID> -gid <GID>`, `egresslab-helperctl ping\|recover-scan` | Helper IPC bootstrap: Unix socket with `SO_PEERCRED`, read-only `Ping`/`RecoverScan` (details below) |
+| `egresslab-helper -uid <UID> -gid <GID>`, `egresslab-helperctl ping\|recover-scan` | Helper IPC: Unix socket with `SO_PEERCRED`, read-only `Ping`/`RecoverScan`, optional `AuthorizeCheck` dry-run (details below) |
 
 `egresslab-vpn-lab` runs these steps:
 
@@ -219,7 +219,7 @@ Privileged networking exists only as **lab CLIs**. You run them by hand with `su
 
 Still not implemented:
 
-- Network changes through the privileged helper. Its IPC bootstrap exists (read-only `Ping` and `RecoverScan`), but mutations need the Ed25519 authorization protocol first. The design is in `docs/PRIVILEGED-HELPER.md`.
+- Network changes through the privileged helper. Its IPC and the Ed25519 capability check exist (read-only `Ping`, `RecoverScan` and the `AuthorizeCheck` dry-run). Mutations still need restart-safe replay protection, controller key management and per-operation policy checks. The design is in `docs/PRIVILEGED-HELPER.md`.
 - DNS through the tunnel. DNS (port 53) and IPv6 are explicitly dropped inside lab namespaces.
 - Multi-peer configs, and hostname endpoints in the VPN lab. The importer reports `vpn_lab_compatible=false` for these.
 - SOCKS5 runtime activation.
@@ -247,7 +247,7 @@ The firewall readback tests use real `nft -j` captures from nft 1.0.2 (Ubuntu 22
 sudo ip netns exec <egresslab-lab-...> nft -j list ruleset
 ```
 
-### Helper IPC (Step 22)
+### Helper IPC (Steps 22–23)
 
 The helper runs as root in this lab step. The production design keeps only `CAP_NET_ADMIN`. Install the binaries as root-owned files:
 
@@ -268,7 +268,16 @@ Other UIDs get no reply, including root (`sudo egresslab-helperctl ping` fails o
 
 Ctrl+C, `SIGTERM` or closing the terminal removes the socket. After a `SIGKILL`, the helper refuses to start while `/run/egresslab/helper.sock` exists. Check that `pgrep -x egresslab-helper` prints nothing, then remove the socket with `sudo rm`.
 
-Run the socket tests in `internal/helperipc` as a non-root user. Under root, only `TestPeerRejection` and `TestServeRejectsRootClientUID` run; the others skip.
+Started without authorization flags, the helper answers `AuthorizeCheck` with `authorization unavailable`. To enable the dry-run, give it both flags:
+
+```bash
+sudo /usr/local/bin/egresslab-helper -uid "$(id -u)" -gid "$(id -g)" \
+  -auth-public-key-file /etc/egresslab/helper-auth.pub -helper-id helper_<32 lowercase hex>
+```
+
+The public key file holds the controller's Ed25519 public key as 64 hex characters. Both the file and its directory must be owned by root and not writable by group or others; symlinks are refused. A refused configuration exits before touching `/run/egresslab`. The helper never loads a private key. `egresslab-helperctl` cannot send `AuthorizeCheck`. Later the controller will mint capabilities and the agent will forward them over the socket.
+
+Run the socket tests in `internal/helperipc` as a non-root user. Under root, only `TestPeerRejection` and `TestServeRejectsRootClientUID` run; the others skip. The key-loader tests in `cmd/egresslab-helper` run under both.
 
 ## Security Notes
 

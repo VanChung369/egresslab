@@ -1,31 +1,52 @@
 # Privileged helper and authorization protocol
 
-Status: **IPC bootstrap implemented in Step 22.** The rest of this document is still design.
+Status: **Step 23 — signed authorization dry-run implemented.** Network changes through the
+helper are still not implemented; the sections from "Typed operations only" on are partly design.
 
-Implemented:
+## Implemented
 
-- `egresslab-helper` listens on the Linux Unix-domain socket `/run/egresslab/helper.sock`.
-- Length-prefixed JSON protocol (`internal/helperipc`), version 1, maximum 64 KiB per frame.
-  Unknown fields and trailing content are rejected.
-- `SO_PEERCRED` UID check before anything is read. Other UIDs, root included, are closed without
-  a reply.
-- Two read-only operations: `Ping` and `RecoverScan` (the existing `LabRecovery.Scan`). Every other
-  operation name gets `operation not enabled`. `network_ready` is always `false`.
-- `egresslab-helperctl ping|recover-scan`, a client for the agent user.
-- Unit tests for framing, peer rejection, refused mutations, hidden scanner errors and oversized
-  responses (`internal/helperipc`).
+- Unix-domain socket IPC at `/run/egresslab/helper.sock`, with the `SO_PEERCRED` UID check done
+  before anything is read. Other UIDs, root included, are closed without a reply.
+- Length-prefixed JSON requests of at most 64 KiB. Unknown fields, nested ones included, and
+  trailing content are rejected.
+- Read-only `Ping` and `RecoverScan` (the existing `LabRecovery.Scan`).
+- Ed25519 capability minting and verification (`internal/helperauth`).
+- Each capability is bound to one operation, profile, namespace, target and helper. The target is
+  the stage for `ConnectTunnel` and the IPv4 address for `PermitProbe`.
+- Short-lived capabilities: 30 seconds at most.
+- Cryptographically random 128-bit nonces.
+- A process-local replay cache with atomic nonce consumption, capped at 4096 live nonces.
+- `AuthorizeCheck`, a dry-run IPC operation.
+- Optional root-owned public-key loading in the helper (`-auth-public-key-file`, `-helper-id`).
+- Unit tests for signatures, expiry, binding, concurrency, replay, the signing-message golden
+  vector and the key loader.
 
-Not implemented:
+## Not implemented
 
-- Network-changing operations through IPC (`CreateLab`, `ConnectTunnel`, `PermitProbe`, `RecoverClean`, ...)
-- Ed25519 authorization capabilities
-- Replay protection and authorization expiry
-- `CAP_NET_ADMIN`-only runtime and systemd hardening
-- Desktop/controller-driven helper operations; the agent does not call the helper yet
-- Persistent audit log
+- Production controller signing-key storage and lifecycle. The controller is a separate Go module
+  and cannot import `internal/helperauth`; it needs its own implementation of the format below,
+  checked against `TestSigningMessageGolden`.
+- A controller approval workflow for individual operations.
+- Restart-safe replay protection and helper epoch rotation. The replay cache lives in memory, so
+  after a helper restart an unexpired capability that was already used is accepted again.
+- Network-changing operations through IPC (`CreateLab`, `ConnectTunnel`, `PermitProbe`,
+  `RecoverClean`, ...).
+- Per-operation kernel and policy authorization.
+- A `CAP_NET_ADMIN`-only helper runtime and systemd hardening.
+- A persistent audit log and signing-key rotation.
+- Production route readiness and proxy activation.
+- The agent does not call the helper yet.
 
-The sections below on typed operations, authorization and invariants describe that future work.
-Until it exists, any `ip`, `wg` or `nft` change still needs a lab CLI run by hand with `sudo`.
+## Safety boundary
+
+- `AuthorizeCheck` never runs `ip`, `wg`, `nft` or any other network mutation.
+- A successful dry-run consumes its nonce. It does not authorize a later operation with the same
+  capability.
+- A request named `ConnectTunnel` or `PermitProbe` gets `operation not enabled`, even with a valid
+  capability, and the capability stays unused.
+- Every IPC response sets `network_ready=false`, and the client rejects a response that does not.
+- A valid signature does not prove IP uniqueness, firewall integrity or route readiness. Those
+  must still be verified when an operation runs.
 
 ## What is enforced today
 
@@ -41,8 +62,9 @@ Until it exists, any `ip`, `wg` or `nft` change still needs a lab CLI run by han
   `network_ready=false`.
 - Privileged changes run only from the `egresslab-*-lab` CLIs. An operator starts those with `sudo`
   in a terminal on the VM.
-- The helper socket accepts only the configured agent UID and answers only `Ping` and `RecoverScan`
-  (`TestPeerRejection`, `TestPeerIdentityAndReadOnlyOperations`).
+- The helper socket accepts only the configured agent UID. It answers only `Ping`, `RecoverScan`
+  and the `AuthorizeCheck` dry-run (`TestPeerRejection`, `TestPeerIdentityAndReadOnlyOperations`,
+  `TestMutationWithValidCapabilityIsRefused`).
 
 Changing any of these needs the helper below first.
 
@@ -84,19 +106,37 @@ Every argument is validated with the existing patterns: `egresslab-lab-<16 hex>`
 ## Authorization
 
 Each operation that opens traffic (`ConnectTunnel`, `PermitProbe`) needs a capability that the
-controller mints:
+controller mints. Implemented format, version 1:
 
 ```text
-capability = Ed25519-sign(controller_key, {
-  op, profile_id, lab, stage_id?, nonce (128-bit), not_after (<= 30 s), helper_id
-})
+claims = {"version":1,
+          "intent":{"operation":..., "profile_id":"profile_<16 hex>",
+                    "namespace":"egresslab-lab-<16 hex>",
+                    "stage_id":"wgstage_<32 hex>"          (ConnectTunnel only)
+                    "probe_ipv4":"<dotted IPv4>"},          (PermitProbe only)
+          "helper_id":"helper_<32 hex>", "nonce":"<32 hex>",
+          "issued_at":<unix s>, "not_after":<unix s, at most issued_at + 30>}
+
+message   = "egresslab/helper-capability/v1" || 0x00 || compact JSON of claims, in the field order above
+signature = base64url(Ed25519-sign(controller_key, message)), no padding
 ```
 
-- The helper holds only the public key, which is provisioned out of band.
-- The helper keeps a replay cache of nonces until `not_after`.
-- A capability is single-use and bound to one operation, one profile and one lab.
+`TestSigningMessageGolden` pins the exact message and signature for a fixed seed. OpenSSL 3
+(`openssl pkeyutl -sign -rawin`) produces the same signature, so a non-Go controller can implement
+the format.
+
+- The helper holds only the public key: a root-owned file of 64 hex characters, in a root-owned
+  directory, neither writable by group or others. It is provisioned out of band.
+- The request carries the intent separately. The helper accepts the capability only when the
+  signed intent equals it exactly and `helper_id` matches its own.
+- The helper keeps a replay cache of nonces until `not_after`. A capability is single-use.
+  Checks that fail before the replay check leave the nonce unused.
+- The helper's answer is only `authorization denied`. It does not say which check failed.
+- Validity is checked to the second (`issued_at <= now < not_after`) with no clock-skew allowance.
+  The controller runs on Windows and the helper in WSL, so their clocks must agree to well under a
+  second, or tolerance must be added before the controller mints.
 - The controller mints a capability only after the desktop user confirms the action, and only
-  when the profile passes its invariants (unique IP, kill-switch).
+  when the profile passes its invariants (unique IP, kill-switch). (Not implemented.)
 
 Operations that only close or remove traffic (`Disconnect`, `DeleteLab`) need just the peer UID
 check. This keeps cleanup possible even when the controller is down.

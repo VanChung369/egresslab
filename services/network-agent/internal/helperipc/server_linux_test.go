@@ -14,9 +14,18 @@ import (
 	"time"
 )
 
-// serveTest runs Serve on a socket in a short temporary directory (Unix socket paths are limited
-// to about 108 bytes, which t.TempDir can exceed).
+// serveTest runs Serve for allowedUID; see serveWith.
 func serveTest(t *testing.T, allowedUID uint32, scan RecoveryScanner) string {
+	t.Helper()
+
+	return serveWith(t, func(ctx context.Context, listener *net.UnixListener) error {
+		return Serve(ctx, listener, allowedUID, scan)
+	})
+}
+
+// serveWith runs serve on a socket in a short temporary directory (Unix socket paths are limited
+// to about 108 bytes, which t.TempDir can exceed) and stops it when the test ends.
+func serveWith(t *testing.T, serve func(context.Context, *net.UnixListener) error) string {
 	t.Helper()
 
 	dir, err := os.MkdirTemp("", "elipc-")
@@ -35,7 +44,7 @@ func serveTest(t *testing.T, allowedUID uint32, scan RecoveryScanner) string {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 
-	go func() { done <- Serve(ctx, listener, allowedUID, scan) }()
+	go func() { done <- serve(ctx, listener) }()
 
 	t.Cleanup(func() {
 		cancel()

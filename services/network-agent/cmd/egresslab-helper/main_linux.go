@@ -2,7 +2,8 @@
 
 // Command egresslab-helper is the lab bootstrap of the privileged network helper. It listens on
 // /run/egresslab/helper.sock, accepts only the configured agent UID (SO_PEERCRED) and answers
-// read-only operations: Ping and RecoverScan. Network-changing operations are not implemented.
+// read-only operations: Ping and RecoverScan. With -auth-public-key-file and -helper-id it also
+// answers the AuthorizeCheck dry-run. Network-changing operations are not implemented.
 //
 // In this step it runs as root under sudo; the production design keeps only CAP_NET_ADMIN.
 package main
@@ -26,18 +27,28 @@ import (
 func main() {
 	uid := flag.Int("uid", -1, "allowed unprivileged agent UID")
 	gid := flag.Int("gid", -1, "agent's primary group ID (gets socket access)")
+	publicKeyFile := flag.String("auth-public-key-file", "",
+		"root-owned file with the controller's Ed25519 public key (64 hex characters); enables AuthorizeCheck")
+	helperID := flag.String("helper-id", "", "this helper's identity, helper_<32 lowercase hex>; required with -auth-public-key-file")
 	flag.Parse()
 
 	if os.Geteuid() != 0 || *uid <= 0 || *gid <= 0 || flag.NArg() != 0 {
-		log.Fatal("usage: sudo egresslab-helper -uid <non-root UID> -gid <non-root GID>")
+		log.Fatal("usage: sudo egresslab-helper -uid <non-root UID> -gid <non-root GID> " +
+			"[-auth-public-key-file <path> -helper-id helper_<32 hex>]")
 	}
 
-	if err := run(*uid, *gid); err != nil {
+	if err := run(*uid, *gid, *publicKeyFile, *helperID); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(uid, gid int) error {
+func run(uid, gid int, publicKeyFile, helperID string) error {
+	// Load the key before touching /run/egresslab, so a bad configuration changes nothing.
+	verifier, err := loadAuthVerifier(publicKeyFile, helperID)
+	if err != nil {
+		return fmt.Errorf("authorization configuration: %w", err)
+	}
+
 	listener, cleanup, err := prepareSocket(gid)
 	if err != nil {
 		return err
@@ -48,9 +59,14 @@ func run(uid, gid int) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
-	log.Printf("EgressLab helper listening on %s (UID %d; read-only operations)", helperipc.SocketPath, uid)
+	mode := "read-only operations; AuthorizeCheck disabled"
+	if verifier != nil {
+		mode = "read-only operations; AuthorizeCheck dry-run enabled for " + helperID
+	}
 
-	err = helperipc.Serve(ctx, listener, uint32(uid), scanRecovery)
+	log.Printf("EgressLab helper listening on %s (UID %d; %s)", helperipc.SocketPath, uid, mode)
+
+	err = helperipc.ServeAuthorized(ctx, listener, uint32(uid), scanRecovery, verifier)
 	log.Print("EgressLab helper stopped")
 
 	return err
