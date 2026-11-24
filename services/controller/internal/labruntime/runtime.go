@@ -50,6 +50,9 @@ type HelperTransport interface {
 	CreateLab(ctx context.Context, profileID string, capability control.LabCapability) (control.LabInfo, error)
 	VerifyLab(ctx context.Context, profileID, namespace string) (control.LabInfo, error)
 	DeleteLab(ctx context.Context, profileID, namespace string) (control.LabInfo, error)
+	StageInfo(ctx context.Context, profileID string) (control.LabStageInfo, error)
+	ConnectTunnel(ctx context.Context, profileID, namespace, stageID string, capability control.LabCapability) (control.LabInfo, error)
+	Disconnect(ctx context.Context, profileID, namespace string) (control.LabInfo, error)
 }
 
 type Options struct {

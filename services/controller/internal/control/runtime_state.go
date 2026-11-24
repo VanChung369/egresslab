@@ -175,14 +175,19 @@ func (s *RuntimeState) Binding(profileID string) (RuntimeBinding, bool) {
 	return RuntimeBinding{}, false
 }
 
-// Trust adds rt. The same runtime trusted again through the same target is a no-op.
+// Trust adds rt. The same runtime trusted again through the same target keeps its bindings; only a
+// new public-key fingerprint (after a controller key replacement) is pinned.
 func (s *RuntimeState) Trust(rt TrustedRuntime) error {
-	for _, existing := range s.Runtimes {
+	for i, existing := range s.Runtimes {
 		sameTarget := existing.Provider == rt.Provider && existing.Target == rt.Target
 
 		switch {
 		case existing.ID == rt.ID && sameTarget:
-			return nil
+			if existing.PublicKeySHA256 != rt.PublicKeySHA256 {
+				s.Runtimes[i].PublicKeySHA256, s.Runtimes[i].TrustedAt = rt.PublicKeySHA256, rt.TrustedAt
+			}
+
+			return s.validate()
 		case existing.ID == rt.ID:
 			return fmt.Errorf("runtime %s is already trusted as %s %s", rt.ID, existing.Provider, existing.Target)
 		case sameTarget:

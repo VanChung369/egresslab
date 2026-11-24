@@ -18,6 +18,7 @@ const (
 	testProfile   = "profile_0123456789abcdef"
 	testNamespace = "egresslab-lab-0123456789abcdef"
 	testHelperID  = "helper_0123456789abcdef0123456789abcdef"
+	testStageID   = "wgstage_0123456789abcdef0123456789abcdef"
 )
 
 var testFingerprint = strings.Repeat("ab", 32)
@@ -87,9 +88,38 @@ func TestFakeHelperctl(t *testing.T) {
 		}
 		respond("CreateLab", lab("sealed"))
 	case "verify-lab":
+		if mode == "tunnel" {
+			respond("VerifyLab", lab(control.LabTunnelConfigured))
+		}
 		respond("VerifyLab", lab("sealed"))
 	case "delete-lab":
 		respond("DeleteLab", lab("deleted"))
+	case "stage-info":
+		switch mode {
+		case "missing-stage":
+			failWith(CodeStageNotFound, "WireGuard stage not found")
+		case "foreign-stage":
+			respond("StageInfo", fmt.Sprintf(",\n  \"stage\": {\"profile_id\": \"profile_ffffffffffffffff\", \"stage_id\": %q, \"vpn_lab_compatible\": true}", testStageID))
+		case "no-stage-metadata":
+			respond("StageInfo", "")
+		}
+		respond("StageInfo", fmt.Sprintf(",\n  \"stage\": {\"profile_id\": %q, \"stage_id\": %q, \"vpn_lab_compatible\": true}", testProfile, testStageID))
+	case "connect-tunnel":
+		var capability control.LabCapability
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil || json.Unmarshal(data, &capability) != nil || len(args) != 4 ||
+			capability.Claims.Intent != (control.LabIntent{Operation: "ConnectTunnel", ProfileID: args[1], Namespace: args[2], StageID: args[3]}) {
+			fail("invalid tunnel capability")
+		}
+		if mode == "stage-on-connect" {
+			respond("ConnectTunnel", lab(control.LabTunnelConfigured)+fmt.Sprintf(",\n  \"stage\": {\"profile_id\": %q, \"stage_id\": %q, \"vpn_lab_compatible\": true}", testProfile, testStageID))
+		}
+		respond("ConnectTunnel", lab(control.LabTunnelConfigured))
+	case "disconnect":
+		if mode == "faulted" {
+			respond("Disconnect", lab(control.LabFaulted))
+		}
+		respond("Disconnect", lab("sealed"))
 	}
 
 	fail("unexpected arguments")
@@ -334,5 +364,77 @@ func TestDecodeFailure(t *testing.T) {
 		if ok != tt.ok || (ok && (ErrorCode(err) != tt.code || strings.TrimSpace(err.Error()) == tt.code+":")) {
 			t.Errorf("%s: %v %t", name, err, ok)
 		}
+	}
+}
+
+func TestTunnelTransport(t *testing.T) {
+	ctx := context.Background()
+	launcher := &fakeLauncher{mode: "tunnel"}
+	tr := newCommandProvider(launcher).Transport()
+
+	stage, err := tr.StageInfo(ctx, testProfile)
+	if err != nil || stage.StageID != testStageID || !stage.Compatible {
+		t.Fatalf("stage: %+v %v", stage, err)
+	}
+
+	capability := control.LabCapability{Claims: control.LabClaims{Version: 1, Intent: control.LabIntent{
+		Operation: "ConnectTunnel", ProfileID: testProfile, Namespace: testNamespace, StageID: testStageID,
+	}}}
+
+	before := len(launcher.calls)
+
+	for _, stageID := range []string{"wgstage_ffffffffffffffffffffffffffffffff", "wgstage_x"} {
+		if _, err := tr.ConnectTunnel(ctx, testProfile, testNamespace, stageID, capability); ErrorCode(err) != CodeInvalidRequest {
+			t.Fatalf("stage %s: %v", stageID, err)
+		}
+	}
+
+	createCapability := capabilityFor(testProfile)
+	if _, err := tr.ConnectTunnel(ctx, testProfile, testNamespace, testStageID, createCapability); ErrorCode(err) != CodeInvalidRequest {
+		t.Fatalf("CreateLab capability sent as ConnectTunnel: %v", err)
+	}
+
+	if len(launcher.calls) != before {
+		t.Fatal("a mismatched request reached helperctl")
+	}
+
+	connected, err := tr.ConnectTunnel(ctx, testProfile, testNamespace, testStageID, capability)
+	if err != nil || connected.State != control.LabTunnelConfigured {
+		t.Fatalf("connect: %+v %v", connected, err)
+	}
+
+	// The capability travels on stdin, never in argv.
+	last := launcher.calls[len(launcher.calls)-1]
+	if strings.Join(last, " ") != "connect-tunnel "+testProfile+" "+testNamespace+" "+testStageID {
+		t.Fatalf("helperctl arguments: %q", last)
+	}
+
+	verified, err := tr.VerifyLab(ctx, testProfile, testNamespace)
+	if err != nil || verified.State != control.LabTunnelConfigured {
+		t.Fatalf("verify: %+v %v", verified, err)
+	}
+
+	disconnected, err := tr.Disconnect(ctx, testProfile, testNamespace)
+	if err != nil || disconnected.State != control.LabSealed {
+		t.Fatalf("disconnect: %+v %v", disconnected, err)
+	}
+
+	faulted, err := newCommandProvider(&fakeLauncher{mode: "faulted"}).Transport().Disconnect(ctx, testProfile, testNamespace)
+	if err != nil || faulted.State != control.LabFaulted {
+		t.Fatalf("faulted disconnect: %+v %v", faulted, err)
+	}
+
+	if _, err := newCommandProvider(&fakeLauncher{mode: "missing-stage"}).Transport().StageInfo(ctx, testProfile); ErrorCode(err) != CodeStageNotFound {
+		t.Fatalf("stage error code lost: %v", err)
+	}
+
+	for _, mode := range []string{"foreign-stage", "no-stage-metadata"} {
+		if _, err := newCommandProvider(&fakeLauncher{mode: mode}).Transport().StageInfo(ctx, testProfile); err == nil {
+			t.Errorf("%s accepted", mode)
+		}
+	}
+
+	if _, err := newCommandProvider(&fakeLauncher{mode: "stage-on-connect"}).Transport().ConnectTunnel(ctx, testProfile, testNamespace, testStageID, capability); err == nil {
+		t.Error("stage metadata accepted on ConnectTunnel")
 	}
 }

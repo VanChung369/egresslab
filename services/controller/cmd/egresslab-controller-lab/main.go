@@ -1,6 +1,7 @@
-// Command egresslab-controller-lab signs CreateLab capabilities with the controller key and drives
-// the helper's sealed lab lifecycle through the host's Linux runtime (WSL2, Lima or native Linux).
-// It is a lab tool: -approve is an operator confirmation, not user authentication.
+// Command egresslab-controller-lab signs CreateLab and ConnectTunnel capabilities with the controller
+// key and drives the helper's sealed lab and tunnel lifecycle through the host's Linux runtime (WSL2,
+// Lima or native Linux). The helper stays the source of truth for lab and tunnel state. It is a lab
+// tool: -approve is an operator confirmation, not user authentication.
 package main
 
 import (
@@ -29,6 +30,7 @@ type deps struct {
 
 var approvalRequired = map[string]bool{
 	"create-lab": true, "delete-lab": true, "trust-runtime": true, "untrust-runtime": true, "unbind-profile": true,
+	"connect-tunnel": true, "disconnect": true,
 }
 
 func main() {
@@ -50,7 +52,7 @@ func run(argv []string, d deps) error {
 	kind := flags.String("runtime", "auto", "network runtime: auto, wsl, lima, native or remote")
 	distro := flags.String("wsl-distro", "", "WSL distribution (required to trust a WSL runtime)")
 	instance := flags.String("lima-instance", "", "Lima instance (default: egresslab)")
-	approve := flags.Bool("approve", false, "approve a mutation (create-lab, delete-lab, trust-runtime, untrust-runtime, unbind-profile)")
+	approve := flags.Bool("approve", false, "approve a lab, tunnel or runtime mutation")
 
 	if err := flags.Parse(argv); err != nil {
 		return err
@@ -98,7 +100,8 @@ func run(argv []string, d deps) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	// Several helper calls in a row; a ConnectTunnel alone may take up to 135 s with its rollback.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 	s.ctx = ctx
 
@@ -121,10 +124,12 @@ func run(argv []string, d deps) error {
 		result, err = s.untrustRuntime(args[1])
 	case "create-lab":
 		result, err = s.createLab(args[1])
-	case "verify-lab":
-		result, err = s.existingLab(args[1], args[2], false)
-	case "delete-lab":
-		result, err = s.existingLab(args[1], args[2], true)
+	case "verify-lab", "delete-lab", "disconnect":
+		result, err = s.existingLab(args[1], args[2], args[0])
+	case "stage-info":
+		result, err = s.stageInfo(args[1])
+	case "connect-tunnel":
+		result, err = s.connectTunnel(args[1], args[2], args[3])
 	case "unbind-profile":
 		result, err = s.unbindProfile(args[1])
 	}
@@ -142,7 +147,7 @@ func checkArgs(args []string) error {
 		if len(args) == 1 {
 			return nil
 		}
-	case "create-lab", "unbind-profile":
+	case "create-lab", "unbind-profile", "stage-info":
 		if len(args) == 2 && control.ValidProfileID(args[1]) {
 			return nil
 		}
@@ -150,8 +155,12 @@ func checkArgs(args []string) error {
 		if len(args) == 2 && control.ValidRuntimeID(args[1]) {
 			return nil
 		}
-	case "verify-lab", "delete-lab":
+	case "verify-lab", "delete-lab", "disconnect":
 		if len(args) == 3 && control.ValidProfileID(args[1]) && control.ValidLabNamespace(args[2]) {
+			return nil
+		}
+	case "connect-tunnel":
+		if len(args) == 4 && control.ValidProfileID(args[1]) && control.ValidLabNamespace(args[2]) && control.ValidStageID(args[3]) {
 			return nil
 		}
 	}
@@ -320,6 +329,10 @@ func (s *session) createLab(profileID string) (control.LabInfo, error) {
 		return control.LabInfo{}, err
 	}
 
+	if err := requireSigningRuntime(rt, info); err != nil {
+		return control.LabInfo{}, err
+	}
+
 	binding, bound := state.Binding(profile.ID)
 
 	if bound && binding.RuntimeID != rt.ID {
@@ -379,10 +392,12 @@ func (s *session) createLab(profileID string) (control.LabInfo, error) {
 	return lab, nil
 }
 
-// existingLab verifies or deletes. Without a current record (an uncertain create, or a record
-// from an earlier helper process) the helper's own registry decides, so cleanup never depends on
-// controller state.
-func (s *session) existingLab(profileID, namespace string, remove bool) (control.LabInfo, error) {
+// existingLab verifies, disconnects or deletes; none of them needs the signing key. Without a
+// current record (an uncertain create, or a record from an earlier helper process) the helper's
+// own registry decides, so cleanup never depends on controller state.
+func (s *session) existingLab(profileID, namespace, operation string) (control.LabInfo, error) {
+	remove := operation == "delete-lab"
+
 	state, err := control.LoadRuntimeState(s.dataDir)
 	if err != nil {
 		return control.LabInfo{}, err
@@ -413,17 +428,24 @@ func (s *session) existingLab(profileID, namespace string, remove bool) (control
 	transport := s.provider.Transport()
 
 	var lab control.LabInfo
-	if remove {
+
+	switch operation {
+	case "delete-lab":
 		lab, err = transport.DeleteLab(s.ctx, profileID, namespace)
-	} else {
+	case "disconnect":
+		lab, err = transport.Disconnect(s.ctx, profileID, namespace)
+	case "verify-lab":
 		lab, err = transport.VerifyLab(s.ctx, profileID, namespace)
+	default:
+		return control.LabInfo{}, labruntime.Errorf(labruntime.CodeInvalidRequest, "invalid lab operation")
 	}
 
 	if err != nil {
 		return control.LabInfo{}, err
 	}
 
-	if remove && !bound {
+	// Disconnect keeps the namespace and never creates or releases a binding.
+	if (remove || operation == "disconnect") && !bound {
 		return lab, nil
 	}
 
@@ -515,5 +537,6 @@ func usageError() error {
 	return errors.New("usage: egresslab-controller-lab [-runtime auto|wsl|lima|native] [-wsl-distro NAME] [-lima-instance NAME] [-approve] COMMAND\n" +
 		"  init-key | public-key | runtimes | runtime-status | helper-info | list-labs\n" +
 		"  trust-runtime | untrust-runtime RUNTIME_ID | unbind-profile PROFILE_ID\n" +
-		"  create-lab PROFILE_ID | verify-lab PROFILE_ID NAMESPACE | delete-lab PROFILE_ID NAMESPACE")
+		"  create-lab PROFILE_ID | verify-lab PROFILE_ID NAMESPACE | delete-lab PROFILE_ID NAMESPACE\n" +
+		"  stage-info PROFILE_ID | connect-tunnel PROFILE_ID NAMESPACE STAGE_ID | disconnect PROFILE_ID NAMESPACE")
 }

@@ -306,6 +306,9 @@ egresslab-controller-lab -approve create-lab <profile ID from the desktop>
 egresslab-controller-lab list-labs
 egresslab-controller-lab verify-lab <profile ID> <namespace>
 egresslab-controller-lab -approve delete-lab <profile ID> <namespace>
+egresslab-controller-lab stage-info <profile ID>                              # needs -enable-vault
+egresslab-controller-lab -approve connect-tunnel <profile ID> <namespace> <stage ID>   # needs -enable-tunnel
+egresslab-controller-lab -approve disconnect <profile ID> <namespace>
 ```
 
 `-runtime auto` uses WSL on Windows (`-wsl-distro`; trust and lab commands need it named), Lima on macOS (`-lima-instance`, default `egresslab`) and the host itself on Linux. A profile stays bound to the runtime it was first used on (`unbind-profile` and `untrust-runtime` release it). Every failure carries a code such as `RECOVERY_REQUIRED` or `RUNTIME_UNTRUSTED`. Install `egresslab-helper` and `egresslab-helperctl` in `/usr/local/bin` inside the runtime (see above). The Lima and Keychain paths are written from the docs but have not been run on a Mac; see `docs/PRIVILEGED-HELPER.md`. If `create-lab` reports an uncertain result, run `list-labs` before retrying.
@@ -325,7 +328,7 @@ Then add `-enable-vault` to the helper (with `-enable-lab-lifecycle` and the pub
 
 ### Managed tunnel (Step 27B.2)
 
-Add `-enable-tunnel` as well (it needs `-enable-vault`). On a sealed lab, `egresslab-helperctl connect-tunnel <profile ID> <namespace> <stage ID> < capability.json` brings the staged config up as `wg0` (`tunnel_configured`: configured only, no handshake or egress checked, no traffic permitted), and `egresslab-helperctl disconnect <profile ID> <namespace>` removes it again. The controller cannot sign `ConnectTunnel` yet (Step 27B.3). One tunnel per helper: while it exists, `create-lab` gets `LAB_BUSY`. Stop the helper normally (`Ctrl+C`, `SIGTERM`) so it removes the tunnel before the namespace; after a crash, the underlay table must be removed by hand.
+Add `-enable-tunnel` as well (it needs `-enable-vault`). On a sealed lab, `egresslab-helperctl connect-tunnel <profile ID> <namespace> <stage ID> < capability.json` brings the staged config up as `wg0` (`tunnel_configured`: configured only, no handshake or egress checked, no traffic permitted), and `egresslab-helperctl disconnect <profile ID> <namespace>` removes it again. `egresslab-controller-lab -approve connect-tunnel` signs the capability for you (see "Controller lab CLI"). One tunnel per helper: while it exists, `create-lab` gets `LAB_BUSY`. Stop the helper normally (`Ctrl+C`, `SIGTERM`) so it removes the tunnel before the namespace; after a crash, the underlay table must be removed by hand.
 
 ## Security Notes
 
@@ -338,4 +341,4 @@ Add `-enable-tunnel` as well (it needs `-enable-vault`). On a sealed lab, `egres
 
 ## Next Milestone
 
-Run the Lima and macOS Keychain paths on a Mac, then move tunnel operations behind the helper: the helper's signed tunnel lifecycle exists (Step 27B.2, see `docs/PRIVILEGED-HELPER.md`); next come controller signing of `ConnectTunnel` and a real VPN smoke test (Step 27B.3), then hostname endpoints and IP pinning (Step 27C).
+Run the Lima and macOS Keychain paths on a Mac, then move tunnel operations behind the helper: the controller now signs `ConnectTunnel` (Step 27B.3, see `docs/PRIVILEGED-HELPER.md`); next come a smoke test with a real VPN provider, then hostname endpoints and IP pinning (Step 27C).

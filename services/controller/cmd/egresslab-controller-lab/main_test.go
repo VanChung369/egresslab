@@ -61,6 +61,11 @@ type fakeRuntime struct {
 	created      []control.LabCapability
 	calls        []string
 	afterChange  func() // runs after a successful CreateLab or DeleteLab
+
+	stage         control.LabStageInfo
+	tunnelProfile string
+	tunnelCalls   []control.LabCapability
+	tunnelErr     error
 }
 
 func (f *fakeRuntime) HelperInfo(context.Context) (control.LabHelperInfo, error) {
@@ -73,7 +78,7 @@ func (f *fakeRuntime) ListLabs(context.Context) ([]control.LabInfo, error) {
 
 	var labs []control.LabInfo
 	for profile, ns := range f.labs {
-		labs = append(labs, control.LabInfo{ProfileID: profile, Namespace: ns, State: control.LabSealed})
+		labs = append(labs, control.LabInfo{ProfileID: profile, Namespace: ns, State: f.stateOf(profile)})
 	}
 
 	return labs, nil
@@ -106,6 +111,10 @@ func (f *fakeRuntime) lab(op, p, n, state string) (control.LabInfo, error) {
 	if state == control.LabDeleted {
 		delete(f.labs, p)
 
+		if f.tunnelProfile == p {
+			f.tunnelProfile = ""
+		}
+
 		if f.afterChange != nil {
 			f.afterChange()
 		}
@@ -114,8 +123,56 @@ func (f *fakeRuntime) lab(op, p, n, state string) (control.LabInfo, error) {
 	return control.LabInfo{ProfileID: p, Namespace: n, State: state}, nil
 }
 
+func (f *fakeRuntime) stateOf(profileID string) string {
+	if f.tunnelProfile == profileID {
+		return control.LabTunnelConfigured
+	}
+
+	return control.LabSealed
+}
+
 func (f *fakeRuntime) VerifyLab(_ context.Context, p, n string) (control.LabInfo, error) {
-	return f.lab("VerifyLab", p, n, control.LabSealed)
+	return f.lab("VerifyLab", p, n, f.stateOf(p))
+}
+
+func (f *fakeRuntime) StageInfo(_ context.Context, profileID string) (control.LabStageInfo, error) {
+	f.calls = append(f.calls, "StageInfo")
+
+	if f.stage.ProfileID != profileID {
+		return control.LabStageInfo{}, labruntime.Errorf(labruntime.CodeStageNotFound, "no WireGuard stage")
+	}
+
+	return f.stage, nil
+}
+
+func (f *fakeRuntime) ConnectTunnel(_ context.Context, profileID, namespace, stageID string, c control.LabCapability) (control.LabInfo, error) {
+	f.calls = append(f.calls, "ConnectTunnel")
+	f.tunnelCalls = append(f.tunnelCalls, c)
+
+	if f.tunnelErr != nil {
+		return control.LabInfo{}, f.tunnelErr
+	}
+
+	if f.labs[profileID] != namespace || f.stage.ProfileID != profileID || f.stage.StageID != stageID || !f.stage.Compatible {
+		return control.LabInfo{}, labruntime.Errorf(labruntime.CodeOwnershipMismatch, "invalid tunnel binding")
+	}
+
+	if f.tunnelProfile != "" {
+		return control.LabInfo{}, labruntime.Errorf(labruntime.CodeLabBusy, "tunnel slot held")
+	}
+
+	f.tunnelProfile = profileID
+
+	return control.LabInfo{ProfileID: profileID, Namespace: namespace, State: control.LabTunnelConfigured}, nil
+}
+
+func (f *fakeRuntime) Disconnect(_ context.Context, p, n string) (control.LabInfo, error) {
+	lab, err := f.lab("Disconnect", p, n, control.LabSealed)
+	if err == nil && f.tunnelProfile == p {
+		f.tunnelProfile = ""
+	}
+
+	return lab, err
 }
 
 func (f *fakeRuntime) DeleteLab(_ context.Context, p, n string) (control.LabInfo, error) {
@@ -452,10 +509,7 @@ func TestCreateLabRefusals(t *testing.T) {
 	h.mustRun("-approve", "-wsl-distro", "Ubuntu-A", "trust-runtime")
 
 	a.info.PublicKeySHA256 = hex.EncodeToString(make([]byte, 32))
-	if err := h.run("-approve", "-wsl-distro", "Ubuntu-A", "create-lab", h.profile.ID); err == nil ||
-		!strings.Contains(err.Error(), "fingerprint mismatch") {
-		t.Fatalf("untrusted helper key: %v", err)
-	}
+	h.requireCode(labruntime.CodeRuntimeUntrusted, "-approve", "-wsl-distro", "Ubuntu-A", "create-lab", h.profile.ID)
 
 	if err := h.run("-approve", "-wsl-distro", "Ubuntu-A", "create-lab", "profile_ffffffffffffffff"); err == nil ||
 		!strings.Contains(err.Error(), "profile not found") {
@@ -503,6 +557,11 @@ func TestBadArguments(t *testing.T) {
 		{"verify-lab", "profile_0123456789abcdef", "../default"},
 		{"-approve", "untrust-runtime", "runtime_x"},
 		{"connect-tunnel"},
+		{"-approve", "connect-tunnel", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef"},
+		{"-approve", "connect-tunnel", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef", "wgstage_x"},
+		{"-approve", "disconnect", "profile_0123456789abcdef", "egresslab-lab-x"},
+		{"stage-info"},
+		{"stage-info", "profile_x"},
 		{"-runtime"},
 	} {
 		if err := h.run(args...); err == nil {

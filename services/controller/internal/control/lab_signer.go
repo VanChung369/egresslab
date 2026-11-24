@@ -23,9 +23,10 @@ var (
 )
 
 const (
-	LabSealed  = "sealed"
-	LabFaulted = "faulted"
-	LabDeleted = "deleted"
+	LabSealed           = "sealed"
+	LabFaulted          = "faulted"
+	LabDeleted          = "deleted"
+	LabTunnelConfigured = "tunnel_configured" // a configured WireGuard link; no handshake or egress checked
 )
 
 type LabHelperInfo struct {
@@ -113,9 +114,8 @@ func signLabClaims(signer LabSigner, claims LabClaims) (LabCapability, error) {
 	return LabCapability{Claims: claims, Signature: base64.RawURLEncoding.EncodeToString(signature)}, nil
 }
 
-// MintCreateLab signs a CreateLab capability, the only operation the controller can authorize.
-// It signs nothing unless the profile keeps its policies and the helper reports this signer's
-// public key.
+// MintCreateLab signs a CreateLab capability. It signs nothing unless the profile keeps its
+// policies and the helper reports this signer's public key.
 func MintCreateLab(signer LabSigner, profile RoutingProfile, info LabHelperInfo, now time.Time) (LabCapability, error) {
 	if !ValidProfileID(profile.ID) ||
 		!profile.UniqueIPRequired ||
@@ -125,6 +125,12 @@ func MintCreateLab(signer LabSigner, profile RoutingProfile, info LabHelperInfo,
 		return LabCapability{}, errors.New("profile does not satisfy sealed lab policy")
 	}
 
+	return mintLabCapability(signer, LabIntent{Operation: "CreateLab", ProfileID: profile.ID}, info, now)
+}
+
+// mintLabCapability holds the checks every capability shares: helper identity, key fingerprint,
+// clock, a fresh nonce and the 30 s lifetime.
+func mintLabCapability(signer LabSigner, intent LabIntent, info LabHelperInfo, now time.Time) (LabCapability, error) {
 	if !info.AuthorizationConfigured || !info.Valid() {
 		return LabCapability{}, errors.New("helper authorization is unavailable")
 	}
@@ -134,7 +140,7 @@ func MintCreateLab(signer LabSigner, profile RoutingProfile, info LabHelperInfo,
 		return LabCapability{}, err
 	}
 
-	if LabPublicKeySHA256(public) != info.PublicKeySHA256 {
+	if len(public) != ed25519.PublicKeySize || LabPublicKeySHA256(public) != info.PublicKeySHA256 {
 		return LabCapability{}, errors.New("helper public key fingerprint mismatch")
 	}
 
@@ -149,7 +155,7 @@ func MintCreateLab(signer LabSigner, profile RoutingProfile, info LabHelperInfo,
 
 	return signLabClaims(signer, LabClaims{
 		Version:  1,
-		Intent:   LabIntent{Operation: "CreateLab", ProfileID: profile.ID},
+		Intent:   intent,
 		HelperID: info.HelperID,
 		Nonce:    hex.EncodeToString(nonce[:]),
 		IssuedAt: now.Unix(),

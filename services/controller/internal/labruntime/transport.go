@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -34,6 +35,7 @@ type helperResponse struct {
 	Info         *control.LabHelperInfo `json:"helper_info,omitempty"`
 	Lab          *control.LabInfo       `json:"lab,omitempty"`
 	Labs         []control.LabInfo      `json:"labs,omitempty"`
+	Stage        *control.LabStageInfo  `json:"stage,omitempty"`
 }
 
 type limitedBuffer struct {
@@ -127,7 +129,7 @@ func decodeStrict(data []byte) (helperResponse, error) {
 func decodeFailure(data []byte) (error, bool) {
 	resp, err := decodeStrict(data)
 	if err != nil || resp.Version != 1 || resp.OK || resp.NetworkReady || resp.Error == "" ||
-		resp.Info != nil || resp.Lab != nil || resp.Labs != nil {
+		resp.Info != nil || resp.Lab != nil || resp.Labs != nil || resp.Stage != nil {
 		return nil, false
 	}
 
@@ -158,8 +160,12 @@ func decodeResponse(data []byte, expected string) (helperResponse, error) {
 		return helperResponse{}, errors.New("unexpected helper identity metadata")
 	}
 
+	if (expected == "StageInfo") != (resp.Stage != nil) || (resp.Stage != nil && !resp.Stage.Valid()) {
+		return helperResponse{}, errors.New("unexpected WireGuard stage metadata")
+	}
+
 	switch expected {
-	case "HelperInfo", "Ping":
+	case "HelperInfo", "Ping", "StageInfo":
 		if resp.Lab != nil || resp.Labs != nil {
 			return helperResponse{}, errors.New("unexpected lab metadata")
 		}
@@ -189,7 +195,7 @@ func validLabList(labs []control.LabInfo) bool {
 	for _, lab := range labs {
 		if !control.ValidProfileID(lab.ProfileID) ||
 			!control.ValidLabNamespace(lab.Namespace) ||
-			(lab.State != control.LabSealed && lab.State != control.LabFaulted) ||
+			(lab.State != control.LabSealed && lab.State != control.LabFaulted && lab.State != control.LabTunnelConfigured) ||
 			profiles[lab.ProfileID] ||
 			namespaces[lab.Namespace] {
 			return false
@@ -202,11 +208,11 @@ func validLabList(labs []control.LabInfo) bool {
 	return true
 }
 
-func checkLab(lab *control.LabInfo, profileID, namespace, state string) (control.LabInfo, error) {
+func checkLab(lab *control.LabInfo, profileID, namespace string, states ...string) (control.LabInfo, error) {
 	if lab == nil ||
 		lab.ProfileID != profileID ||
 		!control.ValidLabNamespace(lab.Namespace) ||
-		lab.State != state ||
+		!slices.Contains(states, lab.State) ||
 		(namespace != "" && lab.Namespace != namespace) {
 		return control.LabInfo{}, errors.New("helper returned a mismatched lab")
 	}
@@ -259,14 +265,14 @@ func (t *commandTransport) CreateLab(ctx context.Context, profileID string, capa
 }
 
 func (t *commandTransport) VerifyLab(ctx context.Context, profileID, namespace string) (control.LabInfo, error) {
-	return t.existingLab(ctx, "VerifyLab", "verify-lab", profileID, namespace, control.LabSealed)
+	return t.existingLab(ctx, "VerifyLab", "verify-lab", profileID, namespace, control.LabSealed, control.LabTunnelConfigured)
 }
 
 func (t *commandTransport) DeleteLab(ctx context.Context, profileID, namespace string) (control.LabInfo, error) {
 	return t.existingLab(ctx, "DeleteLab", "delete-lab", profileID, namespace, control.LabDeleted)
 }
 
-func (t *commandTransport) existingLab(ctx context.Context, op, command, profileID, namespace, state string) (control.LabInfo, error) {
+func (t *commandTransport) existingLab(ctx context.Context, op, command, profileID, namespace string, states ...string) (control.LabInfo, error) {
 	if !control.ValidProfileID(profileID) || !control.ValidLabNamespace(namespace) {
 		return control.LabInfo{}, fmt.Errorf("invalid %s request", op)
 	}
@@ -276,5 +282,5 @@ func (t *commandTransport) existingLab(ctx context.Context, op, command, profile
 		return control.LabInfo{}, err
 	}
 
-	return checkLab(resp.Lab, profileID, namespace, state)
+	return checkLab(resp.Lab, profileID, namespace, states...)
 }

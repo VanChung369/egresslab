@@ -1,12 +1,11 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 27B.2 — signed WireGuard tunnel lifecycle.** A controller CLI signs `CreateLab` and
-drives the helper's sealed lab lifecycle in the Linux runtime, and the helper can hold encrypted
-WireGuard configs per profile. With `-enable-tunnel`, the helper configures a staged config as a
-tunnel in a sealed lab on a signed `ConnectTunnel`; the controller cannot sign one yet. Windows
-(WSL2) and Linux are verified end to end; macOS (Lima, Keychain) is implemented but has not been
-run. Probes and proxy traffic are still not implemented; the sections from "Typed operations
-only" on are partly design.
+Status: **Step 27B.3 — cross-platform controller tunnel integration.** A controller CLI signs
+`CreateLab` and `ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in the
+Linux runtime; the helper holds the encrypted WireGuard configs and stays the source of truth for
+lab and tunnel state. Windows (WSL2) and Linux are verified end to end; macOS (Lima, Keychain) is
+implemented but has not been run. Probes and proxy traffic are still not implemented; the
+sections from "Typed operations only" on are partly design.
 
 ## Implemented
 
@@ -53,10 +52,13 @@ only" on are partly design.
 - Signed `ConnectTunnel` and `Disconnect` behind `-enable-tunnel` (see "Signed tunnel lifecycle"),
   on the managed tunnel kernel backend (see "Managed tunnel backend").
 - Controller side (see "Controller and runtimes"):
-  - an Ed25519 signer that can mint only `CreateLab`, checked against both golden vectors;
+  - an Ed25519 signer for `CreateLab` and `ConnectTunnel`, checked against both golden vectors;
+    `ConnectTunnel` is signed only for the profile's own lab in the current helper process and
+    the vault's current, compatible stage (see "Controller and runtimes");
   - signing-key storage per platform;
   - runtime providers that reach the helper from each host OS;
-  - `egresslab-controller-lab`, which needs `-approve` for every mutation;
+  - `egresslab-controller-lab`, which needs `-approve` for every mutation, including
+    `connect-tunnel` and `disconnect`;
   - trusted runtimes and persistent profile-to-runtime bindings (see "Trusted runtimes and
     profile bindings").
 - A recovery gate and a kernel compatibility check before `CreateLab` (see "Sealed lab
@@ -76,9 +78,8 @@ only" on are partly design.
   after sealing (only the managed tunnel backend also checks the intended policy); egress-IP
   leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
-- Controller signing of `ConnectTunnel` and its runtime transport (Step 27B.3), then hostname
-  endpoints and IP pinning (Step 27C). The controller's lab transport still accepts only `sealed`
-  and `faulted` labs, so its `list-labs` and `verify-lab` fail while a tunnel is up.
+- Hostname endpoints and IP pinning (Step 27C). The HTTP controller and the desktop know nothing
+  of labs or tunnels; only the lab CLI drives them.
 - A controller approval workflow for individual operations.
 - Live key rotation and automatic key distribution.
 - `PermitProbe` and `RecoverClean` through IPC.
@@ -107,8 +108,8 @@ only" on are partly design.
   controller compares the fingerprint with its own public key, and never starts trusting a key
   because the helper reports it.
 - The controller signs nothing for a profile that lost its unique-IP or kill-switch policy, or
-  for a helper reporting another key. It never retries a `CreateLab`; after an error, `ListLabs`
-  shows whether the lab exists.
+  for a helper reporting another key than the one pinned at `trust-runtime`. It never retries a
+  `CreateLab` or `ConnectTunnel`; after an error, `ListLabs` shows what exists.
 - A valid signature does not prove IP uniqueness, firewall integrity or route readiness. Those
   must still be verified when an operation runs.
 
@@ -235,8 +236,10 @@ Rotation is offline and operator-managed:
 1. Stop the helper.
 2. Provision the new trusted public key file (root-owned, as above).
 3. Start the helper. It generates a new epoch, and `HelperInfo` reports the new fingerprint.
-4. The controller checks the new fingerprint against its own trust record, then mints new
-   capabilities.
+4. The controller signs nothing for a fingerprint other than the one pinned at `trust-runtime`
+   (`RUNTIME_UNTRUSTED`). After replacing the controller key, run `-approve trust-runtime` again:
+   it pins the new fingerprint, only if the helper reports the controller's own key, and keeps
+   the profile bindings.
 
 The controller must not trust a new key only because the helper reports a new fingerprint. Live
 rotation, automatic key distribution and production private-key management are not implemented.
@@ -309,8 +312,8 @@ Every refusal carries a `code`. Clients act on it; the message is for people. On
 | `STAGE_NOT_FOUND` | the vault holds no such stage for the profile (`StageInfo`, `ConnectTunnel`); the lab is untouched |
 | `INTERNAL` | anything else; details are in the helper log |
 
-The controller adds `RUNTIME_UNTRUSTED`, and reports a `CreateLab` that failed without a definite
-refusal as `STATE_UNCERTAIN`.
+The controller adds `RUNTIME_UNTRUSTED`, and reports a `CreateLab` or `ConnectTunnel` that failed
+without a definite refusal as `STATE_UNCERTAIN`.
 
 ## Controller and runtimes
 
@@ -336,11 +339,32 @@ right before each signature.
 - **The Linux file key** is protected by Unix permissions only. A Secret Service backend is not
   implemented.
 - **Lima (unverified):** its docs do not say whether `limactl shell` forwards stdin, which
-  `create-lab` needs, or whether a guest shell re-parses arguments. The transport therefore
+  `create-lab` and `connect-tunnel` need, or whether a guest shell re-parses arguments. The transport therefore
   passes only plain tokens.
 - **Clocks:** the Windows controller mints with the Windows clock, and the helper checks with
   the WSL clock. With no skew allowance, a WSL clock behind Windows across a second boundary
   refuses a fresh capability.
+
+### Tunnels from the controller
+
+`egresslab-controller-lab` adds `stage-info PROFILE_ID`, `-approve connect-tunnel PROFILE_ID
+NAMESPACE STAGE_ID` and `-approve disconnect PROFILE_ID NAMESPACE`; `verify-lab` and `list-labs`
+show `tunnel_configured`. The same transport serves WSL2, Lima and native Linux. Before signing a
+`ConnectTunnel`, the controller requires, in this order:
+
+1. a trusted runtime whose helper reports the pinned runtime ID and public-key fingerprint (also
+   required for `CreateLab` and `stage-info`);
+2. the profile's binding to that runtime, naming this namespace and the current helper epoch;
+3. the stage the operator named to be the vault's current stage for the profile
+   (`STAGE_NOT_FOUND` otherwise), and compatible (`INVALID_REQUEST` otherwise, so the helper never
+   faults the lab on it);
+4. a fresh `VerifyLab` answering `sealed` (`LAB_BUSY` if the lab already has a tunnel).
+
+The capability then binds profile, namespace, stage and helper epoch, for 30 seconds. A
+`ConnectTunnel` without a definite answer is reported as `STATE_UNCERTAIN` and never retried;
+`LAB_BUSY` is not retried either. `disconnect`, `verify-lab` and `delete-lab` need no signing
+key, so a broken key store cannot strand a tunnel. `runtimes.json` keeps ownership only: the
+tunnel state is read from the helper, and `RoutingProfile.Status` stays `unconfigured`.
 
 ### Trusted runtimes and profile bindings
 
@@ -354,16 +378,19 @@ The controller lab CLI keeps `runtimes.json` next to `state.json`:
 
 - **`trust-runtime`** (with `-approve`) pins the reported runtime ID to the provider and target it
   was reached through. It requires a named WSL distribution, because the default can change, and a
-  helper that holds this controller's key. Lab commands refuse an untrusted target, or one that now
-  answers with another ID, with `RUNTIME_UNTRUSTED`.
+  helper that holds this controller's key, whose fingerprint it pins too. Lab commands refuse an
+  untrusted target, or one that now answers with another ID, with `RUNTIME_UNTRUSTED`; signing
+  commands (`create-lab`, `connect-tunnel`, and `stage-info`) also refuse a helper that reports
+  another key. Trusting again after a controller key replacement pins the new key and keeps the
+  bindings.
 - **A profile is bound to one runtime for good**, from its first `create-lab`. The binding is saved
   before the kernel changes, so an uncertain result can only be a lab on that runtime.
 - **The lab record** (namespace and helper epoch) is valid only while that helper process runs. A
   record from an earlier epoch is stale: a normal stop deleted that lab, and the recovery gate
   covers a crash. So a restart never strands a profile.
-- **`verify-lab` and `delete-lab`** never depend on the controller's record: without a current
-  one (or without any binding, for example after `untrust-runtime`), the helper's registry decides,
-  and `verify-lab` writes the record back.
+- **`verify-lab`, `disconnect` and `delete-lab`** never depend on the controller's record: without
+  a current one (or without any binding, for example after `untrust-runtime`), the helper's
+  registry decides, and `verify-lab` writes the record back.
 - **`unbind-profile`** releases a profile once its runtime owns no lab for it. **`untrust-runtime`**
   removes a runtime that is gone, with its bindings. Labs inside it are not touched.
 
@@ -417,7 +444,8 @@ a public key, plus a runtime ID) adds two operations on an existing lab:
 `VerifyLab` on a connected lab re-checks the tunnel (link, firewall, underlay) instead of the
 sealed topology, and `DeleteLab` removes the tunnel before the namespace. In helperctl:
 `connect-tunnel PROFILE_ID NAMESPACE STAGE_ID < capability.json` and
-`disconnect PROFILE_ID NAMESPACE`.
+`disconnect PROFILE_ID NAMESPACE`; in the controller lab CLI: `stage-info`, `connect-tunnel` and
+`disconnect` (see "Tunnels from the controller").
 
 - `tunnel_configured` means a configured WireGuard link, nothing more. `network_ready` stays false.
 - One tunnel, or one unfinished attempt, per helper. While it exists, `CreateLab` and every

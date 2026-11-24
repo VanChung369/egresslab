@@ -47,6 +47,18 @@ func TestRuntimeStateRoundTrip(t *testing.T) {
 		t.Fatalf("binding: %+v", b)
 	}
 
+	// Trusting again after a controller key replacement pins the new key and keeps the bindings.
+	again := trusted(testRuntimeA, "wsl", "Ubuntu-22.04")
+	again.PublicKeySHA256, again.TrustedAt = strings.Repeat("cd", 32), time.Unix(3, 0)
+
+	if err := loaded.Trust(again); err != nil || len(loaded.Runtimes) != 1 || len(loaded.Bindings) != 1 {
+		t.Fatalf("trust again: %v %+v", err, loaded)
+	}
+
+	if rt, _ := loaded.RuntimeFor("wsl", "Ubuntu-22.04"); rt.PublicKeySHA256 != again.PublicKeySHA256 || !rt.TrustedAt.Equal(again.TrustedAt) {
+		t.Fatalf("new key not pinned: %+v", rt)
+	}
+
 	if err := loaded.Untrust(testRuntimeA); err != nil || len(loaded.Bindings) != 0 {
 		t.Fatalf("untrust: %v %+v", err, loaded.Bindings)
 	}
