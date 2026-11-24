@@ -281,3 +281,33 @@ func releaseWireGuardConfig(cfg *ImportedWireGuardConfig) {
 
 	*cfg = ImportedWireGuardConfig{}
 }
+
+// useVPNStage lends the exact staged config to an internal runtime operation, under the read lock.
+// The callback must not modify or retain cfg, or call another vault method.
+func (v *WireGuardConfigVault) useVPNStage(profileID, stageID string, use func(*ImportedWireGuardConfig) error) error {
+	if v == nil || use == nil {
+		return errors.New("invalid vault operation")
+	}
+
+	if !profileIDPattern.MatchString(profileID) || !stageIDPattern.MatchString(stageID) {
+		return ErrWGStageNotFound
+	}
+
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+
+	if v.closed {
+		return ErrWGVaultClosed
+	}
+
+	entry, ok := v.entries[profileID]
+	if !ok || entry.id != stageID {
+		return ErrWGStageNotFound
+	}
+
+	if err := CheckVPNLabCompatibility(entry.cfg); err != nil {
+		return err
+	}
+
+	return use(entry.cfg)
+}

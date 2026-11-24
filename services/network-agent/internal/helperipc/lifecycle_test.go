@@ -577,3 +577,32 @@ func TestLabCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestValidStageResponse(t *testing.T) {
+	const stage = "wgstage_0123456789abcdef0123456789abcdef"
+
+	req := Request{Version: Version, Operation: OpStageInfo, Intent: &helperauth.Intent{Operation: OpStageInfo, ProfileID: lifecycleProfile}}
+	ping := Request{Version: Version, Operation: OpPing}
+	info := func(profile, id string) *StageInfo {
+		return &StageInfo{ProfileID: profile, StageID: id, Compatible: true}
+	}
+
+	for name, tt := range map[string]struct {
+		req  Request
+		resp Response
+		want bool
+	}{
+		"stage":              {req, Response{OK: true, Stage: info(lifecycleProfile, stage)}, true},
+		"refusal":            {req, Response{Code: CodeStageNotFound, Error: "x"}, true},
+		"ping":               {ping, Response{OK: true}, true},
+		"stage on ping":      {ping, Response{OK: true, Stage: info(lifecycleProfile, stage)}, false},
+		"stage on refusal":   {req, Response{Error: "x", Stage: info(lifecycleProfile, stage)}, false},
+		"missing stage":      {req, Response{OK: true}, false},
+		"other profile":      {req, Response{OK: true, Stage: info("profile_ffffffffffffffff", stage)}, false},
+		"malformed stage ID": {req, Response{OK: true, Stage: info(lifecycleProfile, "wgstage_X")}, false},
+	} {
+		if got := validStageResponse(tt.req, tt.resp); got != tt.want {
+			t.Errorf("%s: got %t, want %t", name, got, tt.want)
+		}
+	}
+}

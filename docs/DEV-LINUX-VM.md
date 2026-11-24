@@ -204,9 +204,9 @@ Privileged networking exists as **lab CLIs** that you run by hand with `sudo` on
 | `egresslab-firewall-lab` | Sealed nftables table (policy drop, explicit IPv6/DNS drop) with kernel readback |
 | `egresslab-wireguard-lab` | WireGuard between two lab namespaces |
 | `egresslab-vpn-lab -file vpn.conf` | Real VPN egress through a sealed namespace (details below) |
-| `egresslab-wg-inspect`, `egresslab-wg-vault-lab` | Config import summary; in-memory or opt-in encrypted staging |
+| `egresslab-wg-inspect`, `egresslab-wg-vault-lab` | Config import summary; in-memory or opt-in encrypted staging (never against the helper's managed vault) |
 | `egresslab-lab-recover [-delete]` | Report (default) leftovers of a crashed session; `-delete` removes only orphan namespaces holding nothing but `lo`/lab veth (never one with WireGuard) and stale markers. Underlay tables are never removed automatically |
-| `egresslab-helper -uid <UID> -gid <GID>`, `egresslab-helperctl ping\|recover-scan\|helper-info\|list-labs\|create-lab\|verify-lab\|delete-lab` | Helper IPC: Unix socket with `SO_PEERCRED`, read-only `Ping`/`RecoverScan`/`HelperInfo`, optional `AuthorizeCheck` dry-run and sealed lab lifecycle (details below) |
+| `egresslab-helper -uid <UID> -gid <GID>`, `egresslab-helperctl ping\|recover-scan\|helper-info\|list-labs\|stage-info\|create-lab\|verify-lab\|delete-lab` | Helper IPC: Unix socket with `SO_PEERCRED`, read-only `Ping`/`RecoverScan`/`HelperInfo`, optional `AuthorizeCheck` dry-run, sealed lab lifecycle and managed WireGuard vault (details below) |
 
 `egresslab-vpn-lab` runs these steps:
 
@@ -286,6 +286,8 @@ If the WSL clock steps backwards between two checks, the helper refuses all capa
 
 Add `-enable-lab-lifecycle` (it requires `-auth-public-key-file`) to let the helper create, verify and delete sealed lab namespaces, at most 8, one per profile. The helper refuses the flag if the kernel would add fallback tunnel devices to new namespaces, and refuses `create-lab` while any lab resource it does not own exists (run `egresslab-lab-recover`). `egresslab-helperctl list-labs`, `verify-lab` and `delete-lab` work directly; `create-lab` reads a signed capability from stdin, which the controller produces. On Ctrl+C the helper deletes its labs. After a `SIGKILL`, `sudo egresslab-lab-recover` reports them as orphans and `-delete` removes them.
 
+Run the socket tests in `internal/helperipc` as a non-root user. Under root, the tests that need a non-root socket client skip. The key-loader and vault tests in `cmd/egresslab-helper` run under both.
+
 ### Controller lab CLI (Step 26)
 
 `egresslab-controller-lab` runs on the host (Windows, macOS or Linux) and signs with the controller key. Provision once:
@@ -308,17 +310,28 @@ egresslab-controller-lab -approve delete-lab <profile ID> <namespace>
 
 `-runtime auto` uses WSL on Windows (`-wsl-distro`; trust and lab commands need it named), Lima on macOS (`-lima-instance`, default `egresslab`) and the host itself on Linux. A profile stays bound to the runtime it was first used on (`unbind-profile` and `untrust-runtime` release it). Every failure carries a code such as `RECOVERY_REQUIRED` or `RUNTIME_UNTRUSTED`. Install `egresslab-helper` and `egresslab-helperctl` in `/usr/local/bin` inside the runtime (see above). The Lima and Keychain paths are written from the docs but have not been run on a Mac; see `docs/PRIVILEGED-HELPER.md`. If `create-lab` reports an uncertain result, run `list-labs` before retrying.
 
-Run the socket tests in `internal/helperipc` as a non-root user. Under root, the tests that need a non-root socket client skip. The key-loader tests in `cmd/egresslab-helper` run under both.
+### Managed WireGuard vault (Step 27A)
+
+Set it up once, with the helper stopped:
+
+```bash
+sudo install -d -o root -g root -m 0700 /etc/egresslab/vault /var/lib/egresslab/vault
+sudo /usr/local/bin/egresslab-helper vault-init
+sudo install -o root -g root -m 0600 ~/.config/egresslab/private/vpn.conf /var/lib/egresslab/vault/import.conf
+sudo /usr/local/bin/egresslab-helper vault-stage <profile ID>   # prints the stage ID; consumes import.conf
+```
+
+Then add `-enable-vault` to the helper (with `-enable-lab-lifecycle` and the public key) and read the stage with `egresslab-helperctl stage-info <profile ID>`. `vault-stage`, `vault-revoke` and `vault-init` are refused while the helper runs. Your original `vpn.conf` is not touched.
 
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
 - Never include Bearer Tokens in documentation or logs.
 - Run the Agent as your normal user. It refuses to start as root or with networking capabilities.
-- Persisting WireGuard configs is opt-in (`egresslab-wg-vault-lab -store ... -key ...`). Configs are encrypted with AES-256-GCM, and the key file must be `0600` and live in a different directory than the data file. This protects backups and copies, not a root user on the VM.
+- Persisting WireGuard configs is opt-in: the helper's managed vault (`vault-init`/`vault-stage`, root-only paths under `/etc/egresslab/vault` and `/var/lib/egresslab/vault`), or the lab CLI `egresslab-wg-vault-lab -store ... -key ...` with your own paths, never the managed ones. Configs are encrypted with AES-256-GCM, and the key file must be `0600` and live in a different directory than the data file. This protects backups and copies, not a root user on the VM.
 - Do not expose the Agent's HTTP API publicly.
 - Authenticated communication between the macOS Controller and the Linux VM must be secured before privileged networking operations are introduced.
 
 ## Next Milestone
 
-Run the Lima and macOS Keychain paths on a Mac, bind WireGuard configs to sealed labs, then move tunnel operations behind the helper.
+Run the Lima and macOS Keychain paths on a Mac, then move tunnel operations behind the helper: signed `ConnectTunnel` and `Disconnect` using the staged configs (Step 27B), then hostname endpoints and IP pinning (Step 27C).

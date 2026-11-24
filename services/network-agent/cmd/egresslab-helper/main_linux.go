@@ -5,7 +5,9 @@
 // read-only operations: Ping, RecoverScan and HelperInfo. With -auth-public-key-file it also
 // answers the AuthorizeCheck dry-run, under a random helper ID (epoch) generated at every start.
 // With -enable-lab-lifecycle as well, it creates (signed), verifies and deletes sealed lab
-// namespaces. Tunnel and probe operations are not implemented.
+// namespaces; -enable-vault adds the managed WireGuard vault (StageInfo). The offline commands
+// vault-init, vault-stage and vault-revoke administer that vault. Tunnel and probe operations are
+// not implemented.
 //
 // In this step it runs as root under sudo; the production design keeps only CAP_NET_ADMIN.
 package main
@@ -27,25 +29,37 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "vault-init", "vault-stage", "vault-revoke":
+			if err := runVaultAdmin(os.Args[1:]); err != nil {
+				log.Fatal(err)
+			}
+			return
+		}
+	}
+
 	uid := flag.Int("uid", -1, "allowed unprivileged agent UID")
 	gid := flag.Int("gid", -1, "agent's primary group ID (gets socket access)")
 	publicKeyFile := flag.String("auth-public-key-file", "",
 		"root-owned file with the controller's Ed25519 public key (64 hex characters); enables AuthorizeCheck")
 	enableLifecycle := flag.Bool("enable-lab-lifecycle", false,
 		"enable signed sealed lab lifecycle operations (requires -auth-public-key-file)")
+	enableVault := flag.Bool("enable-vault", false, "enable the root-managed WireGuard vault (requires -enable-lab-lifecycle)")
 	flag.Parse()
 
 	if os.Geteuid() != 0 || *uid <= 0 || *gid <= 0 || flag.NArg() != 0 {
 		log.Fatal("usage: sudo egresslab-helper -uid <non-root UID> -gid <non-root GID> " +
-			"[-auth-public-key-file <path> [-enable-lab-lifecycle]]")
+			"[-auth-public-key-file <path> [-enable-lab-lifecycle [-enable-vault]]]\n" +
+			"       sudo egresslab-helper vault-init | vault-stage PROFILE_ID | vault-revoke PROFILE_ID")
 	}
 
-	if err := run(*uid, *gid, *publicKeyFile, *enableLifecycle); err != nil {
+	if err := run(*uid, *gid, *publicKeyFile, *enableLifecycle, *enableVault); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(uid, gid int, publicKeyFile string, enableLifecycle bool) error {
+func run(uid, gid int, publicKeyFile string, enableLifecycle, enableVault bool) error {
 	// Load the key before touching /run/egresslab, so a bad configuration changes nothing.
 	verifier, err := loadAuthVerifier(publicKeyFile)
 	if err != nil {
@@ -72,6 +86,23 @@ func run(uid, gid int, publicKeyFile string, enableLifecycle bool) error {
 
 		backend = labBackend{sealed}
 		labs = helperipc.NewLabLifecycle(backend)
+	}
+
+	var readStage helperipc.StageReader
+
+	if enableVault {
+		if !enableLifecycle || verifier == nil {
+			return errors.New("managed vault requires authorized lab lifecycle")
+		}
+
+		// Held for the helper's lifetime: the offline vault commands are refused meanwhile.
+		vault, err := managedLayout.open()
+		if err != nil {
+			return fmt.Errorf("managed vault: %w", err)
+		}
+		defer vault.Close()
+
+		readStage = vault.readStage
 	}
 
 	runtimeID, err := runtimeIDFrom(machineIDPath)
@@ -116,6 +147,7 @@ func run(uid, gid int, publicKeyFile string, enableLifecycle bool) error {
 		Verifier:  verifier,
 		Labs:      labs,
 		RuntimeID: runtimeID,
+		ReadStage: readStage,
 	})
 
 	// Labs that cannot be deleted stay, with their markers, for egresslab-lab-recover.

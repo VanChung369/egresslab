@@ -1,10 +1,10 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 26 — cross-platform controller signing and runtime bridge.** A controller CLI signs
-`CreateLab` and drives the helper's sealed lab lifecycle in the Linux runtime. Windows (WSL2) and
-Linux are verified end to end; macOS (Lima, Keychain) is implemented but has not been run. Tunnels
-and probes through the helper are still not implemented; the sections from "Typed operations only"
-on are partly design.
+Status: **Step 27A — managed WireGuard vault and profile binding.** A controller CLI signs
+`CreateLab` and drives the helper's sealed lab lifecycle in the Linux runtime, and the helper can
+hold encrypted WireGuard configs per profile. Windows (WSL2) and Linux are verified end to end;
+macOS (Lima, Keychain) is implemented but has not been run. Tunnels and probes through the helper
+are still not implemented; the sections from "Typed operations only" on are partly design.
 
 ## Implemented
 
@@ -44,8 +44,10 @@ on are partly design.
   kernel).
 - The client checks that the production socket is served by root (`SO_PEERCRED`) before it sends
   anything.
-- `egresslab-helperctl` covers every helper operation except `AuthorizeCheck`. `create-lab`
-  reads the capability from stdin only, never from argv. It refuses to run as root.
+- `egresslab-helperctl` covers every helper operation except `AuthorizeCheck`, including
+  `stage-info`. `create-lab` reads the capability from stdin only, never from argv. It refuses to
+  run as root.
+- The managed WireGuard vault and `StageInfo` (see "Managed WireGuard vault").
 - Controller side (see "Controller and runtimes"):
   - an Ed25519 signer that can mint only `CreateLab`, checked against both golden vectors;
   - signing-key storage per platform;
@@ -70,7 +72,8 @@ on are partly design.
   compared with the state read right after sealing); egress-IP leases across runtimes; a
   kill-switch independent of the controller; refusing to delete a profile that still has
   runtime resources.
-- WireGuard configuration binding to a lab.
+- Using a staged config: `ConnectTunnel` and `Disconnect` (Step 27B), hostname endpoints and IP
+  pinning (Step 27C).
 - A controller approval workflow for individual operations.
 - Live key rotation and automatic key distribution.
 - `ConnectTunnel`, `PermitProbe` and `RecoverClean` through IPC.
@@ -119,9 +122,10 @@ on are partly design.
   the helper was started with `-enable-lab-lifecycle` and a public key.
 - The helper socket accepts only the configured agent UID. It answers `Ping`, `RecoverScan`,
   `HelperInfo`, the `AuthorizeCheck` dry-run and, with the lifecycle flag, `ListLabs`,
-  `CreateLab`, `VerifyLab` and `DeleteLab` (`TestPeerRejection`,
-  `TestPeerIdentityAndReadOnlyOperations`, `TestMutationWithValidCapabilityIsRefused`,
-  `TestLabLifecycleIPCRefusals`, `TestListLabsRefusals`).
+  `CreateLab`, `VerifyLab` and `DeleteLab`, plus `StageInfo` with `-enable-vault`
+  (`TestPeerRejection`, `TestPeerIdentityAndReadOnlyOperations`,
+  `TestMutationWithValidCapabilityIsRefused`, `TestLabLifecycleIPCRefusals`, `TestListLabsRefusals`,
+  `TestStageInfoIPC`).
 
 Changing any of these needs the helper below first.
 
@@ -289,6 +293,7 @@ Every refusal carries a `code`. Clients act on it; the message is for people. On
 | `RECOVERY_REQUIRED` | leftover lab resources block creation |
 | `KERNEL_INCOMPATIBLE` | new namespaces would get extra devices |
 | `STATE_UNCERTAIN` | a create or rollback may have left kernel state behind; check recovery, restart the helper |
+| `STAGE_NOT_FOUND` | the profile has no WireGuard config in the managed vault |
 | `INTERNAL` | anything else; details are in the helper log |
 
 The controller adds `RUNTIME_UNTRUSTED`, and reports a `CreateLab` that failed without a definite
@@ -351,6 +356,39 @@ The controller lab CLI keeps `runtimes.json` next to `state.json`:
 
 Concurrent lab CLI runs are not coordinated. The HTTP controller does not read `runtimes.json`
 yet.
+
+## Managed WireGuard vault
+
+The helper can hold one encrypted WireGuard config per profile, inside the Linux runtime:
+
+| Path | Content |
+|---|---|
+| `/etc/egresslab/vault/wg-vault.key` | AES-256 key, root `0600` |
+| `/var/lib/egresslab/vault/wg-vault.json` | configs encrypted with AES-256-GCM, bound to profile and stage IDs |
+| `/var/lib/egresslab/vault/vault.lock` | exclusive `flock` |
+| `/var/lib/egresslab/vault/import.conf` | plaintext import slot, consumed by a successful `vault-stage` |
+
+- Both directories must be root-owned `0700`, and no directory above them may be writable by
+  anyone but root or be a symlink. Vault files must be root-owned, regular, `0600` and have one
+  link. The paths are fixed; no client can make the helper open a path.
+- The offline commands `egresslab-helper vault-init`, `vault-stage PROFILE_ID` and
+  `vault-revoke PROFILE_ID` run as root and are never reachable through the socket. `vault-init`
+  never replaces a key. `vault-stage` reads `import.conf`, prints only the stage metadata, and
+  removes the plaintext file on success (kept on failure, for the operator to fix). Staging again
+  gives a new stage ID and replaces the old stage.
+- A helper started with `-enable-vault` (it requires `-enable-lab-lifecycle` and a public key)
+  holds the vault lock for its lifetime, so the offline commands refuse with "vault is in use".
+  The kernel releases the lock when the helper exits, crash included; never delete
+  `vault.lock` to get around it.
+- `StageInfo` (`egresslab-helperctl stage-info PROFILE_ID`) returns the profile ID, stage ID and
+  `vpn_lab_compatible`, nothing else: no endpoint, key or config crosses the socket.
+- Internally, a config is lent only for the exact profile and current stage ID, under the vault's
+  read lock, and only if it is compatible. A replaced or revoked stage cannot be selected.
+- `ConnectTunnel` and `PermitProbe` stay disabled, and `network_ready` stays false.
+
+Nothing stops the legacy `egresslab-wg-vault-lab` from opening these paths without the lock: do
+not point it at the managed vault. The vault protects configs at rest, not against root in the
+runtime.
 
 ## Invariants the helper keeps
 

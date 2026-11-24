@@ -59,6 +59,7 @@ type Response struct {
 	Info         *HelperInfo    `json:"helper_info,omitempty"`
 	Lab          *LabInfo       `json:"lab,omitempty"`
 	Labs         []LabInfo      `json:"labs,omitempty"`
+	Stage        *StageInfo     `json:"stage,omitempty"`
 }
 
 var ErrInvalidFrame = errors.New("invalid helper IPC frame")
@@ -203,6 +204,10 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 
 	if !validLabListResponse(req, resp) {
 		return Response{}, errors.New("invalid managed lab list")
+	}
+
+	if !validStageResponse(req, resp) {
+		return Response{}, errors.New("invalid WireGuard stage response")
 	}
 
 	if !resp.OK {

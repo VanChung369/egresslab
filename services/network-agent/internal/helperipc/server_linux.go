@@ -28,13 +28,14 @@ var echoableOperation = regexp.MustCompile(`^[A-Za-z]{1,32}$`)
 
 type RecoveryScanner func(context.Context) ([]RecoveryItem, error)
 
-// ServerOptions selects what the helper answers. A nil Verifier disables authorization; a nil
-// Labs disables the lab lifecycle.
+// ServerOptions selects what the helper answers. A nil Verifier disables authorization, a nil
+// Labs the lab lifecycle, a nil ReadStage the managed vault.
 type ServerOptions struct {
 	Scan      RecoveryScanner
 	Verifier  *helperauth.Verifier
 	Labs      *LabLifecycle
 	RuntimeID string
+	ReadStage StageReader
 }
 
 // Serve answers local, single-request connections until ctx is cancelled, without
@@ -67,6 +68,10 @@ func ServeLifecycle(
 func ServeWith(ctx context.Context, listener *net.UnixListener, allowedUID uint32, opts ServerOptions) error {
 	if opts.Labs != nil && opts.Verifier == nil {
 		return errors.New("lab lifecycle requires authorization")
+	}
+
+	if opts.ReadStage != nil && (opts.Labs == nil || opts.Verifier == nil) {
+		return errors.New("managed vault requires authorized lab lifecycle")
 	}
 
 	if opts.RuntimeID != "" && !ValidRuntimeID(opts.RuntimeID) {
@@ -253,6 +258,28 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 
 		// Dry-run only: nothing is executed for an accepted capability.
 		resp.OK = true
+
+	case OpStageInfo:
+		if req.Capability != nil || !validStageIntent(req.Intent) {
+			return refuse(CodeInvalidRequest, "invalid stage request")
+		}
+
+		if opts.ReadStage == nil {
+			return refuse(CodeOperationDisabled, "managed vault not enabled")
+		}
+
+		stage, err := opts.ReadStage(req.Intent.ProfileID)
+		if errors.Is(err, ErrStageNotFound) {
+			return refuse(CodeStageNotFound, "WireGuard stage not found")
+		}
+
+		if err != nil || !validStageInfo(&stage, req.Intent.ProfileID) {
+			log.Printf("stage info: %v", err)
+			return refuse(CodeInternal, "stage metadata unavailable")
+		}
+
+		resp.OK = true
+		resp.Stage = &stage
 
 	case OpListLabs:
 		if labs == nil {

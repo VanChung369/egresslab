@@ -43,6 +43,9 @@ func TestRunRejectsBadArguments(t *testing.T) {
 		{"verify-lab", "profile_0123456789abcdef"},
 		{"delete-lab", "profile_0123456789abcdef", "../default"},
 		{"connect-tunnel", "profile_0123456789abcdef"},
+		{"stage-info"},
+		{"stage-info", "profile_x"},
+		{"stage-info", "profile_0123456789abcdef", "extra"},
 	} {
 		var out bytes.Buffer
 		if err := run(args, strings.NewReader(validCapability), &out); err == nil || !strings.Contains(err.Error(), "usage") {

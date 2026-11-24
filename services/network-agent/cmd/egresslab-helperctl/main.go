@@ -94,6 +94,13 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 
 		result, err = helperipc.CreateSealedLab(ctx, helperipc.SocketPath, args[1], capability)
 
+	case "stage-info":
+		if len(args) != 2 || !helperauth.ValidProfileID(args[1]) {
+			return usageError()
+		}
+
+		result, err = helperipc.ReadStageInfo(ctx, helperipc.SocketPath, args[1])
+
 	case "verify-lab", "delete-lab":
 		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
 			return usageError()
@@ -145,6 +152,7 @@ func readCapability(r io.Reader) (helperauth.SignedCapability, error) {
 func usageError() error {
 	return invalid("usage: egresslab-helperctl ping|helper-info|recover-scan|list-labs\n" +
 		"       egresslab-helperctl create-lab PROFILE_ID < capability.json\n" +
+		"       egresslab-helperctl stage-info PROFILE_ID\n" +
 		"       egresslab-helperctl verify-lab PROFILE_ID NAMESPACE\n" +
 		"       egresslab-helperctl delete-lab PROFILE_ID NAMESPACE")
 }
