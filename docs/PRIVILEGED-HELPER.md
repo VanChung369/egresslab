@@ -1,8 +1,31 @@
-# Privileged helper and authorization protocol (design — not implemented)
+# Privileged helper and authorization protocol
 
-Status: **design only.** Nothing in this document is built yet. It records the boundary that must
-exist before any `ip`, `wg` or `nft` change can be triggered from the desktop, the controller or
-the agent's HTTP API.
+Status: **IPC bootstrap implemented in Step 22.** The rest of this document is still design.
+
+Implemented:
+
+- `egresslab-helper` listens on the Linux Unix-domain socket `/run/egresslab/helper.sock`.
+- Length-prefixed JSON protocol (`internal/helperipc`), version 1, maximum 64 KiB per frame.
+  Unknown fields and trailing content are rejected.
+- `SO_PEERCRED` UID check before anything is read. Other UIDs, root included, are closed without
+  a reply.
+- Two read-only operations: `Ping` and `RecoverScan` (the existing `LabRecovery.Scan`). Every other
+  operation name gets `operation not enabled`. `network_ready` is always `false`.
+- `egresslab-helperctl ping|recover-scan`, a client for the agent user.
+- Unit tests for framing, peer rejection, refused mutations, hidden scanner errors and oversized
+  responses (`internal/helperipc`).
+
+Not implemented:
+
+- Network-changing operations through IPC (`CreateLab`, `ConnectTunnel`, `PermitProbe`, `RecoverClean`, ...)
+- Ed25519 authorization capabilities
+- Replay protection and authorization expiry
+- `CAP_NET_ADMIN`-only runtime and systemd hardening
+- Desktop/controller-driven helper operations; the agent does not call the helper yet
+- Persistent audit log
+
+The sections below on typed operations, authorization and invariants describe that future work.
+Until it exists, any `ip`, `wg` or `nft` change still needs a lab CLI run by hand with `sudo`.
 
 ## What is enforced today
 
@@ -18,6 +41,8 @@ the agent's HTTP API.
   `network_ready=false`.
 - Privileged changes run only from the `egresslab-*-lab` CLIs. An operator starts those with `sudo`
   in a terminal on the VM.
+- The helper socket accepts only the configured agent UID and answers only `Ping` and `RecoverScan`
+  (`TestPeerRejection`, `TestPeerIdentityAndReadOnlyOperations`).
 
 Changing any of these needs the helper below first.
 
@@ -33,6 +58,13 @@ Changing any of these needs the helper below first.
 ## Transport
 
 - Unix socket at `/run/egresslab/helper.sock`, mode `0660`, group `egresslab`.
+  - **Lab bootstrap (Step 22):** the helper runs as root under `sudo egresslab-helper -uid <agent UID>
+    -gid <agent GID>`. The socket and `/run/egresslab` (`0750`) belong to `root:<agent's primary
+    group>` instead of a dedicated `egresslab` group. The marker directory `/run/egresslab/netns`
+    stays `root:root 0700`.
+  - The helper never unlinks an existing socket path. After a `SIGKILL` it refuses to start until
+    an operator confirms that no helper is running and removes the stale socket by hand. `SIGINT`,
+    `SIGTERM` and `SIGHUP` remove the socket on exit.
 - On every connection, the helper reads `SO_PEERCRED` and accepts only the agent's configured UID.
   A request from any other UID is closed without a reply.
 - One request per connection, framed as length-prefixed JSON (64 KiB maximum). Unknown fields are

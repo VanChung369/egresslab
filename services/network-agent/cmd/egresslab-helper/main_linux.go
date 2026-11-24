@@ -1,0 +1,170 @@
+//go:build linux
+
+// Command egresslab-helper is the lab bootstrap of the privileged network helper. It listens on
+// /run/egresslab/helper.sock, accepts only the configured agent UID (SO_PEERCRED) and answers
+// read-only operations: Ping and RecoverScan. Network-changing operations are not implemented.
+//
+// In this step it runs as root under sudo; the production design keeps only CAP_NET_ADMIN.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+
+	"github.com/VanChung369/egresslab/services/network-agent/internal/agent"
+	"github.com/VanChung369/egresslab/services/network-agent/internal/helperipc"
+)
+
+func main() {
+	uid := flag.Int("uid", -1, "allowed unprivileged agent UID")
+	gid := flag.Int("gid", -1, "agent's primary group ID (gets socket access)")
+	flag.Parse()
+
+	if os.Geteuid() != 0 || *uid <= 0 || *gid <= 0 || flag.NArg() != 0 {
+		log.Fatal("usage: sudo egresslab-helper -uid <non-root UID> -gid <non-root GID>")
+	}
+
+	if err := run(*uid, *gid); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(uid, gid int) error {
+	listener, cleanup, err := prepareSocket(gid)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	// SIGHUP too: closing the terminal must not leave a stale socket behind.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+
+	log.Printf("EgressLab helper listening on %s (UID %d; read-only operations)", helperipc.SocketPath, uid)
+
+	err = helperipc.Serve(ctx, listener, uint32(uid), scanRecovery)
+	log.Print("EgressLab helper stopped")
+
+	return err
+}
+
+// prepareSocket creates the helper socket.
+//
+// The directory is root-owned, group-traversable and not writable by the agent. The socket is
+// root-owned with group read/write; SO_PEERCRED still checks the caller's UID.
+func prepareSocket(gid int) (*net.UnixListener, func(), error) {
+	dir := filepath.Dir(helperipc.SocketPath)
+
+	if err := os.Mkdir(dir, 0o750); err != nil && !errors.Is(err, os.ErrExist) {
+		return nil, nil, err
+	}
+
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() || stat.Uid != 0 || info.Mode().Perm()&0o022 != 0 {
+		return nil, nil, errors.New("helper socket directory must be root owned and not writable by other users")
+	}
+
+	// Never unlink an existing path: it may belong to a live helper. Check before touching the
+	// directory, so a refused start cannot re-group it under a running helper.
+	if _, err := os.Lstat(helperipc.SocketPath); err == nil {
+		return nil, nil, fmt.Errorf(
+			"%s already exists; if no egresslab-helper process is running (pgrep -x egresslab-helper), remove it by hand",
+			helperipc.SocketPath,
+		)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, nil, err
+	}
+
+	if err := os.Chown(dir, 0, gid); err != nil {
+		return nil, nil, err
+	}
+
+	if err := os.Chmod(dir, 0o750); err != nil {
+		return nil, nil, err
+	}
+
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: helperipc.SocketPath, Net: "unix"})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Cleanup unlinks the path only if it still names the socket created here.
+	listener.SetUnlinkOnClose(false)
+
+	created, err := os.Lstat(helperipc.SocketPath)
+	if err != nil || created.Mode()&os.ModeSocket == 0 {
+		listener.Close()
+		return nil, nil, errors.New("new helper socket could not be inspected")
+	}
+
+	cleanup := func() {
+		listener.Close()
+
+		current, err := os.Lstat(helperipc.SocketPath)
+		if err == nil && os.SameFile(created, current) {
+			_ = os.Remove(helperipc.SocketPath)
+		}
+	}
+
+	if err := os.Chown(helperipc.SocketPath, 0, gid); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+
+	if err := os.Chmod(helperipc.SocketPath, 0o660); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+
+	return listener, cleanup, nil
+}
+
+// scanRecovery reuses the read-only LabRecovery.Scan. Clean/delete and shell commands are not
+// reachable from here.
+func scanRecovery(ctx context.Context) ([]helperipc.RecoveryItem, error) {
+	items, err := scanLabResources(ctx)
+	if err != nil {
+		// The client only sees "recovery scan failed"; the operator sees the cause.
+		log.Printf("recovery scan failed: %v", err)
+		return nil, err
+	}
+
+	out := make([]helperipc.RecoveryItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, helperipc.RecoveryItem{
+			Kind:   item.Kind,
+			Name:   item.Name,
+			State:  item.State,
+			Detail: item.Detail,
+		})
+	}
+
+	return out, nil
+}
+
+func scanLabResources(ctx context.Context) ([]agent.LabRecoveryItem, error) {
+	manager, err := agent.NewNetNSLabManager()
+	if err != nil {
+		return nil, err
+	}
+
+	recovery, err := agent.NewLabRecovery(manager)
+	if err != nil {
+		return nil, err
+	}
+
+	return recovery.Scan(ctx)
+}

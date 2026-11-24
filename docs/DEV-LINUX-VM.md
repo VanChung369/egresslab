@@ -206,6 +206,7 @@ Privileged networking exists only as **lab CLIs**. You run them by hand with `su
 | `egresslab-vpn-lab -file vpn.conf` | Real VPN egress through a sealed namespace (details below) |
 | `egresslab-wg-inspect`, `egresslab-wg-vault-lab` | Config import summary; in-memory or opt-in encrypted staging |
 | `egresslab-lab-recover [-delete]` | Report (default) leftovers of a crashed session; `-delete` removes only orphan namespaces holding nothing but `lo`/lab veth (never one with WireGuard) and stale markers. Underlay tables are never removed automatically |
+| `egresslab-helper -uid <UID> -gid <GID>`, `egresslab-helperctl ping\|recover-scan` | Helper IPC bootstrap: Unix socket with `SO_PEERCRED`, read-only `Ping`/`RecoverScan` (details below) |
 
 `egresslab-vpn-lab` runs these steps:
 
@@ -218,7 +219,7 @@ Privileged networking exists only as **lab CLIs**. You run them by hand with `su
 
 Still not implemented:
 
-- A privileged helper and authorization protocol, so that no HTTP path can trigger lab operations. The design is in `docs/PRIVILEGED-HELPER.md`.
+- Network changes through the privileged helper. Its IPC bootstrap exists (read-only `Ping` and `RecoverScan`), but mutations need the Ed25519 authorization protocol first. The design is in `docs/PRIVILEGED-HELPER.md`.
 - DNS through the tunnel. DNS (port 53) and IPv6 are explicitly dropped inside lab namespaces.
 - Multi-peer configs, and hostname endpoints in the VPN lab. The importer reports `vpn_lab_compatible=false` for these.
 - SOCKS5 runtime activation.
@@ -245,6 +246,29 @@ The firewall readback tests use real `nft -j` captures from nft 1.0.2 (Ubuntu 22
 ```bash
 sudo ip netns exec <egresslab-lab-...> nft -j list ruleset
 ```
+
+### Helper IPC (Step 22)
+
+The helper runs as root in this lab step. The production design keeps only `CAP_NET_ADMIN`. Install the binaries as root-owned files:
+
+```bash
+go build -o /tmp/egresslab-helper ./cmd/egresslab-helper
+go build -o /tmp/egresslab-helperctl ./cmd/egresslab-helperctl
+sudo install -o root -g root -m 0755 /tmp/egresslab-helper /tmp/egresslab-helperctl /usr/local/bin/
+
+# Terminal 1: allow only your normal user
+sudo /usr/local/bin/egresslab-helper -uid "$(id -u)" -gid "$(id -g)"
+
+# Terminal 2: as the same normal user, without sudo
+egresslab-helperctl ping           # {"ok": true, "network_ready": false, ...}
+egresslab-helperctl recover-scan   # same classification as egresslab-lab-recover, never changes anything
+```
+
+Other UIDs get no reply, including root (`sudo egresslab-helperctl ping` fails on purpose). Users outside your primary group cannot reach the socket at all.
+
+Ctrl+C, `SIGTERM` or closing the terminal removes the socket. After a `SIGKILL`, the helper refuses to start while `/run/egresslab/helper.sock` exists. Check that `pgrep -x egresslab-helper` prints nothing, then remove the socket with `sudo rm`.
+
+Run the socket tests in `internal/helperipc` as a non-root user. Under root, only `TestPeerRejection` and `TestServeRejectsRootClientUID` run; the others skip.
 
 ## Security Notes
 
