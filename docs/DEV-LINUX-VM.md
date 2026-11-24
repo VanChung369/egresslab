@@ -206,7 +206,7 @@ Privileged networking exists as **lab CLIs** that you run by hand with `sudo` on
 | `egresslab-vpn-lab -file vpn.conf` | Real VPN egress through a sealed namespace (details below) |
 | `egresslab-wg-inspect`, `egresslab-wg-vault-lab` | Config import summary; in-memory or opt-in encrypted staging |
 | `egresslab-lab-recover [-delete]` | Report (default) leftovers of a crashed session; `-delete` removes only orphan namespaces holding nothing but `lo`/lab veth (never one with WireGuard) and stale markers. Underlay tables are never removed automatically |
-| `egresslab-helper -uid <UID> -gid <GID>`, `egresslab-helperctl ping\|recover-scan\|helper-info` | Helper IPC: Unix socket with `SO_PEERCRED`, read-only `Ping`/`RecoverScan`/`HelperInfo`, optional `AuthorizeCheck` dry-run and sealed lab lifecycle (details below) |
+| `egresslab-helper -uid <UID> -gid <GID>`, `egresslab-helperctl ping\|recover-scan\|helper-info\|list-labs\|create-lab\|verify-lab\|delete-lab` | Helper IPC: Unix socket with `SO_PEERCRED`, read-only `Ping`/`RecoverScan`/`HelperInfo`, optional `AuthorizeCheck` dry-run and sealed lab lifecycle (details below) |
 
 `egresslab-vpn-lab` runs these steps:
 
@@ -219,7 +219,7 @@ Privileged networking exists as **lab CLIs** that you run by hand with `sudo` on
 
 Still not implemented:
 
-- Tunnels and probes through the privileged helper. The helper can already create, verify and delete sealed, loopback-only lab namespaces when started with `-enable-lab-lifecycle`, but no CLI or controller calls those operations yet. The design is in `docs/PRIVILEGED-HELPER.md`.
+- Tunnels and probes through the privileged helper. The helper can already create, verify and delete sealed, loopback-only lab namespaces when started with `-enable-lab-lifecycle`, and `egresslab-controller-lab` drives them from the host. The design is in `docs/PRIVILEGED-HELPER.md`.
 - DNS through the tunnel. DNS (port 53) and IPv6 are explicitly dropped inside lab namespaces.
 - Multi-peer configs, and hostname endpoints in the VPN lab. The importer reports `vpn_lab_compatible=false` for these.
 - SOCKS5 runtime activation.
@@ -265,9 +265,9 @@ egresslab-helperctl recover-scan   # same classification as egresslab-lab-recove
 egresslab-helperctl helper-info    # {"helper_info": {"authorization_configured": false}} without a key
 ```
 
-Other UIDs get no reply, including root (`sudo egresslab-helperctl ping` fails on purpose). Users outside your primary group cannot reach the socket at all.
+Other UIDs get no reply. `egresslab-helperctl` refuses to run as root, and also refuses a production socket that is not served by root. Users outside your primary group cannot reach the socket at all.
 
-Ctrl+C, `SIGTERM` or closing the terminal removes the socket. After a `SIGKILL`, the helper refuses to start while `/run/egresslab/helper.sock` exists. Check that `pgrep -x egresslab-helper` prints nothing, then remove the socket with `sudo rm`.
+Ctrl+C, `SIGTERM` or closing the terminal removes the socket. After a `SIGKILL`, the helper refuses to start while `/run/egresslab/helper.sock` exists. Check that `pidof egresslab-helper` prints nothing, then remove the socket with `sudo rm`. (Do not use `pgrep -x egresslab-helper`: Linux truncates process names to 15 characters, so it never matches.)
 
 Started without `-auth-public-key-file`, the helper answers `AuthorizeCheck` with `authorization unavailable`. To enable the dry-run, give it the public key file:
 
@@ -282,9 +282,30 @@ At every start, the helper generates a new random helper ID (epoch) and logs it 
 
 If the WSL clock steps backwards between two checks, the helper refuses all capabilities with `authorization denied` until you restart it. Nothing is logged when this happens.
 
-`egresslab-helperctl` cannot send `AuthorizeCheck`. Later the controller will mint capabilities and the agent will forward them over the socket.
+`egresslab-helperctl` cannot send `AuthorizeCheck`. The controller mints capabilities (see "Controller lab CLI" below); the agent does not forward them yet.
 
-Add `-enable-lab-lifecycle` (it requires `-auth-public-key-file`) to let the helper create, verify and delete sealed lab namespaces, at most 8, one per profile. `egresslab-helperctl` cannot call these operations; the Go client functions (`CreateSealedLab`, `VerifySealedLab`, `DeleteSealedLab`) are not wired to a CLI or the controller yet. On Ctrl+C the helper deletes its labs. After a `SIGKILL`, `sudo egresslab-lab-recover` reports them as orphans and `-delete` removes them.
+Add `-enable-lab-lifecycle` (it requires `-auth-public-key-file`) to let the helper create, verify and delete sealed lab namespaces, at most 8, one per profile. `egresslab-helperctl list-labs`, `verify-lab` and `delete-lab` work directly; `create-lab` reads a signed capability from stdin, which the controller produces. On Ctrl+C the helper deletes its labs. After a `SIGKILL`, `sudo egresslab-lab-recover` reports them as orphans and `-delete` removes them.
+
+### Controller lab CLI (Step 26)
+
+`egresslab-controller-lab` runs on the host (Windows, macOS or Linux) and signs with the controller key. Provision once:
+
+```bash
+egresslab-controller-lab init-key            # never replaces an existing key
+egresslab-controller-lab public-key          # 64 hex characters: copy them to the helper's key file
+```
+
+Then start the helper with `-auth-public-key-file <that file> -enable-lab-lifecycle` and run:
+
+```bash
+egresslab-controller-lab runtime-status
+egresslab-controller-lab -approve create-lab <profile ID from the desktop>
+egresslab-controller-lab list-labs
+egresslab-controller-lab verify-lab <profile ID> <namespace>
+egresslab-controller-lab -approve delete-lab <profile ID> <namespace>
+```
+
+`-runtime auto` uses WSL on Windows (`-wsl-distro`, default: the WSL default distribution), Lima on macOS (`-lima-instance`, default `egresslab`) and the host itself on Linux. Install `egresslab-helper` and `egresslab-helperctl` in `/usr/local/bin` inside the runtime (see above). The Lima path is written from the Lima docs but not yet run; see `docs/PRIVILEGED-HELPER.md`. If `create-lab` reports an uncertain result, run `list-labs` before retrying.
 
 Run the socket tests in `internal/helperipc` as a non-root user. Under root, the tests that need a non-root socket client skip. The key-loader tests in `cmd/egresslab-helper` run under both.
 
@@ -299,4 +320,4 @@ Run the socket tests in `internal/helperipc` as a non-root user. Under root, the
 
 ## Next Milestone
 
-Connect the controller and the agent to the helper's sealed lab lifecycle (controller signing key, capability minting), then move tunnel operations behind the helper.
+Run the Lima and macOS Keychain paths on a Mac, bind WireGuard configs to sealed labs, then move tunnel operations behind the helper.

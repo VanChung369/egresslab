@@ -1,0 +1,150 @@
+package control
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"regexp"
+	"time"
+)
+
+// Must match the network agent's helperauth wire format (pinned there by golden tests).
+const labCapabilityDomain = "egresslab/helper-capability/v1\x00"
+
+var (
+	labHelperIDPattern    = regexp.MustCompile(`^helper_[0-9a-f]{32}$`)
+	labNamespacePattern   = regexp.MustCompile(`^egresslab-lab-[0-9a-f]{16}$`)
+	labFingerprintPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+const (
+	LabSealed  = "sealed"
+	LabFaulted = "faulted"
+	LabDeleted = "deleted"
+)
+
+type LabHelperInfo struct {
+	AuthorizationConfigured bool   `json:"authorization_configured"`
+	HelperID                string `json:"helper_id,omitempty"`
+	PublicKeySHA256         string `json:"public_key_sha256,omitempty"`
+}
+
+func (i LabHelperInfo) Valid() bool {
+	if !i.AuthorizationConfigured {
+		return i.HelperID == "" && i.PublicKeySHA256 == ""
+	}
+
+	return labHelperIDPattern.MatchString(i.HelperID) && labFingerprintPattern.MatchString(i.PublicKeySHA256)
+}
+
+type LabInfo struct {
+	ProfileID string `json:"profile_id"`
+	Namespace string `json:"namespace"`
+	State     string `json:"state"`
+}
+
+// Field order matters: it is the signed JSON. Namespace has no omitempty, so CreateLab signs
+// "namespace":"".
+type LabIntent struct {
+	Operation string `json:"operation"`
+	ProfileID string `json:"profile_id"`
+	Namespace string `json:"namespace"`
+	StageID   string `json:"stage_id,omitempty"`
+	ProbeIPv4 string `json:"probe_ipv4,omitempty"`
+}
+
+type LabClaims struct {
+	Version  int       `json:"version"`
+	Intent   LabIntent `json:"intent"`
+	HelperID string    `json:"helper_id"`
+	Nonce    string    `json:"nonce"`
+	IssuedAt int64     `json:"issued_at"`
+	NotAfter int64     `json:"not_after"`
+}
+
+type LabCapability struct {
+	Claims    LabClaims `json:"claims"`
+	Signature string    `json:"signature"`
+}
+
+// LabSigner is implemented by the platform key stores; the private key never leaves them.
+type LabSigner interface {
+	PublicKey() (ed25519.PublicKey, error)
+	Sign(message []byte) ([]byte, error)
+}
+
+func ValidProfileID(id string) bool { return profileIDPattern.MatchString(id) }
+
+func ValidLabNamespace(name string) bool { return labNamespacePattern.MatchString(name) }
+
+// LabPublicKeySHA256 is the fingerprint the helper reports in HelperInfo.
+func LabPublicKeySHA256(public ed25519.PublicKey) string {
+	digest := sha256.Sum256(public)
+	return hex.EncodeToString(digest[:])
+}
+
+func signLabClaims(signer LabSigner, claims LabClaims) (LabCapability, error) {
+	raw, err := json.Marshal(claims)
+	if err != nil {
+		return LabCapability{}, err
+	}
+
+	signature, err := signer.Sign(append([]byte(labCapabilityDomain), raw...))
+	if err != nil {
+		return LabCapability{}, err
+	}
+
+	if len(signature) != ed25519.SignatureSize {
+		return LabCapability{}, errors.New("signer returned an invalid signature")
+	}
+
+	return LabCapability{Claims: claims, Signature: base64.RawURLEncoding.EncodeToString(signature)}, nil
+}
+
+// MintCreateLab signs a CreateLab capability, the only operation the controller can authorize.
+// It signs nothing unless the profile keeps its policies and the helper reports this signer's
+// public key.
+func MintCreateLab(signer LabSigner, profile RoutingProfile, info LabHelperInfo, now time.Time) (LabCapability, error) {
+	if !ValidProfileID(profile.ID) ||
+		!profile.UniqueIPRequired ||
+		!profile.KillSwitchRequired ||
+		profile.Status != "unconfigured" ||
+		profile.TunnelID != "" {
+		return LabCapability{}, errors.New("profile does not satisfy sealed lab policy")
+	}
+
+	if !info.AuthorizationConfigured || !info.Valid() {
+		return LabCapability{}, errors.New("helper authorization is unavailable")
+	}
+
+	public, err := signer.PublicKey()
+	if err != nil {
+		return LabCapability{}, err
+	}
+
+	if LabPublicKeySHA256(public) != info.PublicKeySHA256 {
+		return LabCapability{}, errors.New("helper public key fingerprint mismatch")
+	}
+
+	if now.Unix() <= 0 {
+		return LabCapability{}, errors.New("invalid controller clock")
+	}
+
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return LabCapability{}, err
+	}
+
+	return signLabClaims(signer, LabClaims{
+		Version:  1,
+		Intent:   LabIntent{Operation: "CreateLab", ProfileID: profile.ID},
+		HelperID: info.HelperID,
+		Nonce:    hex.EncodeToString(nonce[:]),
+		IssuedAt: now.Unix(),
+		NotAfter: now.Unix() + 30,
+	})
+}

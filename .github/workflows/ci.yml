@@ -46,6 +46,39 @@ jobs:
       - name: go test
         run: go test ./...
 
+      - name: go vet (every target platform)
+        run: |
+          for target in windows/amd64 windows/arm64 darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            echo "== $target"
+            GOOS="${target%/*}" GOARCH="${target#*/}" go vet ./...
+          done
+
+  controller-cross-platform:
+    name: Controller (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is Apple Silicon (arm64). Windows runs the real DPAPI key store tests;
+        # the macOS Keychain test is opt-in (EGRESSLAB_TEST_KEYCHAIN=1) and skipped here.
+        os: [windows-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: services/controller
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/controller/go.mod
+          cache-dependency-path: services/controller/go.mod
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -v ./...
+
   desktop:
     name: Desktop (SvelteKit)
     runs-on: ubuntu-latest

@@ -57,6 +57,7 @@ type Response struct {
 	Items        []RecoveryItem `json:"items,omitempty"`
 	Info         *HelperInfo    `json:"helper_info,omitempty"`
 	Lab          *LabInfo       `json:"lab,omitempty"`
+	Labs         []LabInfo      `json:"labs,omitempty"`
 }
 
 var ErrInvalidFrame = errors.New("invalid helper IPC frame")
@@ -113,10 +114,10 @@ func WriteFrame(w io.Writer, value any) error {
 	return err
 }
 
-// Call sends one read-only operation (Ping, RecoverScan or HelperInfo) to the helper. It never
-// retries.
+// Call sends one read-only operation (Ping, RecoverScan, HelperInfo or ListLabs) to the helper.
+// It never retries.
 func Call(ctx context.Context, socketPath string, op string) (Response, error) {
-	if op != OpPing && op != OpRecoverScan && op != OpHelperInfo {
+	if op != OpPing && op != OpRecoverScan && op != OpHelperInfo && op != OpListLabs {
 		return Response{}, errors.New("operation is not available to the helper client")
 	}
 
@@ -147,6 +148,13 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 		return Response{}, err
 	}
 	defer conn.Close()
+
+	// Test servers on temporary paths run unprivileged.
+	if socketPath == SocketPath {
+		if err := verifyProductionPeer(conn); err != nil {
+			return Response{}, err
+		}
+	}
 
 	timeout := 5 * time.Second
 	if isLifecycleOp(req.Operation) {
@@ -190,6 +198,10 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 
 	if !validLabResponse(req, resp) {
 		return Response{}, errors.New("invalid lab lifecycle response")
+	}
+
+	if !validLabListResponse(req, resp) {
+		return Response{}, errors.New("invalid managed lab list")
 	}
 
 	if !resp.OK {

@@ -1,8 +1,9 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 25 — opt-in sealed lab lifecycle implemented.** The helper can create, verify and
-delete sealed lab namespaces. Tunnels and probes through the helper are still not implemented;
-the sections from "Typed operations only" on are partly design.
+Status: **Step 26 — cross-platform controller signing and runtime bridge.** A controller CLI on
+Windows, macOS or Linux signs `CreateLab` and drives the helper's sealed lab lifecycle in the
+Linux runtime. Tunnels and probes through the helper are still not implemented; the sections
+from "Typed operations only" on are partly design.
 
 ## Implemented
 
@@ -37,12 +38,27 @@ the sections from "Typed operations only" on are partly design.
   - `VerifyLab` and `DeleteLab` with ownership checks;
   - serialized lifecycle operations;
   - rollback, cleanup at normal shutdown, and retention of faulted resources.
+- `ListLabs`: the helper's profile-to-namespace registry (bookkeeping only; `VerifyLab` checks the
+  kernel).
+- The client checks that the production socket is served by root (`SO_PEERCRED`) before it sends
+  anything.
+- `egresslab-helperctl` covers every helper operation except `AuthorizeCheck`. `create-lab`
+  reads the capability from stdin only, never from argv. It refuses to run as root.
+- Controller side (see "Controller and runtimes"):
+  - an Ed25519 signer that can mint only `CreateLab`, checked against both golden vectors;
+  - signing-key storage per platform;
+  - runtime providers that reach the helper from each host OS;
+  - `egresslab-controller-lab`, which needs `-approve` for `create-lab` and `delete-lab`.
 
 ## Not implemented
 
-- Controller signing-key storage and trust provisioning (pinning the helper's key fingerprint).
-  The controller is a separate Go module and cannot import `internal/helperauth`; it needs its
-  own implementation of the format below, checked against `TestSigningMessageGolden`.
+- Automatic trust provisioning. The operator copies the controller's public key to the helper's
+  key file; the controller then refuses to sign unless the helper reports that key's
+  fingerprint.
+- A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
+- Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
+- Runtime `Start`/`Stop` (they return "not implemented").
+- WireGuard configuration binding to a lab.
 - A controller approval workflow for individual operations.
 - Live key rotation and automatic key distribution.
 - `ConnectTunnel`, `PermitProbe` and `RecoverClean` through IPC.
@@ -65,8 +81,11 @@ the sections from "Typed operations only" on are partly design.
   connected VPN and not a verified egress IP.
 - Every IPC response sets `network_ready=false`, and the client rejects a response that does not.
 - `HelperInfo` returns only public metadata. It is not authenticated to the client, so the
-  controller must compare the fingerprint with the key it pinned, and must never start trusting a
-  key because the helper reports it.
+  controller compares the fingerprint with its own public key, and never starts trusting a key
+  because the helper reports it.
+- The controller signs nothing for a profile that lost its unique-IP or kill-switch policy, or
+  for a helper reporting another key. It never retries a `CreateLab`; after an error, `ListLabs`
+  shows whether the lab exists.
 - A valid signature does not prove IP uniqueness, firewall integrity or route readiness. Those
   must still be verified when an operation runs.
 
@@ -86,9 +105,10 @@ the sections from "Typed operations only" on are partly design.
   a terminal on the VM. The only exception is the helper's sealed lab lifecycle, and only when
   the helper was started with `-enable-lab-lifecycle` and a public key.
 - The helper socket accepts only the configured agent UID. It answers `Ping`, `RecoverScan`,
-  `HelperInfo`, the `AuthorizeCheck` dry-run and, with the lifecycle flag, `CreateLab`,
-  `VerifyLab` and `DeleteLab` (`TestPeerRejection`, `TestPeerIdentityAndReadOnlyOperations`,
-  `TestMutationWithValidCapabilityIsRefused`, `TestLabLifecycleIPCRefusals`).
+  `HelperInfo`, the `AuthorizeCheck` dry-run and, with the lifecycle flag, `ListLabs`,
+  `CreateLab`, `VerifyLab` and `DeleteLab` (`TestPeerRejection`,
+  `TestPeerIdentityAndReadOnlyOperations`, `TestMutationWithValidCapabilityIsRefused`,
+  `TestLabLifecycleIPCRefusals`, `TestListLabsRefusals`).
 
 Changing any of these needs the helper below first.
 
@@ -174,7 +194,8 @@ signatures, so a non-Go controller can implement the format. A `CreateLab` inten
   `authorization_configured: true`, and nothing is logged. On WSL, a backward time correction that
   crosses a second boundary between two checks triggers it; restart the helper.
 - The controller mints a capability only after the desktop user confirms the action, and only
-  when the profile passes its invariants (unique IP, kill-switch). (Not implemented.)
+  when the profile passes its invariants (unique IP, kill-switch). The lab CLI checks the
+  invariants and requires `-approve`; a desktop confirmation flow is not implemented.
 
 Operations that only read or remove (`VerifyLab`, `Disconnect`, `DeleteLab`) need just the peer
 UID check, and refuse a capability if one is attached. This keeps cleanup possible even when the
@@ -221,13 +242,42 @@ helper leave it unused.
 
 Ownership lives in memory only. The client sees `authorization denied` or `lab operation failed`;
 the cause (busy, duplicate, drift, topology) is only in the helper log. If a `CreateLab` response
-is lost, the lab is stranded: `DeleteLab` needs the namespace name, and no operation lists labs.
-Only a helper restart frees it.
+is lost, `ListLabs` shows the namespace, and `DeleteLab` removes it.
 
 On kernels that have `sit`, `ipip` or `ip_gre` loaded, every new namespace gets fallback tunnel
 devices (`sit0`, `tunl0`, ...), so every `CreateLab` rolls back. The sysctl
 `net.core.fb_tunnels_only_for_init_net` should prevent that (not tested here). The tested WSL
 kernel creates none.
+
+## Controller and runtimes
+
+The desktop and the controller run on Windows, macOS and Linux; the network runtime is always
+Linux. `egresslab-controller-lab` reaches it through a runtime provider. Every provider runs
+`/usr/local/bin/egresslab-helperctl` inside the runtime as the normal user, so the private key
+never enters Linux and only the signed capability crosses, on stdin.
+
+| Host | Runtime (`-runtime`) | Signing-key storage | Tested |
+|---|---|---|---|
+| Windows | `wsl` (`wsl.exe --exec`) | DPAPI, current user (`controller-signing.dpapi`) | yes, end to end |
+| Linux | `native` (direct exec) | file, mode 0600 (`controller-signing.key`) | yes, end to end |
+| macOS | `lima` (`limactl shell`) | login Keychain (`security`) | no: written from the docs, not run |
+| any | `remote` | — | not implemented |
+
+`-runtime auto` picks by host OS. The key sits in the controller data directory
+(`EGRESSLAB_DATA_DIR`, default `<user config dir>/EgressLab`), next to `state.json`. The
+controller signs only for a profile that exists in `state.json`, and fetches the helper epoch
+right before each signature.
+
+- **DPAPI** protects the key against other Windows accounts and copies of the disk, not against
+  programs running as the same user.
+- **The Linux file key** is protected by Unix permissions only. A Secret Service backend is not
+  implemented.
+- **Lima (unverified):** its docs do not say whether `limactl shell` forwards stdin, which
+  `create-lab` needs, or whether a guest shell re-parses arguments. The transport therefore
+  passes only plain tokens.
+- **Clocks:** the Windows controller mints with the Windows clock, and the helper checks with
+  the WSL clock. With no skew allowance, a WSL clock behind Windows across a second boundary
+  refuses a fresh capability.
 
 ## Invariants the helper keeps
 

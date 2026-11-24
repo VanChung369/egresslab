@@ -453,3 +453,48 @@ func TestValidLabResponse(t *testing.T) {
 		}
 	}
 }
+
+func TestValidLabListResponse(t *testing.T) {
+	list := Request{Version: Version, Operation: OpListLabs}
+	lab := func(profile, namespace, state string) LabInfo {
+		return LabInfo{ProfileID: profile, Namespace: namespace, State: state}
+	}
+
+	const nsA, nsB = "egresslab-lab-000000000000000a", "egresslab-lab-000000000000000b"
+	const pB = "profile_000000000000000b"
+
+	full := make([]LabInfo, maxManagedLabs+1)
+	for i := range full {
+		full[i] = lab(fmt.Sprintf("profile_%016x", i), fmt.Sprintf("egresslab-lab-%016x", i), LabSealed)
+	}
+
+	tests := []struct {
+		name string
+		req  Request
+		resp Response
+		want bool
+	}{
+		{"empty", list, Response{OK: true}, true},
+		{"sealed and faulted", list, Response{OK: true, Labs: []LabInfo{
+			lab(lifecycleProfile, nsA, LabSealed), lab(pB, nsB, LabFaulted)}}, true},
+		{"refusal without list", list, Response{Error: "operation not enabled"}, true},
+
+		{"list on a refusal", list, Response{Error: "x", Labs: []LabInfo{lab(lifecycleProfile, nsA, LabSealed)}}, false},
+		{"list on Ping", Request{Version: Version, Operation: OpPing},
+			Response{OK: true, Labs: []LabInfo{lab(lifecycleProfile, nsA, LabSealed)}}, false},
+		{"too many labs", list, Response{OK: true, Labs: full}, false},
+		{"deleted state", list, Response{OK: true, Labs: []LabInfo{lab(lifecycleProfile, nsA, LabDeleted)}}, false},
+		{"malformed profile", list, Response{OK: true, Labs: []LabInfo{lab("profile_x", nsA, LabSealed)}}, false},
+		{"malformed namespace", list, Response{OK: true, Labs: []LabInfo{lab(lifecycleProfile, "../default", LabSealed)}}, false},
+		{"duplicate profile", list, Response{OK: true, Labs: []LabInfo{
+			lab(lifecycleProfile, nsA, LabSealed), lab(lifecycleProfile, nsB, LabSealed)}}, false},
+		{"duplicate namespace", list, Response{OK: true, Labs: []LabInfo{
+			lab(lifecycleProfile, nsA, LabSealed), lab(pB, nsA, LabSealed)}}, false},
+	}
+
+	for _, tt := range tests {
+		if got := validLabListResponse(tt.req, tt.resp); got != tt.want {
+			t.Errorf("%s: got %t, want %t", tt.name, got, tt.want)
+		}
+	}
+}

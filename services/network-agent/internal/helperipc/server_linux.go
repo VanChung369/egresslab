@@ -262,6 +262,26 @@ func respond(
 		// Dry-run only: nothing is executed for an accepted capability.
 		resp.OK = true
 
+	case OpListLabs:
+		if hasAuthFields {
+			resp.Error = "unexpected authorization fields"
+			return resp
+		}
+
+		if labs == nil {
+			resp.Error = "operation not enabled"
+			return resp
+		}
+
+		items, err := labs.snapshot()
+		if err != nil {
+			resp.Error = "lab registry unavailable"
+			return resp
+		}
+
+		resp.OK = true
+		resp.Labs = items
+
 	case helperauth.OpCreateLab, OpVerifyLab, OpDeleteLab:
 		if labs == nil {
 			resp.Error = "operation not enabled"

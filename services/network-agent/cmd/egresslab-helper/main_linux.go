@@ -128,7 +128,7 @@ func prepareSocket(gid int) (*net.UnixListener, func(), error) {
 	// directory, so a refused start cannot re-group it under a running helper.
 	if _, err := os.Lstat(helperipc.SocketPath); err == nil {
 		return nil, nil, fmt.Errorf(
-			"%s already exists; if no egresslab-helper process is running (pgrep -x egresslab-helper), remove it by hand",
+			"%s already exists; if no egresslab-helper process is running (pidof egresslab-helper prints nothing), remove it by hand",
 			helperipc.SocketPath,
 		)
 	} else if !errors.Is(err, os.ErrNotExist) {

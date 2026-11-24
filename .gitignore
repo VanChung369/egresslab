@@ -22,3 +22,6 @@ Thumbs.db
 !.vscode/settings.json
 !.vscode/extensions.json
 .idea/
+# Controller signing keys (DPAPI blob on Windows, 0600 file on Linux)
+*.dpapi
+controller-signing.key
