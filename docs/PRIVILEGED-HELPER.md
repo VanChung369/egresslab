@@ -1,10 +1,11 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 27A — managed WireGuard vault and profile binding.** A controller CLI signs
-`CreateLab` and drives the helper's sealed lab lifecycle in the Linux runtime, and the helper can
-hold encrypted WireGuard configs per profile. Windows (WSL2) and Linux are verified end to end;
-macOS (Lima, Keychain) is implemented but has not been run. Tunnels and probes through the helper
-are still not implemented; the sections from "Typed operations only" on are partly design.
+Status: **Step 27B.1 — managed tunnel kernel backend.** A controller CLI signs `CreateLab` and
+drives the helper's sealed lab lifecycle in the Linux runtime, and the helper can hold encrypted
+WireGuard configs per profile. A kernel backend can configure a staged config as a tunnel in a
+sealed lab, but nothing calls it yet. Windows (WSL2) and Linux are verified end to end; macOS
+(Lima, Keychain) is implemented but has not been run. Tunnels and probes through the helper are
+still not implemented; the sections from "Typed operations only" on are partly design.
 
 ## Implemented
 
@@ -48,6 +49,7 @@ are still not implemented; the sections from "Typed operations only" on are part
   `stage-info`. `create-lab` reads the capability from stdin only, never from argv. It refuses to
   run as root.
 - The managed WireGuard vault and `StageInfo` (see "Managed WireGuard vault").
+- The managed tunnel kernel backend, not reachable through IPC (see "Managed tunnel backend").
 - Controller side (see "Controller and runtimes"):
   - an Ed25519 signer that can mint only `CreateLab`, checked against both golden vectors;
   - signing-key storage per platform;
@@ -68,12 +70,12 @@ are still not implemented; the sections from "Typed operations only" on are part
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
 - A macOS run of the Lima and Keychain paths.
-- Open from earlier steps: firewall readback compared with the intended policy (today it is
-  compared with the state read right after sealing); egress-IP leases across runtimes; a
-  kill-switch independent of the controller; refusing to delete a profile that still has
-  runtime resources.
-- Using a staged config: `ConnectTunnel` and `Disconnect` (Step 27B), hostname endpoints and IP
-  pinning (Step 27C).
+- Open from earlier steps: `VerifyLab` still compares the firewall with the state read right
+  after sealing (only the managed tunnel backend also checks the intended policy); egress-IP
+  leases across runtimes; a kill-switch independent of the controller; refusing to delete a
+  profile that still has runtime resources.
+- Using a staged config through the helper: signed `ConnectTunnel` and `Disconnect` IPC with
+  controller and runtime wiring (Step 27B.2), hostname endpoints and IP pinning (Step 27C).
 - A controller approval workflow for individual operations.
 - Live key rotation and automatic key distribution.
 - `ConnectTunnel`, `PermitProbe` and `RecoverClean` through IPC.
@@ -390,12 +392,69 @@ Nothing stops the legacy `egresslab-wg-vault-lab` from opening these paths witho
 not point it at the managed vault. The vault protects configs at rest, not against root in the
 runtime.
 
+## Managed tunnel backend
+
+`agent.ManagedTunnelBackend` (Step 27B.1) brings a staged config up as `wg0` in a sealed lab. It
+shares the sealed lab backend's namespace manager and firewall, and holds at most one tunnel.
+Nothing calls it yet: signed `ConnectTunnel`/`Disconnect` dispatch comes in Step 27B.2. It checks
+no capability itself, so it must never be wired to the HTTP agent.
+
+`ConnectStage(profile, namespace, stage)` proceeds only when each check passes, in this order:
+
+1. The vault lends the config for the exact profile and current stage (see "Managed WireGuard
+   vault").
+2. The recovery gate and kernel check pass (`Preflight`).
+3. The endpoint is a unicast IPv4 address and the config is a full IPv4 tunnel.
+4. No tunnel is tracked and the lab holds only `lo`.
+5. The lab firewall matches both the session baseline and the intended sealed policy (the rules
+   written out in `sealed_policy.go`, not the state read back after sealing). A mismatch marks the
+   lab drifted. An nft version that prints the same rules differently is refused as well, and so
+   is a table with any flags (a `dormant` table still lists its rules but enforces none).
+6. No `egwg*` link and no managed alias exists in the VM namespace.
+7. The root underlay table is installed. Then the link is created with an alias
+   `egresslab-managed:<namespace>:<link>`, moved into the lab and renamed `wg0`. Its name, alias
+   and kind (`wireguard`) are read back.
+8. After the fwmark and private key are set, and before any peer exists, the lab firewall, the
+   underlay table and the fwmark are read back again.
+9. The peer, addresses, MTU and default route are configured, and the link, firewall and
+   underlay are checked once more.
+
+What the backend guarantees:
+
+- The lab firewall stays loopback-only. WireGuard may send handshakes to the configured endpoint
+  (the underlay table allows nothing else with the tunnel's mark), but no probe or proxy traffic is
+  permitted. "Configured" means none of: handshake done, egress IP checked, `network_ready`.
+- The link is looked up by name, alias and kind in both the VM and the lab namespace. A foreign
+  device in the lab, a link with the name but not the alias (or the reverse), or a second match
+  stops any automatic removal.
+- A failed connect is rolled back: link first, confirmed gone by a fresh inventory, then the
+  underlay table. If the removal cannot be proven (the link vanished on its own, a deletion
+  failed, the underlay install failed), the table is kept and the tunnel stays tracked as faulted.
+  New tunnels are then refused until `Disconnect` succeeds or the helper restarts and recovery is
+  done by hand.
+- `VerifyConfigured` re-reads the link, firewall and underlay; a failure faults the tunnel.
+
+Known gaps, to settle in Step 27B.2:
+
+- `Preflight` reports the active tunnel's own `egresslab_ul_*` table, so `CreateLab`, and a second
+  `ConnectStage`, return `RECOVERY_REQUIRED` while a tunnel is up.
+- `VerifyLab` and `DeleteLab` refuse a lab that holds `wg0`, so a connected lab must be
+  disconnected first.
+- A failed underlay install keeps the backend locked until restart even when nft refused the
+  script before changing anything.
+- If `ip link del` removes the link but reports an error (a timeout), or the inventory after it
+  fails, later `Disconnect` calls find no link and stay uncertain: the table is kept until the
+  operator recovers by hand.
+- Peers and routes are not read back, hostname endpoints are not supported, and nothing monitors
+  the tunnel continuously.
+
 ## Invariants the helper keeps
 
 - Before any opening operation, it reads back the firewall (`LabFirewall.Verify`). Drift blocks the
   operation until an explicit reconcile.
 - The underlay policy is installed before the tunnel link exists. It is removed only after the
-  link is gone (`VPNEgressLab.Disconnect`).
+  link is gone (`VPNEgressLab.Disconnect`); the managed tunnel backend also requires that it
+  deleted the link itself and that a fresh inventory confirms it.
 - Sticky IP: an active profile observed on a different IP is cut off, and the active lease is kept.
 - `network_ready` stays `false` until a real egress check passes for the exact profile.
 - Every request and its result is appended to an audit log (`0600`). The log never contains secrets.

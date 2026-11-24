@@ -1,0 +1,24 @@
+[
+  {
+    "ifindex": 8,
+    "ifname": "egwg0000abcd",
+    "flags": ["POINTOPOINT", "NOARP"],
+    "mtu": 1420,
+    "qdisc": "noop",
+    "operstate": "DOWN",
+    "linkmode": "DEFAULT",
+    "group": "default",
+    "txqlen": 1000,
+    "link_type": "none",
+    "promiscuity": 0,
+    "min_mtu": 0,
+    "max_mtu": 2147483552,
+    "linkinfo": { "info_kind": "wireguard" },
+    "inet6_addr_gen_mode": "eui64",
+    "num_tx_queues": 1,
+    "num_rx_queues": 1,
+    "gso_max_size": 65536,
+    "gso_max_segs": 65535,
+    "ifalias": "egresslab-managed:egresslab-lab-00000000000000aa:egwg0000abcd"
+  }
+]

@@ -20,6 +20,9 @@ type nftObject struct {
 	Table *struct {
 		Family string `json:"family"`
 		Name   string `json:"name"`
+		// Lab tables never set flags. "dormant" keeps the rules listed but stops enforcing them;
+		// nft 1.0.2 prints it as broken JSON, later versions as a value.
+		Flags json.RawMessage `json:"flags"`
 	} `json:"table"`
 	Chain *struct {
 		Family string `json:"family"`
@@ -78,12 +81,24 @@ func labRulesetFingerprint(data []byte) (string, error) {
 		case "metainfo":
 
 		case "table":
+			if obj.Table == nil {
+				return "", errors.New("missing nft table")
+			}
+
 			if obj.Table.Family != "inet" || obj.Table.Name != labNFTTable {
 				return "", fmt.Errorf("unexpected table %s %s in lab namespace", obj.Table.Family, obj.Table.Name)
+			}
+
+			if len(obj.Table.Flags) != 0 {
+				return "", fmt.Errorf("table %s has flags %s", obj.Table.Name, obj.Table.Flags)
 			}
 			tables++
 
 		case "chain":
+			if obj.Chain == nil {
+				return "", errors.New("missing nft chain")
+			}
+
 			c := obj.Chain
 			if c.Family != "inet" || c.Table != labNFTTable {
 				return "", fmt.Errorf("unexpected chain %s in table %s", c.Name, c.Table)
@@ -106,6 +121,10 @@ func labRulesetFingerprint(data []byte) (string, error) {
 			chains[c.Name] = true
 
 		case "rule":
+			if obj.Rule == nil {
+				return "", errors.New("missing nft rule")
+			}
+
 			r := obj.Rule
 			if r.Family != "inet" || r.Table != labNFTTable || !chains[r.Chain] {
 				return "", fmt.Errorf("unexpected rule in %s %s chain %s", r.Family, r.Table, r.Chain)

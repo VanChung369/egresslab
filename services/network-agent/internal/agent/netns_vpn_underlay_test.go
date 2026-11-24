@@ -169,6 +169,60 @@ func TestVerifyUnderlayRuleset(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+
+	// Implicit dependencies are accepted only when they restate udp over IPv4.
+	markMatch := `{"match": {"op": "==", "left": {"meta": {"key": "mark"}}`
+	withDependency := func(key, value string) []byte {
+		match := fmt.Sprintf(`{"match": {"op": "==", "left": {"meta": {"key": %q}}, "right": %q}}, `, key, value)
+		return []byte(strings.Replace(string(underlayListing(t, "198.51.100.7:51820", 0xabcd, "accept")), markMatch, match+markMatch, 1))
+	}
+
+	for _, dep := range [][3]string{
+		{"l4proto", "udp", "ok"}, {"nfproto", "ipv4", "ok"}, {"l4proto", "tcp", ""}, {"nfproto", "ipv6", ""},
+	} {
+		err := verifyUnderlayRuleset(withDependency(dep[0], dep[1]), want)
+		if (err == nil) != (dep[2] == "ok") {
+			t.Errorf("%s %s: %v", dep[0], dep[1], err)
+		}
+	}
+}
+
+func TestRuleMatchesIsStrict(t *testing.T) {
+	parse := func(src string) []any {
+		decoder := json.NewDecoder(strings.NewReader(src))
+		decoder.UseNumber()
+
+		var expr []any
+		if err := decoder.Decode(&expr); err != nil {
+			t.Fatal(err)
+		}
+
+		return expr
+	}
+
+	mark := `{"match": {"op": "==", "left": {"meta": {"key": "mark"}}, "right": 43981}}`
+
+	matches, verdict := ruleMatches(parse(`[` + mark + `, {"drop": null}]`))
+	if verdict != "drop" || len(matches) != 1 || matches["meta:mark"] != "43981" {
+		t.Fatalf("valid rule: %v %q", matches, verdict)
+	}
+
+	for name, src := range map[string]string{
+		"duplicate match":   `[` + mark + `, ` + mark + `, {"drop": null}]`,
+		"verdict not last":  `[{"accept": null}, ` + mark + `]`,
+		"two verdicts":      `[{"accept": null}, {"drop": null}]`,
+		"verdict with body": `[` + mark + `, {"accept": {"x": 1}}]`,
+		"no verdict":        `[` + mark + `]`,
+		"null value":        `[{"match": {"op": "==", "left": {"meta": {"key": "mark"}}, "right": null}}, {"drop": null}]`,
+		"missing value":     `[{"match": {"op": "==", "left": {"meta": {"key": "mark"}}}}, {"drop": null}]`,
+		"other operator":    `[{"match": {"op": "!=", "left": {"meta": {"key": "mark"}}, "right": 1}}, {"drop": null}]`,
+		"non-object match":  `[{"match": 1}, {"drop": null}]`,
+		"other statement":   `[{"counter": null}, {"drop": null}]`,
+	} {
+		if matches, verdict := ruleMatches(parse(src)); matches != nil || verdict != "" {
+			t.Errorf("%s: accepted as %v %q", name, matches, verdict)
+		}
+	}
 }
 
 func TestVerifyUnderlayChecksKernelAndFwmark(t *testing.T) {

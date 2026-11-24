@@ -154,7 +154,7 @@ func verifyUnderlayRuleset(data []byte, want underlayTunnel) error {
 		case raw["metainfo"] != nil:
 
 		case obj.Table != nil:
-			if obj.Table.Family != "inet" || obj.Table.Name != want.table {
+			if obj.Table.Family != "inet" || obj.Table.Name != want.table || len(obj.Table.Flags) != 0 {
 				return fmt.Errorf("unexpected table %s", obj.Table.Name)
 			}
 			tables++
@@ -194,7 +194,17 @@ func verifyUnderlayRuleset(data []byte, want underlayTunnel) error {
 	mark := strconv.FormatUint(uint64(want.mark), 10)
 
 	allow, verdict := ruleMatches(rules[0])
-	delete(allow, "meta:l4proto") // implicit dependencies nft may list for inet tables
+
+	// Implicit dependencies nft may list for inet tables; they may only restate udp over IPv4.
+	if value, exists := allow["meta:l4proto"]; exists && value != "udp" && value != "17" {
+		return errors.New("unexpected underlay transport protocol")
+	}
+
+	if value, exists := allow["meta:nfproto"]; exists && value != "ipv4" && value != "2" {
+		return errors.New("unexpected underlay address family")
+	}
+
+	delete(allow, "meta:l4proto")
 	delete(allow, "meta:nfproto")
 
 	if verdict != "accept" || len(allow) != 3 || allow["meta:mark"] != mark ||
@@ -211,12 +221,13 @@ func verifyUnderlayRuleset(data []byte, want underlayTunnel) error {
 	return nil
 }
 
-// ruleMatches flattens "==" matches of a rule into key -> value, plus its final verdict.
+// ruleMatches flattens the "==" matches of a rule into key -> value, plus its verdict, which must
+// be the last statement. Duplicate keys or anything else make the rule unreadable (nil, "").
 func ruleMatches(expr []any) (map[string]string, string) {
 	matches := map[string]string{}
 	verdict := ""
 
-	for _, element := range expr {
+	for i, element := range expr {
 		statement, ok := element.(map[string]any)
 		if !ok || len(statement) != 1 {
 			return nil, ""
@@ -225,11 +236,15 @@ func ruleMatches(expr []any) (map[string]string, string) {
 		for kind, body := range statement {
 			switch kind {
 			case "accept", "drop":
+				if i != len(expr)-1 || body != nil {
+					return nil, ""
+				}
+
 				verdict = kind
 
 			case "match":
-				m, _ := body.(map[string]any)
-				if m["op"] != "==" {
+				m, ok := body.(map[string]any)
+				if !ok || m["op"] != "==" {
 					return nil, ""
 				}
 
@@ -238,12 +253,25 @@ func ruleMatches(expr []any) (map[string]string, string) {
 					return nil, ""
 				}
 
-				matches[key] = fmt.Sprint(m["right"])
+				if _, duplicate := matches[key]; duplicate {
+					return nil, ""
+				}
+
+				value, exists := m["right"]
+				if !exists || value == nil {
+					return nil, ""
+				}
+
+				matches[key] = fmt.Sprint(value)
 
 			default:
 				return nil, ""
 			}
 		}
+	}
+
+	if verdict == "" {
+		return nil, ""
 	}
 
 	return matches, verdict
@@ -293,6 +321,11 @@ func (l *VPNEgressLab) VerifyUnderlay(ctx context.Context, name string) error {
 	l.manager.mu.Lock()
 	defer l.manager.mu.Unlock()
 
+	return l.verifyUnderlayLocked(ctx, name)
+}
+
+// The caller must hold manager.mu.
+func (l *VPNEgressLab) verifyUnderlayLocked(ctx context.Context, name string) error {
 	tunnel, ok := l.underlay[name]
 	if !ok {
 		return fmt.Errorf("namespace %s has no underlay policy", name)

@@ -334,4 +334,4 @@ Then add `-enable-vault` to the helper (with `-enable-lab-lifecycle` and the pub
 
 ## Next Milestone
 
-Run the Lima and macOS Keychain paths on a Mac, then move tunnel operations behind the helper: signed `ConnectTunnel` and `Disconnect` using the staged configs (Step 27B), then hostname endpoints and IP pinning (Step 27C).
+Run the Lima and macOS Keychain paths on a Mac, then move tunnel operations behind the helper: the managed tunnel backend exists (Step 27B.1, see `docs/PRIVILEGED-HELPER.md`); next come signed `ConnectTunnel` and `Disconnect` IPC with controller wiring (Step 27B.2), then hostname endpoints and IP pinning (Step 27C).

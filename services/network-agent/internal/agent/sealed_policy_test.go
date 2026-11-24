@@ -1,0 +1,166 @@
+package agent
+
+import (
+	"encoding/json"
+	"errors"
+	"net/netip"
+	"os"
+	"strings"
+	"testing"
+)
+
+func TestIntendedSealedPolicy(t *testing.T) {
+	if err := verifySealedPolicy(encodeRuleset(t, sealedRulesetFixture(t))); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIntendedSealedPolicyRejectsExtraAllowRule(t *testing.T) {
+	doc := withObject(t, sealedRulesetFixture(t), extraICMPRule)
+
+	if err := verifySealedPolicy(encodeRuleset(t, doc)); !errors.Is(err, ErrFirewallDrift) {
+		t.Fatalf("extra permit rule accepted: %v", err)
+	}
+}
+
+func TestIntendedSealedPolicyRejectsMissingRule(t *testing.T) {
+	doc := sealedRulesetFixture(t)
+
+	// Drop the last object before the forward chain: the "tcp dport 53 drop" rule.
+	items := objects(doc)
+	kept := append(append([]any{}, items[:len(items)-2]...), items[len(items)-1])
+
+	if err := verifySealedPolicy(encodeRuleset(t, map[string]any{"nftables": kept})); !errors.Is(err, ErrFirewallDrift) {
+		t.Fatalf("missing DNS drop accepted: %v", err)
+	}
+}
+
+func TestIntendedSealedPolicyRejectsNullObjects(t *testing.T) {
+	for _, input := range []string{
+		`{"nftables":[{"table":null}]}`,
+		`{"nftables":[{"chain":null}]}`,
+		`{"nftables":[{"rule":null}]}`,
+	} {
+		if err := verifySealedPolicy([]byte(input)); !errors.Is(err, ErrFirewallDrift) {
+			t.Fatalf("%s accepted: %v", input, err)
+		}
+	}
+}
+
+func TestDormantTablesRejected(t *testing.T) {
+	withTableFlags := func(flags any) []byte {
+		doc := sealedRulesetFixture(t)
+		for _, item := range objects(doc) {
+			if table, ok := item.(map[string]any)["table"].(map[string]any); ok {
+				table["flags"] = flags
+			}
+		}
+		return encodeRuleset(t, doc)
+	}
+
+	underlay := string(underlayListing(t, "198.51.100.7:51820", 0xabcd, "accept"))
+	want := underlayTunnel{
+		table:    "egresslab_ul_00000000000000aa",
+		mark:     0xabcd,
+		endpoint: netip.MustParseAddrPort("198.51.100.7:51820"),
+	}
+
+	for _, flags := range []string{`"dormant"`, `["dormant"]`} {
+		var value any
+		if err := json.Unmarshal([]byte(flags), &value); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := verifySealedPolicy(withTableFlags(value)); !errors.Is(err, ErrFirewallDrift) {
+			t.Errorf("lab table with flags %s accepted: %v", flags, err)
+		}
+
+		data := strings.Replace(underlay, `"handle": 7}`, `"handle": 7, "flags": `+flags+`}`, 1)
+		if err := verifyUnderlayRuleset([]byte(data), want); err == nil {
+			t.Errorf("underlay table with flags %s accepted", flags)
+		}
+	}
+
+	// What nft 1.0.2 really prints (exit status 0) for a dormant table.
+	broken := `{"nftables": [{"metainfo": {"version": "1.0.2", "release_name": "Lester Gooch", "json_schema_version": 1}}, ` +
+		`{"table": {"family": "inet", "name": "egresslab_lab", "handle": 1, "flags": ` + "\n"
+
+	if err := verifySealedPolicy([]byte(broken)); !errors.Is(err, ErrFirewallDrift) {
+		t.Errorf("nft 1.0.2 dormant listing accepted: %v", err)
+	}
+}
+
+// The ip-link-managed-*.json files are REAL captures (iproute2 5.15, kernel 6.6 on WSL2) of a
+// wireguard link with a managed alias: in the root namespace, moved into an anonymous namespace,
+// then renamed to wg0. They pin the JSON keys the inventory relies on.
+func TestLocateManagedTunnelRealCaptures(t *testing.T) {
+	load := func(name string) []managedLink {
+		data, err := os.ReadFile("testdata/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var links []managedLink
+		if err := json.Unmarshal(data, &links); err != nil {
+			t.Fatal(err)
+		}
+
+		return links
+	}
+
+	tunnel := &managedTunnel{
+		namespace: vpnTestNS,
+		rootName:  vpnTestLink,
+		alias:     managedTunnelAliasPrefix + vpnTestNS + ":" + vpnTestLink,
+	}
+	loopback := []managedLink{{Name: "lo", Index: 1, Type: "loopback"}}
+
+	for name, tt := range map[string]struct {
+		outside, inside []managedLink
+		want            managedLinkLocation
+	}{
+		"root namespace":   {load("ip-link-managed-root.json"), loopback, managedLinkLocation{"", vpnTestLink}},
+		"moved":            {nil, load("ip-link-managed-moved.json"), managedLinkLocation{vpnTestNS, vpnTestLink}},
+		"renamed into wg0": {nil, load("ip-link-managed-wg0.json"), managedLinkLocation{vpnTestNS, labWGInterface}},
+	} {
+		location, err := locateManagedTunnel(tt.outside, tt.inside, tunnel)
+		if err != nil || location == nil || *location != tt.want {
+			t.Errorf("%s: %+v %v", name, location, err)
+		}
+	}
+
+	other := *tunnel
+	other.alias = managedTunnelAliasPrefix + vpnTestNS + ":egwg00000001"
+
+	if _, err := locateManagedTunnel(nil, load("ip-link-managed-wg0.json"), &other); err == nil {
+		t.Error("wg0 with another tunnel's alias adopted")
+	}
+
+	if location, err := locateManagedTunnel(nil, loopback, tunnel); err != nil || location != nil {
+		t.Errorf("empty namespace: %+v %v", location, err)
+	}
+}
+
+// testdata/nft-underlay.json is a REAL capture (nft 1.0.2) of underlayRules applied in an
+// anonymous namespace, with mark 0xabcd and endpoint 198.51.100.7:51820.
+func TestVerifyUnderlayRulesetRealCapture(t *testing.T) {
+	data, err := os.ReadFile("testdata/nft-underlay.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := underlayTunnel{
+		table:    "egresslab_ul_00000000000000aa",
+		mark:     0xabcd,
+		endpoint: netip.MustParseAddrPort("198.51.100.7:51820"),
+	}
+
+	if err := verifyUnderlayRuleset(data, want); err != nil {
+		t.Fatal(err)
+	}
+
+	want.mark = 0xabce
+	if err := verifyUnderlayRuleset(data, want); err == nil {
+		t.Fatal("other mark accepted")
+	}
+}

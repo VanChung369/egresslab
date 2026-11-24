@@ -338,11 +338,30 @@ func (l *VPNEgressLab) Connect(ctx context.Context, name string, cfg *ImportedWi
 		return fmt.Errorf("rename tunnel link: %w", err)
 	}
 
+	return l.configureVPNLinkLocked(ctx, name, cfg, plan, mark, nil)
+}
+
+// configureVPNLinkLocked configures wg0 once it is inside the lab namespace. beforePeer, if set,
+// runs after the fwmark is set and before any peer exists. The caller must hold manager.mu.
+func (l *VPNEgressLab) configureVPNLinkLocked(
+	ctx context.Context,
+	name string,
+	cfg *ImportedWireGuardConfig,
+	plan vpnTunnelPlan,
+	mark uint32,
+	beforePeer func(context.Context) error,
+) error {
 	// The fwmark is set before any peer exists, so no encrypted packet ever leaves unmarked.
 	if _, err := l.runWG(ctx, name, cfg.privateKey,
 		"set", labWGInterface, "fwmark", fmt.Sprintf("0x%08x", mark), "private-key", "/dev/stdin",
 	); err != nil {
 		return fmt.Errorf("set tunnel fwmark and private key: %w", err)
+	}
+
+	if beforePeer != nil {
+		if err := beforePeer(ctx); err != nil {
+			return fmt.Errorf("pre-peer verification failed: %w", err)
+		}
 	}
 
 	peer := []string{
