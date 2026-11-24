@@ -48,7 +48,7 @@ func validLabListResponse(req Request, resp Response) bool {
 	for _, lab := range resp.Labs {
 		if !helperauth.ValidProfileID(lab.ProfileID) ||
 			!helperauth.ValidLabNamespace(lab.Namespace) ||
-			(lab.State != LabSealed && lab.State != LabFaulted) ||
+			(lab.State != LabSealed && lab.State != LabFaulted && lab.State != LabTunnelConfigured) ||
 			profiles[lab.ProfileID] ||
 			namespaces[lab.Namespace] {
 			return false

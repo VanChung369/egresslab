@@ -5,9 +5,10 @@
 // read-only operations: Ping, RecoverScan and HelperInfo. With -auth-public-key-file it also
 // answers the AuthorizeCheck dry-run, under a random helper ID (epoch) generated at every start.
 // With -enable-lab-lifecycle as well, it creates (signed), verifies and deletes sealed lab
-// namespaces; -enable-vault adds the managed WireGuard vault (StageInfo). The offline commands
-// vault-init, vault-stage and vault-revoke administer that vault. Tunnel and probe operations are
-// not implemented.
+// namespaces; -enable-vault adds the managed WireGuard vault (StageInfo), and -enable-tunnel the
+// signed ConnectTunnel and Disconnect of a vault stage in a sealed lab (one tunnel per helper). The
+// offline commands vault-init, vault-stage and vault-revoke administer the vault. Probe and proxy
+// operations are not implemented.
 //
 // In this step it runs as root under sudo; the production design keeps only CAP_NET_ADMIN.
 package main
@@ -46,20 +47,25 @@ func main() {
 	enableLifecycle := flag.Bool("enable-lab-lifecycle", false,
 		"enable signed sealed lab lifecycle operations (requires -auth-public-key-file)")
 	enableVault := flag.Bool("enable-vault", false, "enable the root-managed WireGuard vault (requires -enable-lab-lifecycle)")
+	enableTunnel := flag.Bool("enable-tunnel", false, "enable the managed WireGuard tunnel lifecycle (requires -enable-vault)")
 	flag.Parse()
 
 	if os.Geteuid() != 0 || *uid <= 0 || *gid <= 0 || flag.NArg() != 0 {
 		log.Fatal("usage: sudo egresslab-helper -uid <non-root UID> -gid <non-root GID> " +
-			"[-auth-public-key-file <path> [-enable-lab-lifecycle [-enable-vault]]]\n" +
+			"[-auth-public-key-file <path> [-enable-lab-lifecycle [-enable-vault [-enable-tunnel]]]]\n" +
 			"       sudo egresslab-helper vault-init | vault-stage PROFILE_ID | vault-revoke PROFILE_ID")
 	}
 
-	if err := run(*uid, *gid, *publicKeyFile, *enableLifecycle, *enableVault); err != nil {
+	if err := run(*uid, *gid, *publicKeyFile, *enableLifecycle, *enableVault, *enableTunnel); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(uid, gid int, publicKeyFile string, enableLifecycle, enableVault bool) error {
+func run(uid, gid int, publicKeyFile string, enableLifecycle, enableVault, enableTunnel bool) error {
+	if enableTunnel && !enableVault {
+		return errors.New("managed tunnel requires managed vault")
+	}
+
 	// Load the key before touching /run/egresslab, so a bad configuration changes nothing.
 	verifier, err := loadAuthVerifier(publicKeyFile)
 	if err != nil {
@@ -103,11 +109,24 @@ func run(uid, gid int, publicKeyFile string, enableLifecycle, enableVault bool) 
 		defer vault.Close()
 
 		readStage = vault.readStage
+
+		if enableTunnel {
+			tunnels, err := agent.NewManagedTunnelBackend(backend.SealedLabBackend, vault.WireGuardConfigVault)
+			if err != nil {
+				return fmt.Errorf("initialize managed tunnel: %w", err)
+			}
+
+			labs = helperipc.NewTunnelLifecycle(backend, tunnelBackend{tunnels})
+		}
 	}
 
 	runtimeID, err := runtimeIDFrom(machineIDPath)
 	if err != nil {
 		log.Printf("no runtime ID (%v); the controller will not trust this runtime", err)
+	}
+
+	if enableTunnel && runtimeID == "" {
+		return errors.New("managed tunnel requires a valid runtime identity")
 	}
 
 	listener, cleanup, err := prepareSocket(gid)
@@ -130,6 +149,9 @@ func run(uid, gid int, publicKeyFile string, enableLifecycle, enableVault bool) 
 
 	if labs != nil {
 		mode = "signed sealed lab lifecycle enabled; VPN operations disabled"
+		if enableTunnel {
+			mode = "signed sealed lab lifecycle and managed tunnel enabled; probe and proxy disabled"
+		}
 
 		if err := backend.Preflight(ctx); err != nil {
 			log.Printf("CreateLab is refused until this is resolved: %v", err)

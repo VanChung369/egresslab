@@ -43,6 +43,14 @@ func TestRunRejectsBadArguments(t *testing.T) {
 		{"verify-lab", "profile_0123456789abcdef"},
 		{"delete-lab", "profile_0123456789abcdef", "../default"},
 		{"connect-tunnel", "profile_0123456789abcdef"},
+		{"connect-tunnel", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef"},
+		{"connect-tunnel", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef", "wgstage_x"},
+		{"connect-tunnel", "profile_0123456789abcdef", "../default", "wgstage_0123456789abcdef0123456789abcdef"},
+		{"connect-tunnel", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef",
+			"wgstage_0123456789abcdef0123456789abcdef", "extra"},
+		{"disconnect", "profile_0123456789abcdef"},
+		{"disconnect", "profile_0123456789abcdef", "egresslab-lab-x"},
+		{"disconnect", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef", "extra"},
 		{"stage-info"},
 		{"stage-info", "profile_x"},
 		{"stage-info", "profile_0123456789abcdef", "extra"},
@@ -61,6 +69,12 @@ func TestRunRejectsBadArguments(t *testing.T) {
 	if err := run([]string{"create-lab", "profile_0123456789abcdef"}, strings.NewReader("{}{}"), &bytes.Buffer{}); err == nil ||
 		err.Error() != "trailing capability data" {
 		t.Fatalf("bad capability: %v", err)
+	}
+
+	connect := []string{"connect-tunnel", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef",
+		"wgstage_0123456789abcdef0123456789abcdef"}
+	if err := run(connect, strings.NewReader("{}{}"), &bytes.Buffer{}); err == nil || err.Error() != "trailing capability data" {
+		t.Fatalf("bad tunnel capability: %v", err)
 	}
 }
 

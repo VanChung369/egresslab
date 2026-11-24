@@ -79,6 +79,10 @@ func ValidLabNamespace(name string) bool {
 	return labPattern.MatchString(name)
 }
 
+func ValidStageID(id string) bool {
+	return stagePattern.MatchString(id)
+}
+
 func validateIntent(in Intent) error {
 	if !ValidProfileID(in.ProfileID) {
 		return ErrInvalidCapability
@@ -98,7 +102,7 @@ func validateIntent(in Intent) error {
 
 	switch in.Operation {
 	case OpConnectTunnel:
-		if !stagePattern.MatchString(in.StageID) || in.ProbeIPv4 != "" {
+		if !ValidStageID(in.StageID) || in.ProbeIPv4 != "" {
 			return ErrInvalidCapability
 		}
 

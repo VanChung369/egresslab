@@ -68,7 +68,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		return usageError()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 65*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 135*time.Second)
 	defer cancel()
 
 	var result helperipc.Response
@@ -93,6 +93,26 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		}
 
 		result, err = helperipc.CreateSealedLab(ctx, helperipc.SocketPath, args[1], capability)
+
+	case "connect-tunnel":
+		if len(args) != 4 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) ||
+			!helperauth.ValidStageID(args[3]) {
+			return usageError()
+		}
+
+		capability, readErr := readCapability(stdin)
+		if readErr != nil {
+			return readErr
+		}
+
+		result, err = helperipc.ConnectTunnel(ctx, helperipc.SocketPath, args[1], args[2], args[3], capability)
+
+	case "disconnect":
+		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
+			return usageError()
+		}
+
+		result, err = helperipc.DisconnectTunnel(ctx, helperipc.SocketPath, args[1], args[2])
 
 	case "stage-info":
 		if len(args) != 2 || !helperauth.ValidProfileID(args[1]) {
@@ -154,5 +174,7 @@ func usageError() error {
 		"       egresslab-helperctl create-lab PROFILE_ID < capability.json\n" +
 		"       egresslab-helperctl stage-info PROFILE_ID\n" +
 		"       egresslab-helperctl verify-lab PROFILE_ID NAMESPACE\n" +
-		"       egresslab-helperctl delete-lab PROFILE_ID NAMESPACE")
+		"       egresslab-helperctl delete-lab PROFILE_ID NAMESPACE\n" +
+		"       egresslab-helperctl connect-tunnel PROFILE_ID NAMESPACE STAGE_ID < capability.json\n" +
+		"       egresslab-helperctl disconnect PROFILE_ID NAMESPACE")
 }

@@ -439,3 +439,65 @@ func TestManagedTunnelConnectStageBinding(t *testing.T) {
 
 	requireUntouched(t, b, kernel)
 }
+
+func TestManagedTunnelCleanupStage(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("nothing tracked", func(t *testing.T) {
+		b, kernel := newManagedTunnelFixture(t)
+
+		if err := b.CleanupStage(ctx, vpnTestNS); err != nil {
+			t.Fatal(err)
+		}
+
+		requireUntouched(t, b, kernel)
+	})
+
+	t.Run("not owned", func(t *testing.T) {
+		b, _ := newManagedTunnelFixture(t)
+
+		if err := b.CleanupStage(ctx, "egresslab-lab-00000000000000bb"); !errors.Is(err, ErrManagedTunnelUncertain) {
+			t.Fatalf("unowned namespace: %v", err)
+		}
+	})
+
+	t.Run("tracked tunnel", func(t *testing.T) {
+		b, kernel := newManagedTunnelFixture(t)
+
+		if err := b.connectConfig(ctx, vpnTestNS, vpnTestConfig(t)); err != nil {
+			t.Fatal(err)
+		}
+
+		other := "egresslab-lab-00000000000000bb"
+		b.sealed.manager.owned[other] = struct{}{}
+
+		if err := b.CleanupStage(ctx, other); !errors.Is(err, ErrManagedTunnelUncertain) || b.active == nil {
+			t.Fatalf("cleanup of another namespace: %v", err)
+		}
+
+		kernel.failDelete = true
+
+		if err := b.CleanupStage(ctx, vpnTestNS); err == nil || b.active == nil || !b.active.faulted {
+			t.Fatalf("failed cleanup forgot the tunnel: %v", err)
+		}
+
+		kernel.failDelete = false
+
+		if err := b.CleanupStage(ctx, vpnTestNS); err != nil || b.active != nil || kernel.name != "" || kernel.tableRemovals != 1 {
+			t.Fatalf("cleanup incomplete: %v", err)
+		}
+	})
+
+	t.Run("after a clean rollback", func(t *testing.T) {
+		b, kernel := newManagedTunnelFixture(t)
+		kernel.failRename = true
+
+		if err := b.connectConfig(ctx, vpnTestNS, vpnTestConfig(t)); err == nil || b.active != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+
+		if err := b.CleanupStage(ctx, vpnTestNS); err != nil {
+			t.Fatal(err)
+		}
+	})
+}

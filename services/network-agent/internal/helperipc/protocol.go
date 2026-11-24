@@ -160,7 +160,7 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 
 	timeout := 5 * time.Second
 	if isLifecycleOp(req.Operation) {
-		timeout = 60 * time.Second
+		timeout = lifecycleResponseTimeout + 5*time.Second
 	}
 
 	deadline := time.Now().Add(timeout)

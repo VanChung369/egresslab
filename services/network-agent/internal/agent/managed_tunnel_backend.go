@@ -328,3 +328,29 @@ func (b *ManagedTunnelBackend) disconnectLocked(ctx context.Context, t *managedT
 
 	return nil
 }
+
+// CleanupStage removes whatever tunnel this backend tracks for namespace, after a failed connect,
+// before the namespace is deleted, or at shutdown. With nothing tracked it returns nil; it does
+// not prove the namespace clean, which stays the sealed lab backend's job. A failure keeps the
+// tunnel tracked.
+func (b *ManagedTunnelBackend) CleanupStage(ctx context.Context, namespace string) error {
+	b.sealed.manager.mu.Lock()
+	defer b.sealed.manager.mu.Unlock()
+
+	if _, owned := b.sealed.manager.owned[namespace]; !owned {
+		return fmt.Errorf("%w: namespace not owned", ErrManagedTunnelUncertain)
+	}
+
+	t := b.active
+	if t == nil {
+		return nil
+	}
+
+	if t.namespace != namespace {
+		return fmt.Errorf("%w: the tracked tunnel is in another namespace", ErrManagedTunnelUncertain)
+	}
+
+	t.faulted = true
+
+	return b.disconnectLocked(ctx, t)
+}

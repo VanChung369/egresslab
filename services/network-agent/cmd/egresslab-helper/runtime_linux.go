@@ -90,3 +90,17 @@ func classifyLabError(err error) error {
 
 	return fmt.Errorf("%w: %w", sentinel, err)
 }
+
+// tunnelBackend reports a stage the vault refused as helperipc.ErrStageNotFound. The vault refuses
+// before anything runs, so the lifecycle can leave the lab sealed. Other errors are not
+// classified: after a failed connect the lab is faulted whatever the cause.
+type tunnelBackend struct{ *agent.ManagedTunnelBackend }
+
+func (b tunnelBackend) ConnectStage(ctx context.Context, profileID, namespace, stageID string) error {
+	err := b.ManagedTunnelBackend.ConnectStage(ctx, profileID, namespace, stageID)
+	if errors.Is(err, agent.ErrWGStageNotFound) {
+		return fmt.Errorf("%w: %w", helperipc.ErrStageNotFound, err)
+	}
+
+	return err
+}

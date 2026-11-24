@@ -1,11 +1,12 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 27B.1 — managed tunnel kernel backend.** A controller CLI signs `CreateLab` and
+Status: **Step 27B.2 — signed WireGuard tunnel lifecycle.** A controller CLI signs `CreateLab` and
 drives the helper's sealed lab lifecycle in the Linux runtime, and the helper can hold encrypted
-WireGuard configs per profile. A kernel backend can configure a staged config as a tunnel in a
-sealed lab, but nothing calls it yet. Windows (WSL2) and Linux are verified end to end; macOS
-(Lima, Keychain) is implemented but has not been run. Tunnels and probes through the helper are
-still not implemented; the sections from "Typed operations only" on are partly design.
+WireGuard configs per profile. With `-enable-tunnel`, the helper configures a staged config as a
+tunnel in a sealed lab on a signed `ConnectTunnel`; the controller cannot sign one yet. Windows
+(WSL2) and Linux are verified end to end; macOS (Lima, Keychain) is implemented but has not been
+run. Probes and proxy traffic are still not implemented; the sections from "Typed operations
+only" on are partly design.
 
 ## Implemented
 
@@ -46,10 +47,11 @@ still not implemented; the sections from "Typed operations only" on are partly d
 - The client checks that the production socket is served by root (`SO_PEERCRED`) before it sends
   anything.
 - `egresslab-helperctl` covers every helper operation except `AuthorizeCheck`, including
-  `stage-info`. `create-lab` reads the capability from stdin only, never from argv. It refuses to
-  run as root.
+  `stage-info`, `connect-tunnel` and `disconnect`. `create-lab` and `connect-tunnel` read the
+  capability from stdin only, never from argv. It refuses to run as root.
 - The managed WireGuard vault and `StageInfo` (see "Managed WireGuard vault").
-- The managed tunnel kernel backend, not reachable through IPC (see "Managed tunnel backend").
+- Signed `ConnectTunnel` and `Disconnect` behind `-enable-tunnel` (see "Signed tunnel lifecycle"),
+  on the managed tunnel kernel backend (see "Managed tunnel backend").
 - Controller side (see "Controller and runtimes"):
   - an Ed25519 signer that can mint only `CreateLab`, checked against both golden vectors;
   - signing-key storage per platform;
@@ -74,11 +76,12 @@ still not implemented; the sections from "Typed operations only" on are partly d
   after sealing (only the managed tunnel backend also checks the intended policy); egress-IP
   leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
-- Using a staged config through the helper: signed `ConnectTunnel` and `Disconnect` IPC with
-  controller and runtime wiring (Step 27B.2), hostname endpoints and IP pinning (Step 27C).
+- Controller signing of `ConnectTunnel` and its runtime transport (Step 27B.3), then hostname
+  endpoints and IP pinning (Step 27C). The controller's lab transport still accepts only `sealed`
+  and `faulted` labs, so its `list-labs` and `verify-lab` fail while a tunnel is up.
 - A controller approval workflow for individual operations.
 - Live key rotation and automatic key distribution.
-- `ConnectTunnel`, `PermitProbe` and `RecoverClean` through IPC.
+- `PermitProbe` and `RecoverClean` through IPC.
 - Persistent lab ownership inside the helper. The controller keeps profile-to-runtime bindings;
   other processes that manage lab namespaces are not coordinated, only refused by the recovery
   gate.
@@ -93,10 +96,12 @@ still not implemented; the sections from "Typed operations only" on are partly d
 - `AuthorizeCheck` never runs `ip`, `wg`, `nft` or any other network mutation.
 - A successful dry-run consumes its nonce. It does not authorize a later operation with the same
   capability.
-- A request named `ConnectTunnel` or `PermitProbe` gets `operation not enabled`, even with a valid
-  capability and with the lab lifecycle enabled, and the capability stays unused.
+- A request named `PermitProbe` gets `operation not enabled`, even with a valid capability and
+  with every flag set, and the capability stays unused. `ConnectTunnel` and `Disconnect` get the
+  same answer unless the helper runs with `-enable-tunnel`.
 - A sealed lab is a namespace with a verified default-deny firewall and only `lo`. It is not a
-  connected VPN and not a verified egress IP.
+  connected VPN and not a verified egress IP. A `tunnel_configured` lab adds a configured
+  WireGuard link and nothing more: no checked handshake, no egress IP, no permitted traffic.
 - Every IPC response sets `network_ready=false`, and the client rejects a response that does not.
 - `HelperInfo` returns only public metadata. It is not authenticated to the client, so the
   controller compares the fingerprint with its own public key, and never starts trusting a key
@@ -120,14 +125,16 @@ still not implemented; the sections from "Typed operations only" on are partly d
   It treats the agent as healthy only when the agent reports `mode=read-only` and
   `network_ready=false`.
 - Privileged changes run from the `egresslab-*-lab` CLIs, which an operator starts with `sudo` in
-  a terminal on the VM. The only exception is the helper's sealed lab lifecycle, and only when
-  the helper was started with `-enable-lab-lifecycle` and a public key.
+  a terminal on the VM. The only exceptions are the helper's sealed lab lifecycle, when the helper
+  was started with `-enable-lab-lifecycle` and a public key, and its managed tunnel, with
+  `-enable-tunnel` as well.
 - The helper socket accepts only the configured agent UID. It answers `Ping`, `RecoverScan`,
   `HelperInfo`, the `AuthorizeCheck` dry-run and, with the lifecycle flag, `ListLabs`,
-  `CreateLab`, `VerifyLab` and `DeleteLab`, plus `StageInfo` with `-enable-vault`
-  (`TestPeerRejection`, `TestPeerIdentityAndReadOnlyOperations`,
-  `TestMutationWithValidCapabilityIsRefused`, `TestLabLifecycleIPCRefusals`, `TestListLabsRefusals`,
-  `TestStageInfoIPC`).
+  `CreateLab`, `VerifyLab` and `DeleteLab`, plus `StageInfo` with `-enable-vault` and
+  `ConnectTunnel` and `Disconnect` with `-enable-tunnel` (`TestPeerRejection`,
+  `TestPeerIdentityAndReadOnlyOperations`, `TestMutationWithValidCapabilityIsRefused`,
+  `TestLabLifecycleIPCRefusals`, `TestListLabsRefusals`, `TestStageInfoIPC`, `TestSignedTunnelIPC`,
+  `TestTunnelOperationsDisabledWithoutBackend`).
 
 Changing any of these needs the helper below first.
 
@@ -159,7 +166,7 @@ Changing any of these needs the helper below first.
 
 The helper exposes a fixed set of operations, never a command line:
 
-`CreateLab` (creates and seals), `ConnectTunnel{profile_id, stage_id}`, `PermitProbe{ipv4}`,
+`CreateLab` (creates and seals), `ConnectTunnel{profile_id, namespace, stage_id}`, `PermitProbe{ipv4}`,
 `VerifyLab`, `Disconnect`, `DeleteLab`, `RecoverScan`, `RecoverClean`.
 
 Every argument is validated with the existing patterns: `egresslab-lab-<16 hex>`,
@@ -243,6 +250,9 @@ rotation, automatic key distribution and production private-key management are n
 | no | yes | refuses to start |
 | yes | yes | signed sealed lab lifecycle |
 
+`-enable-vault` and `-enable-tunnel` build on the last row (see "Managed WireGuard vault" and
+"Signed tunnel lifecycle").
+
 `CreateLab` creates a namespace with a generated name and an ownership marker. It checks that only
 `lo` exists, installs the sealed firewall and reads it back. The capability is consumed just
 before the kernel work starts. Refusals for a duplicate profile, a full helper (8 labs) or a busy
@@ -286,17 +296,17 @@ Every refusal carries a `code`. Clients act on it; the message is for people. On
 | Code | Meaning |
 |---|---|
 | `AUTHORIZATION_DENIED` | capability refused; the check that failed is not disclosed |
-| `OPERATION_DISABLED` | not enabled on this helper (no key, no lifecycle flag, tunnel operations) |
+| `OPERATION_DISABLED` | not enabled on this helper (no key; no lifecycle, vault or tunnel flag; always for `PermitProbe`) |
 | `RUNTIME_UNAVAILABLE` | helper unreachable, shutting down, or not served by root |
 | `INVALID_REQUEST` | malformed frame, version, fields or arguments |
-| `LAB_BUSY` | another lab operation is running |
+| `LAB_BUSY` | another lab operation is running, or the managed tunnel slot is held (until `Disconnect` or `DeleteLab`; not worth retrying) |
 | `LAB_NOT_FOUND` / `LAB_EXISTS` / `LAB_LIMIT` | no lab for the profile / one already / 8 reached |
 | `OWNERSHIP_MISMATCH` | the profile's lab is another namespace |
 | `FIREWALL_DRIFT` / `LAB_FAULTED` | the lab no longer matches (firewall / topology, or already faulted); delete it |
 | `RECOVERY_REQUIRED` | leftover lab resources block creation |
 | `KERNEL_INCOMPATIBLE` | new namespaces would get extra devices |
-| `STATE_UNCERTAIN` | a create or rollback may have left kernel state behind; check recovery, restart the helper |
-| `STAGE_NOT_FOUND` | the profile has no WireGuard config in the managed vault |
+| `STATE_UNCERTAIN` | a create, tunnel connect or cleanup may have left kernel state behind; delete the lab, or check recovery and restart the helper |
+| `STAGE_NOT_FOUND` | the vault holds no such stage for the profile (`StageInfo`, `ConnectTunnel`); the lab is untouched |
 | `INTERNAL` | anything else; details are in the helper log |
 
 The controller adds `RUNTIME_UNTRUSTED`, and reports a `CreateLab` that failed without a definite
@@ -387,18 +397,64 @@ The helper can hold one encrypted WireGuard config per profile, inside the Linux
   `vpn_lab_compatible`, nothing else: no endpoint, key or config crosses the socket.
 - Internally, a config is lent only for the exact profile and current stage ID, under the vault's
   read lock, and only if it is compatible. A replaced or revoked stage cannot be selected.
-- `ConnectTunnel` and `PermitProbe` stay disabled, and `network_ready` stays false.
+- A stage is used only by `ConnectTunnel` on a helper with `-enable-tunnel` (see "Signed tunnel
+  lifecycle"). `PermitProbe` stays disabled and `network_ready` stays false.
 
 Nothing stops the legacy `egresslab-wg-vault-lab` from opening these paths without the lock: do
 not point it at the managed vault. The vault protects configs at rest, not against root in the
 runtime.
 
+## Signed tunnel lifecycle
+
+A helper started with `-enable-tunnel` (it requires `-enable-vault`, and so the lab lifecycle and
+a public key, plus a runtime ID) adds two operations on an existing lab:
+
+| Operation | Authorization | Result |
+|---|---|---|
+| `ConnectTunnel{profile_id, namespace, stage_id}` | a capability signed for exactly that profile, namespace and stage | `tunnel_configured` |
+| `Disconnect{profile_id, namespace}` | agent UID and lab ownership | `sealed`, or `faulted` after a failed attempt; the namespace stays |
+
+`VerifyLab` on a connected lab re-checks the tunnel (link, firewall, underlay) instead of the
+sealed topology, and `DeleteLab` removes the tunnel before the namespace. In helperctl:
+`connect-tunnel PROFILE_ID NAMESPACE STAGE_ID < capability.json` and
+`disconnect PROFILE_ID NAMESPACE`.
+
+- `tunnel_configured` means a configured WireGuard link, nothing more. `network_ready` stays false.
+- One tunnel, or one unfinished attempt, per helper. While it exists, `CreateLab` and every
+  `ConnectTunnel` get `LAB_BUSY`; it clears only with `Disconnect` or `DeleteLab`. (The recovery
+  gate would otherwise see the tunnel's own underlay table.)
+- Busy, faulted and uncertain-state refusals come before the capability is consumed. It is
+  consumed just before the kernel work.
+- A stage the vault does not hold (replaced, revoked, another profile's) gets `STAGE_NOT_FOUND`;
+  the vault refuses before anything runs, so the lab stays sealed. Read `stage-info` and sign
+  again.
+- Any other failed connect leaves the lab `faulted` and the slot held, even after a clean
+  rollback (`STATE_UNCERTAIN`). That includes a stage with `vpn_lab_compatible=false` (a hostname
+  endpoint, for example), so check `stage-info` before signing. `Disconnect` then releases the tunnel and answers `faulted`; only
+  `DeleteLab` clears the lab.
+- A failed `VerifyLab` faults the lab and removes the tunnel at once.
+- When removing a tunnel fails (on `Disconnect`, `DeleteLab`, a failed verify or shutdown), the
+  lab, its namespace and the slot stay; nothing is deleted around a tunnel whose removal is
+  unproven.
+- Normal shutdown deletes every lab the way `DeleteLab` does, tunnel first. After a crash with a
+  tunnel up, the namespace, its underlay table and perhaps the link remain; recovery never removes
+  underlay tables, so they are cleaned by hand.
+- An operation gets 80 s, plus up to 40 s for a tunnel rollback; the helper answers within 125 s
+  and the client waits 130 s.
+
+Tested on WSL2 (Ubuntu 22.04, kernel 6.6) with a synthetic config whose endpoint is a
+documentation address, so no handshake: connect, verify, list, the busy refusals, disconnect,
+replay, a stale stage, a failed verify (an extra rule in the lab firewall), reconnect, and
+`SIGTERM` with the tunnel up, which left no namespace, table or link. A failed connect, a failed
+cleanup and a crash ran against fakes only. Not yet run with a real VPN provider.
+
 ## Managed tunnel backend
 
 `agent.ManagedTunnelBackend` (Step 27B.1) brings a staged config up as `wg0` in a sealed lab. It
-shares the sealed lab backend's namespace manager and firewall, and holds at most one tunnel.
-Nothing calls it yet: signed `ConnectTunnel`/`Disconnect` dispatch comes in Step 27B.2. It checks
-no capability itself, so it must never be wired to the HTTP agent.
+shares the sealed lab backend's namespace manager and firewall, and holds at most one tunnel. The
+helper calls it only from the signed tunnel lifecycle above (`ConnectStage`, `VerifyConfigured`,
+and `CleanupStage`, which removes whatever it tracks for a namespace). It checks no capability
+itself, so it must never be wired to the HTTP agent.
 
 `ConnectStage(profile, namespace, stage)` proceeds only when each check passes, in this order:
 
@@ -435,14 +491,13 @@ What the backend guarantees:
   done by hand.
 - `VerifyConfigured` re-reads the link, firewall and underlay; a failure faults the tunnel.
 
-Known gaps, to settle in Step 27B.2:
+Known gaps:
 
-- `Preflight` reports the active tunnel's own `egresslab_ul_*` table, so `CreateLab`, and a second
-  `ConnectStage`, return `RECOVERY_REQUIRED` while a tunnel is up.
-- `VerifyLab` and `DeleteLab` refuse a lab that holds `wg0`, so a connected lab must be
-  disconnected first.
-- A failed underlay install keeps the backend locked until restart even when nft refused the
-  script before changing anything.
+- One tunnel per helper (see "Signed tunnel lifecycle"); more need a tunnel registry that the
+  recovery gate understands.
+- A failed underlay install leaves the tunnel uncertain even when nft refused the script before
+  changing anything: the lab cannot be deleted, `CreateLab` stays `LAB_BUSY` for the rest of the
+  process, and shutdown leaves the namespace (and perhaps the table) for manual recovery.
 - If `ip link del` removes the link but reports an error (a timeout), or the inventory after it
   fails, later `Disconnect` calls find no link and stay uncertain: the table is kept until the
   operator recovers by hand.

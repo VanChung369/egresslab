@@ -20,9 +20,12 @@ const (
 
 	maxManagedLabs = 8
 
-	lifecycleTimeout         = 40 * time.Second
+	// A tunnel connect may need its whole operation time plus its own 40 s rollback, so the
+	// response deadline exceeds lifecycleTimeout + tunnelCleanupTimeout.
+	lifecycleTimeout         = 80 * time.Second
 	lifecycleCleanupTimeout  = 12 * time.Second
-	lifecycleResponseTimeout = 55 * time.Second // > lifecycleTimeout + lifecycleCleanupTimeout
+	tunnelCleanupTimeout     = 40 * time.Second
+	lifecycleResponseTimeout = 125 * time.Second
 )
 
 var (
@@ -56,6 +59,8 @@ func labCode(err error) string {
 		return CodeLabLimit
 	case errors.Is(err, errLabInvalid):
 		return CodeInvalidRequest
+	case errors.Is(err, ErrStageNotFound):
+		return CodeStageNotFound
 	case errors.Is(err, errLabUnavailable):
 		return CodeRuntimeUnavailable
 	case errors.Is(err, ErrLabKernelIncompatible):
@@ -75,8 +80,9 @@ func labCode(err error) string {
 
 var labMessages = map[string]string{
 	CodeAuthorizationDenied: "authorization denied",
-	CodeLabBusy:             "another lab operation is in progress",
+	CodeLabBusy:             "another lab operation is in progress, or a managed tunnel holds the only tunnel slot",
 	CodeLabNotFound:         "no lab for this profile",
+	CodeStageNotFound:       "WireGuard stage not found; read stage-info and sign again",
 	CodeOwnershipMismatch:   "lab ownership mismatch",
 	CodeLabExists:           "profile already owns a lab",
 	CodeLabLimit:            "lab limit reached",
@@ -101,6 +107,7 @@ type LabBackend interface {
 }
 
 // LabInfo state "sealed" means namespace plus verified firewall only: no tunnel, no egress.
+// "tunnel_configured" adds a configured WireGuard link, with no handshake or egress checked.
 type LabInfo struct {
 	ProfileID string `json:"profile_id"`
 	Namespace string `json:"namespace"`
@@ -117,6 +124,9 @@ type LabLifecycle struct {
 
 	blockCreation bool // kernel state uncertain; cleared only by a helper restart
 	closed        bool
+
+	tunnels       TunnelBackend // nil unless the managed tunnel is enabled
+	tunnelProfile string        // owner of the one tunnel or unfinished attempt
 }
 
 func NewLabLifecycle(backend LabBackend) *LabLifecycle {
@@ -125,7 +135,7 @@ func NewLabLifecycle(backend LabBackend) *LabLifecycle {
 
 func isLifecycleOp(op string) bool {
 	switch op {
-	case helperauth.OpCreateLab, OpVerifyLab, OpDeleteLab:
+	case helperauth.OpCreateLab, OpVerifyLab, OpDeleteLab, helperauth.OpConnectTunnel, OpDisconnect:
 		return true
 	default:
 		return false
@@ -136,16 +146,17 @@ func validLifecycleIntent(op string, in *helperauth.Intent) bool {
 	if in == nil ||
 		in.Operation != op ||
 		!helperauth.ValidProfileID(in.ProfileID) ||
-		in.StageID != "" ||
 		in.ProbeIPv4 != "" {
 		return false
 	}
 
 	switch op {
 	case helperauth.OpCreateLab:
-		return in.Namespace == ""
-	case OpVerifyLab, OpDeleteLab:
-		return helperauth.ValidLabNamespace(in.Namespace)
+		return in.Namespace == "" && in.StageID == ""
+	case helperauth.OpConnectTunnel:
+		return helperauth.ValidLabNamespace(in.Namespace) && helperauth.ValidStageID(in.StageID)
+	case OpVerifyLab, OpDeleteLab, OpDisconnect:
+		return helperauth.ValidLabNamespace(in.Namespace) && in.StageID == ""
 	default:
 		return false
 	}
@@ -171,28 +182,44 @@ func (l *LabLifecycle) execute(ctx context.Context, req Request, v *helperauth.V
 
 	intent := *req.Intent
 
-	switch req.Operation {
-	case helperauth.OpCreateLab:
+	if req.Operation == helperauth.OpCreateLab {
+		// The recovery gate would see the tunnel's own underlay table; until tunnels have their
+		// own registry, no lab is created while one exists.
+		if l.tunnelProfile != "" {
+			return LabInfo{}, errTunnelSlotBusy
+		}
+
 		return l.createLocked(ctx, intent, req.Capability, v)
+	}
 
-	case OpVerifyLab, OpDeleteLab:
-		if req.Capability != nil {
-			return LabInfo{}, errLabAuthorization
+	if req.Operation != helperauth.OpConnectTunnel && req.Capability != nil {
+		return LabInfo{}, errLabAuthorization
+	}
+
+	lab, exists := l.labs[intent.ProfileID]
+	if !exists {
+		return LabInfo{}, errLabNotFound
+	}
+
+	if lab.Namespace != intent.Namespace {
+		return LabInfo{}, errLabOwnership
+	}
+
+	switch req.Operation {
+	case helperauth.OpConnectTunnel:
+		return l.connectTunnelLocked(ctx, lab, intent, req.Capability, v)
+
+	case OpVerifyLab:
+		return l.verifyLocked(ctx, lab)
+
+	case OpDisconnect:
+		if l.tunnels == nil {
+			return LabInfo{}, errLabUnavailable
 		}
 
-		lab, exists := l.labs[intent.ProfileID]
-		if !exists {
-			return LabInfo{}, errLabNotFound
-		}
+		return l.disconnectTunnelLocked(ctx, lab)
 
-		if lab.Namespace != intent.Namespace {
-			return LabInfo{}, errLabOwnership
-		}
-
-		if req.Operation == OpVerifyLab {
-			return l.verifyLocked(ctx, lab)
-		}
-
+	case OpDeleteLab:
 		return l.deleteLocked(ctx, lab)
 
 	default:
@@ -274,6 +301,10 @@ func (l *LabLifecycle) createLocked(
 
 // A faulted lab is never restored; only DeleteLab clears it.
 func (l *LabLifecycle) verifyLocked(ctx context.Context, lab LabInfo) (LabInfo, error) {
+	if lab.State == LabTunnelConfigured {
+		return l.verifyTunnelLocked(ctx, lab)
+	}
+
 	if lab.State != LabSealed {
 		return LabInfo{}, errLabFaulted
 	}
@@ -288,7 +319,12 @@ func (l *LabLifecycle) verifyLocked(ctx context.Context, lab LabInfo) (LabInfo, 
 	return lab, nil
 }
 
+// The tunnel goes first: a namespace is deleted only once the tunnel backend has released it.
 func (l *LabLifecycle) deleteLocked(ctx context.Context, lab LabInfo) (LabInfo, error) {
+	if err := l.clearTunnelLocked(ctx, lab); err != nil {
+		return LabInfo{}, err
+	}
+
 	if err := l.backend.Delete(ctx, lab.Namespace); err != nil {
 		lab.State = LabFaulted
 		l.labs[lab.ProfileID] = lab
@@ -302,7 +338,8 @@ func (l *LabLifecycle) deleteLocked(ctx context.Context, lab LabInfo) (LabInfo, 
 	return lab, nil
 }
 
-// Close must run after the server has stopped. Labs that cannot be deleted stay for recovery.
+// Close must run after the server has stopped. It deletes each lab the same way DeleteLab does,
+// tunnel first; labs that cannot be deleted stay for recovery. It can be called again.
 func (l *LabLifecycle) Close() error {
 	if l == nil {
 		return nil
@@ -315,17 +352,14 @@ func (l *LabLifecycle) Close() error {
 
 	var errs []error
 
-	for profileID, lab := range l.labs {
-		ctx, cancel := context.WithTimeout(context.Background(), lifecycleCleanupTimeout)
-		err := l.backend.Delete(ctx, lab.Namespace)
+	for _, lab := range l.labs {
+		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
+		_, err := l.deleteLocked(ctx, lab)
 		cancel()
 
 		if err != nil {
 			errs = append(errs, fmt.Errorf("cleanup %s: %w", lab.Namespace, err))
-			continue
 		}
-
-		delete(l.labs, profileID)
 	}
 
 	return errors.Join(errs...)
@@ -347,9 +381,16 @@ func validLabResponse(req Request, resp Response) bool {
 		return false
 	}
 
-	if req.Operation == OpDeleteLab {
+	switch req.Operation {
+	case OpDeleteLab:
 		return resp.Lab.State == LabDeleted
+	case helperauth.OpConnectTunnel:
+		return resp.Lab.State == LabTunnelConfigured
+	case OpVerifyLab:
+		return resp.Lab.State == LabSealed || resp.Lab.State == LabTunnelConfigured
+	case OpDisconnect:
+		return resp.Lab.State == LabSealed || resp.Lab.State == LabFaulted
+	default:
+		return resp.Lab.State == LabSealed
 	}
-
-	return resp.Lab.State == LabSealed
 }

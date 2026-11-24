@@ -294,8 +294,8 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 		resp.OK = true
 		resp.Labs = items
 
-	case helperauth.OpCreateLab, OpVerifyLab, OpDeleteLab:
-		if labs == nil {
+	case helperauth.OpCreateLab, OpVerifyLab, OpDeleteLab, helperauth.OpConnectTunnel, OpDisconnect:
+		if labs == nil || (isTunnelOp(req.Operation) && labs.tunnels == nil) {
 			return refuse(CodeOperationDisabled, "operation not enabled")
 		}
 
@@ -322,7 +322,7 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 		resp.Lab = &lab
 
 	default:
-		// Network mutations stay disabled, with or without a valid capability.
+		// PermitProbe and unknown operations stay disabled, with or without a valid capability.
 		return refuse(CodeOperationDisabled, "operation not enabled")
 	}
 

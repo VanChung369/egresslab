@@ -206,7 +206,7 @@ Privileged networking exists as **lab CLIs** that you run by hand with `sudo` on
 | `egresslab-vpn-lab -file vpn.conf` | Real VPN egress through a sealed namespace (details below) |
 | `egresslab-wg-inspect`, `egresslab-wg-vault-lab` | Config import summary; in-memory or opt-in encrypted staging (never against the helper's managed vault) |
 | `egresslab-lab-recover [-delete]` | Report (default) leftovers of a crashed session; `-delete` removes only orphan namespaces holding nothing but `lo`/lab veth (never one with WireGuard) and stale markers. Underlay tables are never removed automatically |
-| `egresslab-helper -uid <UID> -gid <GID>`, `egresslab-helperctl ping\|recover-scan\|helper-info\|list-labs\|stage-info\|create-lab\|verify-lab\|delete-lab` | Helper IPC: Unix socket with `SO_PEERCRED`, read-only `Ping`/`RecoverScan`/`HelperInfo`, optional `AuthorizeCheck` dry-run, sealed lab lifecycle and managed WireGuard vault (details below) |
+| `egresslab-helper -uid <UID> -gid <GID>`, `egresslab-helperctl ping\|recover-scan\|helper-info\|list-labs\|stage-info\|create-lab\|verify-lab\|delete-lab\|connect-tunnel\|disconnect` | Helper IPC: Unix socket with `SO_PEERCRED`, read-only `Ping`/`RecoverScan`/`HelperInfo`, optional `AuthorizeCheck` dry-run, sealed lab lifecycle, managed WireGuard vault and signed tunnel lifecycle (details below) |
 
 `egresslab-vpn-lab` runs these steps:
 
@@ -323,6 +323,10 @@ sudo /usr/local/bin/egresslab-helper vault-stage <profile ID>   # prints the sta
 
 Then add `-enable-vault` to the helper (with `-enable-lab-lifecycle` and the public key) and read the stage with `egresslab-helperctl stage-info <profile ID>`. `vault-stage`, `vault-revoke` and `vault-init` are refused while the helper runs. Your original `vpn.conf` is not touched.
 
+### Managed tunnel (Step 27B.2)
+
+Add `-enable-tunnel` as well (it needs `-enable-vault`). On a sealed lab, `egresslab-helperctl connect-tunnel <profile ID> <namespace> <stage ID> < capability.json` brings the staged config up as `wg0` (`tunnel_configured`: configured only, no handshake or egress checked, no traffic permitted), and `egresslab-helperctl disconnect <profile ID> <namespace>` removes it again. The controller cannot sign `ConnectTunnel` yet (Step 27B.3). One tunnel per helper: while it exists, `create-lab` gets `LAB_BUSY`. Stop the helper normally (`Ctrl+C`, `SIGTERM`) so it removes the tunnel before the namespace; after a crash, the underlay table must be removed by hand.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
@@ -334,4 +338,4 @@ Then add `-enable-vault` to the helper (with `-enable-lab-lifecycle` and the pub
 
 ## Next Milestone
 
-Run the Lima and macOS Keychain paths on a Mac, then move tunnel operations behind the helper: the managed tunnel backend exists (Step 27B.1, see `docs/PRIVILEGED-HELPER.md`); next come signed `ConnectTunnel` and `Disconnect` IPC with controller wiring (Step 27B.2), then hostname endpoints and IP pinning (Step 27C).
+Run the Lima and macOS Keychain paths on a Mac, then move tunnel operations behind the helper: the helper's signed tunnel lifecycle exists (Step 27B.2, see `docs/PRIVILEGED-HELPER.md`); next come controller signing of `ConnectTunnel` and a real VPN smoke test (Step 27B.3), then hostname endpoints and IP pinning (Step 27C).
