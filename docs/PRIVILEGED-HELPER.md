@@ -1,7 +1,7 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 23 — signed authorization dry-run implemented.** Network changes through the
-helper are still not implemented; the sections from "Typed operations only" on are partly design.
+Status: **Step 24 — restart-safe helper authorization.** Network changes through the helper are
+still not implemented; the sections from "Typed operations only" on are partly design.
 
 ## Implemented
 
@@ -15,25 +15,33 @@ helper are still not implemented; the sections from "Typed operations only" on a
   the stage for `ConnectTunnel` and the IPv4 address for `PermitProbe`.
 - Short-lived capabilities: 30 seconds at most.
 - Cryptographically random 128-bit nonces.
-- A process-local replay cache with atomic nonce consumption, capped at 4096 live nonces.
+- A random 128-bit helper epoch (the helper ID), generated at every helper start. The operator
+  cannot set or reuse one.
+- After a restart, capabilities minted for the earlier process are refused, consumed or not.
+- Replay protection scoped to the epoch: a process-local replay cache with atomic nonce
+  consumption, capped at 4096 live nonces.
+- An observed wall-clock rollback permanently disables authorization for the current helper
+  process.
+- Public-key SHA-256 fingerprints.
+- `HelperInfo`, a read-only IPC operation that returns the helper ID and the key fingerprint.
 - `AuthorizeCheck`, a dry-run IPC operation.
-- Optional root-owned public-key loading in the helper (`-auth-public-key-file`, `-helper-id`).
-- Unit tests for signatures, expiry, binding, concurrency, replay, the signing-message golden
-  vector and the key loader.
+- Optional root-owned public-key loading in the helper (`-auth-public-key-file`).
+- Operator-managed, offline public-key replacement (see "Key replacement").
+- Unit tests for signatures, expiry, binding, concurrency, replay, epochs, clock rollback, the
+  signing-message golden vector, `HelperInfo` validation and the key loader.
 
 ## Not implemented
 
-- Production controller signing-key storage and lifecycle. The controller is a separate Go module
-  and cannot import `internal/helperauth`; it needs its own implementation of the format below,
-  checked against `TestSigningMessageGolden`.
+- Controller signing-key storage and trust provisioning (pinning the helper's key fingerprint).
+  The controller is a separate Go module and cannot import `internal/helperauth`; it needs its
+  own implementation of the format below, checked against `TestSigningMessageGolden`.
 - A controller approval workflow for individual operations.
-- Restart-safe replay protection and helper epoch rotation. The replay cache lives in memory, so
-  after a helper restart an unexpired capability that was already used is accepted again.
+- Live key rotation and automatic key distribution.
 - Network-changing operations through IPC (`CreateLab`, `ConnectTunnel`, `PermitProbe`,
   `RecoverClean`, ...).
 - Per-operation kernel and policy authorization.
 - A `CAP_NET_ADMIN`-only helper runtime and systemd hardening.
-- A persistent audit log and signing-key rotation.
+- A persistent audit log.
 - Production route readiness and proxy activation.
 - The agent does not call the helper yet.
 
@@ -45,6 +53,9 @@ helper are still not implemented; the sections from "Typed operations only" on a
 - A request named `ConnectTunnel` or `PermitProbe` gets `operation not enabled`, even with a valid
   capability, and the capability stays unused.
 - Every IPC response sets `network_ready=false`, and the client rejects a response that does not.
+- `HelperInfo` returns only public metadata. It is not authenticated to the client, so the
+  controller must compare the fingerprint with the key it pinned, and must never start trusting a
+  key because the helper reports it.
 - A valid signature does not prove IP uniqueness, firewall integrity or route readiness. Those
   must still be verified when an operation runs.
 
@@ -62,9 +73,9 @@ helper are still not implemented; the sections from "Typed operations only" on a
   `network_ready=false`.
 - Privileged changes run only from the `egresslab-*-lab` CLIs. An operator starts those with `sudo`
   in a terminal on the VM.
-- The helper socket accepts only the configured agent UID. It answers only `Ping`, `RecoverScan`
-  and the `AuthorizeCheck` dry-run (`TestPeerRejection`, `TestPeerIdentityAndReadOnlyOperations`,
-  `TestMutationWithValidCapabilityIsRefused`).
+- The helper socket accepts only the configured agent UID. It answers only `Ping`, `RecoverScan`,
+  `HelperInfo` and the `AuthorizeCheck` dry-run (`TestPeerRejection`,
+  `TestPeerIdentityAndReadOnlyOperations`, `TestMutationWithValidCapabilityIsRefused`).
 
 Changing any of these needs the helper below first.
 
@@ -129,17 +140,43 @@ the format.
   directory, neither writable by group or others. It is provisioned out of band.
 - The request carries the intent separately. The helper accepts the capability only when the
   signed intent equals it exactly and `helper_id` matches its own.
-- The helper keeps a replay cache of nonces until `not_after`. A capability is single-use.
-  Checks that fail before the replay check leave the nonce unused.
+- `helper_id` is a random epoch that the helper generates at every start and logs. It cannot be
+  configured. The controller reads the current one with `HelperInfo` (through the agent) before
+  minting, so a restart invalidates every capability minted for the previous process.
+- `HelperInfo` also returns `public_key_sha256`: the lowercase hex SHA-256 of the raw 32-byte
+  Ed25519 public key (not of the hex text in the key file).
+- The helper keeps a replay cache of nonces until `not_after`, for the current epoch. A
+  capability is single-use. Checks that fail before the replay check leave the nonce unused.
 - The helper's answer is only `authorization denied`. It does not say which check failed.
 - Validity is checked to the second (`issued_at <= now < not_after`) with no clock-skew allowance.
   The controller runs on Windows and the helper in WSL, so their clocks must agree to well under a
   second, or tolerance must be added before the controller mints.
+- Clock rollback: if the wall clock reads an earlier second than at a previous signature-valid
+  check, authorization stays disabled until the helper restarts. Nonces are pruned only at times
+  the helper has recorded, so a pruned nonce can never be accepted again. The guard sees only
+  times it observed: an unused capability can still look valid again if the clock steps back
+  with no check in between.
+- The clock fault is silent. The client gets `authorization denied`, `HelperInfo` still reports
+  `authorization_configured: true`, and nothing is logged. On WSL, a backward time correction that
+  crosses a second boundary between two checks triggers it; restart the helper.
 - The controller mints a capability only after the desktop user confirms the action, and only
   when the profile passes its invariants (unique IP, kill-switch). (Not implemented.)
 
 Operations that only close or remove traffic (`Disconnect`, `DeleteLab`) need just the peer UID
 check. This keeps cleanup possible even when the controller is down.
+
+### Key replacement
+
+Rotation is offline and operator-managed:
+
+1. Stop the helper.
+2. Provision the new trusted public key file (root-owned, as above).
+3. Start the helper. It generates a new epoch, and `HelperInfo` reports the new fingerprint.
+4. The controller checks the new fingerprint against its own trust record, then mints new
+   capabilities.
+
+The controller must not trust a new key only because the helper reports a new fingerprint. Live
+rotation, automatic key distribution and production private-key management are not implemented.
 
 ## Invariants the helper keeps
 
@@ -155,4 +192,5 @@ check. This keeps cleanup possible even when the controller is down.
 
 - Remote (non-loopback) controllers. Supporting them needs mutual authentication between the
   controller and the agent.
-- Key rotation for the controller signing key and for the vault key.
+- Live rotation of the controller signing key (only offline replacement exists, see "Key
+  replacement"), and rotation of the vault key.

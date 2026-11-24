@@ -140,12 +140,18 @@ func TestCapabilitySignatureTimeAndIdentity(t *testing.T) {
 	v.now = func() time.Time { return now.Add(-time.Second) }
 	requireInvalid(t, v.VerifyAndConsume(token, connectIntent()), "not yet valid")
 
-	v.now = func() time.Time { return now.Add(MaxTTL) }
-	requireInvalid(t, v.VerifyAndConsume(token, connectIntent()), "expired")
-
+	// Time only moves forward here: a step back would trip the rollback guard (epoch_test.go).
 	v.now = func() time.Time { return now.Add(MaxTTL - time.Second) }
 	if err := v.VerifyAndConsume(token, connectIntent()); err != nil {
 		t.Fatalf("last valid second: %v", err)
+	}
+
+	// The expiry check runs before the replay check, so this is an expiry refusal.
+	v.now = func() time.Time { return now.Add(MaxTTL) }
+	err = v.VerifyAndConsume(token, connectIntent())
+	requireInvalid(t, err, "expired")
+	if errors.Is(err, ErrAuthorizationClockUnsafe) {
+		t.Fatalf("expired: got %v, want a plain expiry refusal", err)
 	}
 
 	tooLong := token.Claims

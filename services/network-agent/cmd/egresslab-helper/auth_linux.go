@@ -19,21 +19,18 @@ import (
 const maxPublicKeyFileBytes = 128
 
 // loadAuthVerifier loads the controller's Ed25519 public key (64 hex characters) from a
-// root-owned file. The helper never loads the controller's private key. Both options are
-// required together; with neither, authorization stays disabled.
-func loadAuthVerifier(path, helperID string) (*helperauth.Verifier, error) {
-	return loadAuthVerifierOwnedBy(path, helperID, 0)
+// root-owned file and pairs it with a fresh random helper ID (epoch). The helper never loads the
+// controller's private key, and the operator cannot choose or reuse a helper ID. With no path,
+// authorization stays disabled.
+func loadAuthVerifier(path string) (*helperauth.Verifier, error) {
+	return loadAuthVerifierOwnedBy(path, 0)
 }
 
 // loadAuthVerifierOwnedBy is loadAuthVerifier with the required owner UID as a parameter, so the
 // accept path can be tested without root.
-func loadAuthVerifierOwnedBy(path, helperID string, owner uint32) (*helperauth.Verifier, error) {
-	if path == "" && helperID == "" {
+func loadAuthVerifierOwnedBy(path string, owner uint32) (*helperauth.Verifier, error) {
+	if path == "" {
 		return nil, nil
-	}
-
-	if path == "" || helperID == "" {
-		return nil, errors.New("-auth-public-key-file and -helper-id must be given together")
 	}
 
 	// The directory must not let anyone else swap the file.
@@ -91,12 +88,13 @@ func loadAuthVerifierOwnedBy(path, helperID string, owner uint32) (*helperauth.V
 		return nil, errors.New("invalid authorization public key encoding")
 	}
 
-	verifier, err := helperauth.NewVerifier(ed25519.PublicKey(raw), helperID)
+	// A new epoch at every start: capabilities minted for an earlier process are refused.
+	helperID, err := helperauth.NewHelperID()
 	if err != nil {
-		return nil, errors.New("-helper-id must be helper_<32 lowercase hex>")
+		return nil, err
 	}
 
-	return verifier, nil
+	return helperauth.NewVerifier(ed25519.PublicKey(raw), helperID)
 }
 
 func checkPublicFile(info os.FileInfo, owner uint32) error {

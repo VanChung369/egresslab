@@ -5,14 +5,13 @@ package main
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-const testHelperID = "helper_0123456789abcdef0123456789abcdef"
 
 // keyDir returns a directory owned by the current user and not writable by others.
 func keyDir(t *testing.T) string {
@@ -52,34 +51,64 @@ func publicHex(t *testing.T) string {
 	return hex.EncodeToString(public)
 }
 
-func TestLoadAuthVerifierFlags(t *testing.T) {
-	if v, err := loadAuthVerifier("", ""); v != nil || err != nil {
-		t.Fatalf("no flags: %v %v", v, err)
+func TestLoadAuthVerifierDisabled(t *testing.T) {
+	if v, err := loadAuthVerifier(""); v != nil || err != nil {
+		t.Fatalf("no key: %v %v", v, err)
 	}
 
-	for _, args := range [][2]string{{"/etc/egresslab/helper-auth.pub", ""}, {"", testHelperID}} {
-		if _, err := loadAuthVerifier(args[0], args[1]); err == nil || !strings.Contains(err.Error(), "together") {
-			t.Fatalf("%q: %v", args, err)
-		}
+	if _, err := loadAuthVerifier(filepath.Join(keyDir(t), "missing.pub")); err == nil {
+		t.Fatal("missing key accepted")
 	}
 }
 
 func TestLoadAuthVerifierAcceptsOwnedKey(t *testing.T) {
 	me := uint32(os.Getuid())
-	path := writeKey(t, keyDir(t), publicHex(t)+"\n", 0o644)
+	key := publicHex(t)
+	path := writeKey(t, keyDir(t), key+"\n", 0o644)
 
-	v, err := loadAuthVerifierOwnedBy(path, testHelperID, me)
-	if err != nil || v == nil {
+	first, err := loadAuthVerifierOwnedBy(path, me)
+	if err != nil || first == nil {
 		t.Fatalf("valid key rejected: %v", err)
 	}
 
-	if _, err := loadAuthVerifierOwnedBy(path, "helper_1234", me); err == nil || !strings.Contains(err.Error(), "-helper-id") {
-		t.Fatalf("bad helper ID: %v", err)
+	second, err := loadAuthVerifierOwnedBy(path, me)
+	if err != nil || second == nil {
+		t.Fatalf("key reload rejected: %v", err)
+	}
+
+	firstID, firstFingerprint := first.Identity()
+	secondID, secondFingerprint := second.Identity()
+
+	raw, _ := hex.DecodeString(key)
+	digest := sha256.Sum256(raw)
+
+	if firstID == secondID {
+		t.Fatal("helper identity was reused")
+	}
+
+	if firstFingerprint != hex.EncodeToString(digest[:]) || secondFingerprint != firstFingerprint {
+		t.Fatalf("fingerprints %s %s, want SHA-256 of the raw key", firstFingerprint, secondFingerprint)
+	}
+
+	// Operator-managed key replacement: the file is rewritten, then the helper restarts.
+	if err := os.WriteFile(path, []byte(publicHex(t)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rotated, err := loadAuthVerifierOwnedBy(path, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rotatedID, rotatedFingerprint := rotated.Identity()
+
+	if rotatedID == secondID || rotatedFingerprint == secondFingerprint {
+		t.Fatal("key rotation identity mismatch")
 	}
 
 	// The production entry point requires root ownership.
 	if me != 0 {
-		if _, err := loadAuthVerifier(path, testHelperID); err == nil {
+		if _, err := loadAuthVerifier(path); err == nil {
 			t.Fatal("key owned by a non-root user accepted")
 		}
 	}
@@ -134,7 +163,7 @@ func TestLoadAuthVerifierRejectsUnsafeKeys(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v, err := loadAuthVerifierOwnedBy(tt.setup(t), testHelperID, me)
+			v, err := loadAuthVerifierOwnedBy(tt.setup(t), me)
 			if err == nil || v != nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("got %v %v, want error containing %q", v, err, tt.wantErr)
 			}
@@ -143,7 +172,7 @@ func TestLoadAuthVerifierRejectsUnsafeKeys(t *testing.T) {
 
 	t.Run("owned by another UID", func(t *testing.T) {
 		path := writeKey(t, keyDir(t), good, 0o644)
-		if _, err := loadAuthVerifierOwnedBy(path, testHelperID, me+1); err == nil {
+		if _, err := loadAuthVerifierOwnedBy(path, me+1); err == nil {
 			t.Fatal("key owned by another UID accepted")
 		}
 	})

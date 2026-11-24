@@ -140,7 +140,7 @@ func TestAuthorizationFieldsOnReadOnlyOperations(t *testing.T) {
 	intent := testIntent()
 	token := mint(intent)
 
-	for _, op := range []string{OpPing, OpRecoverScan} {
+	for _, op := range []string{OpPing, OpRecoverScan, OpHelperInfo} {
 		resp := rawRequest(t, socket, Request{Version: Version, Operation: op, Intent: &intent, Capability: &token})
 
 		if resp.OK || resp.Error != "unexpected authorization fields" {

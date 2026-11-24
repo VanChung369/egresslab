@@ -194,6 +194,22 @@ func respond(ctx context.Context, req Request, scan RecoveryScanner, v *helperau
 		resp.OK = true
 		resp.Items = items
 
+	case OpHelperInfo:
+		if hasAuthFields {
+			resp.Error = "unexpected authorization fields"
+			return resp
+		}
+
+		// Identity handles a nil verifier: an unconfigured helper still answers.
+		helperID, fingerprint := v.Identity()
+
+		resp.Info = &HelperInfo{
+			AuthorizationConfigured: v != nil,
+			HelperID:                helperID,
+			PublicKeySHA256:         fingerprint,
+		}
+		resp.OK = true
+
 	case OpAuthorizeCheck:
 		if v == nil || req.Intent == nil || req.Capability == nil {
 			resp.Error = "authorization unavailable"

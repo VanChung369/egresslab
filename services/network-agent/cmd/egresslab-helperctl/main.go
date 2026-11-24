@@ -1,5 +1,6 @@
-// Command egresslab-helperctl sends one read-only operation to the privileged network helper and
-// prints the response as JSON. Run it as the agent user, not with sudo.
+// Command egresslab-helperctl sends one read-only operation (ping, recover-scan or helper-info) to
+// the privileged network helper and prints the response as JSON. Run it as the agent user, not
+// with sudo. It cannot send AuthorizeCheck.
 package main
 
 import (
@@ -15,7 +16,7 @@ import (
 
 func main() {
 	if runtime.GOOS != "linux" || len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage (Linux only): egresslab-helperctl ping|recover-scan")
+		fmt.Fprintln(os.Stderr, "usage (Linux only): egresslab-helperctl ping|recover-scan|helper-info")
 		os.Exit(2)
 	}
 
@@ -26,8 +27,10 @@ func main() {
 		op = helperipc.OpPing
 	case "recover-scan":
 		op = helperipc.OpRecoverScan
+	case "helper-info":
+		op = helperipc.OpHelperInfo
 	default:
-		fmt.Fprintln(os.Stderr, "supported operations: ping, recover-scan")
+		fmt.Fprintln(os.Stderr, "supported operations: ping, recover-scan, helper-info")
 		os.Exit(2)
 	}
 

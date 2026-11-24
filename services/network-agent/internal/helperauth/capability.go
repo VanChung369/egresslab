@@ -1,7 +1,8 @@
 // Package helperauth implements signed, single-use capabilities for privileged helper operations.
 //
 // The controller signs Claims with an Ed25519 private key. The helper holds only the public key and
-// accepts a capability once, for exactly the intent it names, before it expires (at most 30 s).
+// accepts a capability once, for exactly the intent it names and its own helper ID, before it
+// expires (at most 30 s). The helper ID is a random epoch that changes at every helper start.
 // Nothing in this package runs network commands.
 package helperauth
 
@@ -174,18 +175,24 @@ func signingMessage(c Claims) ([]byte, error) {
 	return append(msg, raw...), nil
 }
 
-// Verifier checks capabilities and remembers consumed nonces in memory until they expire.
-// It must not be copied after initialization.
+// Verifier validates signed capabilities and tracks consumed nonces in memory until they expire.
 //
-// The replay cache does not survive a helper restart: a capability consumed before a restart is
-// accepted again if it has not expired. Restart-safe replay protection (persisted nonces or a
-// helper epoch) is required before network mutations are enabled.
+// The replay cache does not survive a restart. Restart-safe replay protection therefore requires
+// a fresh helper ID for every process (NewHelperID): capabilities minted for an earlier process
+// name another helper and are refused.
+//
+// An observed wall-clock rollback disables authorization for this verifier.
+//
+// The verifier must not be copied after use.
 type Verifier struct {
 	mu       sync.Mutex
 	key      ed25519.PublicKey
 	helperID string
 	used     map[string]int64 // nonce -> not_after
 	now      func() time.Time
+
+	lastWall    int64 // latest wall-clock second seen by checkedTimeLocked
+	clockFailed bool
 }
 
 func NewVerifier(public ed25519.PublicKey, helperID string) (*Verifier, error) {
@@ -203,7 +210,8 @@ func NewVerifier(public ed25519.PublicKey, helperID string) (*Verifier, error) {
 
 // VerifyAndConsume checks the signature, the binding to expected and to this helper, the
 // validity window and the nonce, then consumes the nonce. A capability that fails any check
-// before the replay check leaves its nonce unused. It runs no network commands.
+// before the replay check leaves its nonce unused. After an observed clock rollback it returns
+// ErrAuthorizationClockUnsafe for every capability. It runs no network commands.
 func (v *Verifier) VerifyAndConsume(capability SignedCapability, expected Intent) error {
 	if v == nil ||
 		validateIntent(expected) != nil ||
@@ -228,7 +236,11 @@ func (v *Verifier) VerifyAndConsume(capability SignedCapability, expected Intent
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	now := v.now()
+	now, err := v.checkedTimeLocked()
+	if err != nil {
+		return err
+	}
+
 	if validateTime(capability.Claims, now) != nil {
 		return ErrInvalidCapability
 	}

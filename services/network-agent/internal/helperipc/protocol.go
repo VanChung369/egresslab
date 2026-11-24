@@ -53,6 +53,7 @@ type Response struct {
 	NetworkReady bool           `json:"network_ready"`
 	Error        string         `json:"error,omitempty"`
 	Items        []RecoveryItem `json:"items,omitempty"`
+	Info         *HelperInfo    `json:"helper_info,omitempty"`
 }
 
 var ErrInvalidFrame = errors.New("invalid helper IPC frame")
@@ -109,9 +110,10 @@ func WriteFrame(w io.Writer, value any) error {
 	return err
 }
 
-// Call sends one read-only operation to the helper. It never retries.
+// Call sends one read-only operation (Ping, RecoverScan or HelperInfo) to the helper. It never
+// retries.
 func Call(ctx context.Context, socketPath string, op string) (Response, error) {
-	if op != OpPing && op != OpRecoverScan {
+	if op != OpPing && op != OpRecoverScan && op != OpHelperInfo {
 		return Response{}, errors.New("operation is not available to the helper client")
 	}
 
@@ -167,6 +169,15 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 		(resp.OK && resp.Error != "") ||
 		(len(resp.Items) != 0 && req.Operation != OpRecoverScan) {
 		return Response{}, errors.New("helper returned an invalid response")
+	}
+
+	// Accept helper metadata only when it was asked for and the request succeeded.
+	if resp.Info != nil && (req.Operation != OpHelperInfo || !resp.OK) {
+		return Response{}, errors.New("unexpected helper identity metadata")
+	}
+
+	if req.Operation == OpHelperInfo && resp.OK && !resp.Info.valid() {
+		return Response{}, errors.New("invalid helper identity metadata")
 	}
 
 	if !resp.OK {

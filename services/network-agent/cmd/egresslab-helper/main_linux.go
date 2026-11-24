@@ -2,8 +2,9 @@
 
 // Command egresslab-helper is the lab bootstrap of the privileged network helper. It listens on
 // /run/egresslab/helper.sock, accepts only the configured agent UID (SO_PEERCRED) and answers
-// read-only operations: Ping and RecoverScan. With -auth-public-key-file and -helper-id it also
-// answers the AuthorizeCheck dry-run. Network-changing operations are not implemented.
+// read-only operations: Ping, RecoverScan and HelperInfo. With -auth-public-key-file it also
+// answers the AuthorizeCheck dry-run, under a random helper ID (epoch) generated at every start.
+// Network-changing operations are not implemented.
 //
 // In this step it runs as root under sudo; the production design keeps only CAP_NET_ADMIN.
 package main
@@ -29,22 +30,21 @@ func main() {
 	gid := flag.Int("gid", -1, "agent's primary group ID (gets socket access)")
 	publicKeyFile := flag.String("auth-public-key-file", "",
 		"root-owned file with the controller's Ed25519 public key (64 hex characters); enables AuthorizeCheck")
-	helperID := flag.String("helper-id", "", "this helper's identity, helper_<32 lowercase hex>; required with -auth-public-key-file")
 	flag.Parse()
 
 	if os.Geteuid() != 0 || *uid <= 0 || *gid <= 0 || flag.NArg() != 0 {
 		log.Fatal("usage: sudo egresslab-helper -uid <non-root UID> -gid <non-root GID> " +
-			"[-auth-public-key-file <path> -helper-id helper_<32 hex>]")
+			"[-auth-public-key-file <path>]")
 	}
 
-	if err := run(*uid, *gid, *publicKeyFile, *helperID); err != nil {
+	if err := run(*uid, *gid, *publicKeyFile); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(uid, gid int, publicKeyFile, helperID string) error {
+func run(uid, gid int, publicKeyFile string) error {
 	// Load the key before touching /run/egresslab, so a bad configuration changes nothing.
-	verifier, err := loadAuthVerifier(publicKeyFile, helperID)
+	verifier, err := loadAuthVerifier(publicKeyFile)
 	if err != nil {
 		return fmt.Errorf("authorization configuration: %w", err)
 	}
@@ -61,7 +61,10 @@ func run(uid, gid int, publicKeyFile, helperID string) error {
 
 	mode := "read-only operations; AuthorizeCheck disabled"
 	if verifier != nil {
-		mode = "read-only operations; AuthorizeCheck dry-run enabled for " + helperID
+		helperID, fingerprint := verifier.Identity()
+		mode = "read-only operations; AuthorizeCheck dry-run enabled"
+
+		log.Printf("Helper epoch: %s; controller public-key SHA256: %s", helperID, fingerprint)
 	}
 
 	log.Printf("EgressLab helper listening on %s (UID %d; %s)", helperipc.SocketPath, uid, mode)
