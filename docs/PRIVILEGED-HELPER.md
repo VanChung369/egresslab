@@ -1,12 +1,13 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 29C.4b — trusted multi-source provisioning and helperctl (controller signer pending).** A controller
-CLI signs `CreateLab`, `ConnectTunnel` and `PermitProbe` and drives the helper's sealed lab, tunnel
-and diagnostic probe in the Linux runtime; the helper holds the encrypted WireGuard configs,
+Status: **Step 29C.4c — controller multi-source integration and real VPN verification.** A
+controller CLI signs `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV1` and drives
+the helper's sealed lab, tunnel and diagnostic probes in the Linux runtime; the helper holds the encrypted WireGuard configs,
 disables IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once and pins
 it, checks the peer state and the IPv4 addresses, MTU, rules and routes the kernel reports against
-the staged config, and stays the source of truth for lab and tunnel state. A probe yields one
-observation of the tunnel's public IPv4 address, printed only. Windows (WSL2), Linux and macOS
+the staged config, and stays the source of truth for lab and tunnel state. A single-source probe
+yields one observation of the tunnel's public IPv4 address, and a multi-source probe the unanimous
+evidence of two independent HTTPS sources; both are printed only. Windows (WSL2), Linux and macOS
 (Lima, Keychain) are verified end to end. No lease or proxy traffic exists; the sections from "Typed
 operations only" on are partly design.
 
@@ -62,10 +63,12 @@ operations only" on are partly design.
   `-enable-multi-probe`, with the ident.me pin from `/etc/egresslab/multi-probe-pin` (see "Trusted
   multi-source provisioning").
 - Controller side (see "Controller and runtimes"):
-  - an Ed25519 signer for `CreateLab`, `ConnectTunnel` and `PermitProbe`, checked against the
-    three golden vectors the helper also pins; `ConnectTunnel` is signed only for the profile's
-    own lab in the current helper process and the vault's current, compatible stage, and
-    `PermitProbe` only for that lab once its tunnel is configured (see "Controller and runtimes");
+  - an Ed25519 signer for `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV1`,
+    checked against the four golden vectors the helper also pins; `ConnectTunnel` is signed only
+    for the profile's own lab in the current helper process and the vault's current, compatible
+    stage, and the probes only for that lab once its tunnel is configured, `PermitMultiProbeV1`
+    also only for the policy of that helper generation (see "Controller and runtimes" and
+    "Controller multi-source integration");
   - signing-key storage per platform;
   - runtime providers that reach the helper from each host OS;
   - `egresslab-controller-lab`, which needs `-approve` for every mutation, including
@@ -963,9 +966,9 @@ announced by Hetzner (AS24940), not Cloudflare (AS13335). An HTTPS request pinne
 HTTP 200 with a verified certificate and a bare IPv4 address of 12 bytes with no line ending, the
 same address the Cloudflare trace reported. The ASN lookup shows two different networks; it does
 not prove the operators independent. This was a host check, not a managed observation: it
-fed no registry and no lease. The new source code is unit-tested only (a local TLS server stands in
-for the sources); no window for a second destination has run on a kernel yet. Step 29C.3 calls it
-from the multi-source lifecycle.
+fed no registry and no lease. The source code was unit-tested here (a local TLS server stands in
+for the sources); it first ran against the real endpoints through the tunnel in Step 29C.4c. Step
+29C.3 calls it from the multi-source lifecycle.
 
 ### Managed multi-source probe lifecycle (Step 29C.3)
 
@@ -1016,9 +1019,9 @@ The multi-source backend is enabled only by its own constructor,
 It leaves the single-source runner disabled, so a failed multi-source attempt cannot fall back to
 one source; `NewManagedProbeTunnelBackend` (single source) and `NewManagedTunnelBackend` (no
 probe) are unchanged. `egresslab-helper` still uses the single-source backend; Step 29C.4a adds the
-signed operation, and Step 29C.4b enables it in the helper. The lifecycle is tested against
-fakes only: the worker's argument refusals ran on Lima, but no `--source` worker and no window for
-a second destination has run in a real namespace.
+signed operation, and Step 29C.4b enables it in the helper. In this step the lifecycle was tested
+against fakes; the `--source` worker and the window for the ident.me pin first ran in a real
+namespace in Step 29C.4c.
 
 ### Signed multi-source helper IPC (Step 29C.4a)
 
@@ -1145,6 +1148,62 @@ never stored, and an empty vault), it logged the policy and pin; `multi-probe-po
 them with the same epoch, runtime ID and fingerprint as `helper-info`; `probe-egress-multi`
 without a capability or with a destination argument was refused as `INVALID_REQUEST` by
 helperctl, and `PermitProbe` as `OPERATION_DISABLED` by the helper; `list-labs` and
-`recover-scan` were empty, and SIGTERM stopped it and removed the socket. No signed probe ran:
-the controller signer and the VPN verification are Step 29C.4c. No lease or application traffic
-is authorized.
+`recover-scan` were empty, and SIGTERM stopped it and removed the socket. No signed probe ran in
+this step; Step 29C.4c added the controller signer and the VPN verification. No lease or
+application traffic is authorized.
+
+### Controller multi-source integration (Step 29C.4c)
+
+`egresslab-controller-lab -approve probe-egress-multi PROFILE_ID NAMESPACE` signs one
+`PermitMultiProbeV1` through the existing runtime providers and key stores. Before signing it
+requires, like `probe-egress`, a strict, unconfigured profile, a trusted runtime with the pinned
+public-key fingerprint, the current helper epoch, the profile's binding to that runtime and
+namespace, and the profile's own configured tunnel (`ListLabs`). It then reads `MultiProbePolicy`
+right before signing and accepts it only for that same helper generation: policy `PermitMultiProbeV1`,
+a valid pin, and the runtime ID, helper epoch and fingerprint of both `HelperInfo` and the trusted
+runtime record (`RUNTIME_UNTRUSTED` otherwise). The capability signs `{PermitMultiProbeV1, profile,
+namespace, probe_ipv4: the advertised pin}` for that epoch, with the usual nonce and 30 s
+lifetime; a fourth golden vector, pinned in both modules and cross-checked with OpenSSL 3, keeps the
+controller's bytes identical to the helper's. It travels on stdin only; the launcher gets
+`probe-egress-multi PROFILE_ID NAMESPACE` and no destination. A capability already expired on the
+controller's clock is not sent. `egresslab-controller-lab multi-probe-policy` prints the policy
+read-only.
+
+The controller checks the evidence again, independently of the helper and the agent: exactly the
+two V1 sources in order with their destinations, the ident.me destination equal to the signed pin
+(not one the response chose), one public IPv4 address that every source reports, observation
+times in order inside at most 80 s, `observed_at` equal to the first source, and a handshake at
+most 180 whole seconds old at `finished_at`. It then binds the evidence to the request: started
+after the capability was issued and after the request was sent, finished before the answer
+arrived, `observed_at` at most 90 s old and the handshake at most 185 s old at receipt, all with
+5 s of host/runtime clock skew. That allowance covers the evidence only: the helper checks the
+capability's `issued_at` against its own clock with none, so a runtime clock behind the host's
+refuses fresh capabilities. Strict JSON decoding refuses unknown fields, and a failure
+document that carries any metadata field, even as `null`, is treated as a runtime failure, not a
+coded refusal. A well-formed policy the controller does not accept (an unknown version or an
+invalid pin) answers `RUNTIME_UNTRUSTED`.
+
+Nothing is retried, and nothing falls back to `PermitProbe`. A lost connection, an internal error
+or refused evidence answers `STATE_UNCERTAIN`: the helper may or may not have consumed the nonce or
+rolled the tunnel back, so `list-labs` and `recover-scan` come before any new operation (refused
+evidence can even leave the tunnel configured and sealed). The observation is printed with
+`network_ready: false` and stored nowhere: no profile, binding, routing or lease state changes.
+Agreement of two sources says nothing about the address later, about destination-independent NAT
+for other destinations, or about uniqueness across concurrent sessions.
+
+Verified on Lima on 2026-11-25 with the real Proton tunnel, a scratch Keychain key and a scratch
+profile (both removed afterwards): through the controller, `helper-info` and `multi-probe-policy`
+named the same epoch, runtime ID and fingerprint, the fingerprint of the controller key; a sealed
+lab was refused before signing (`LAB_FAULTED`). The first signed attempt of the session failed:
+the `cloudflare_trace` worker exited with an error about a second after the window opened, the
+helper faulted the lab and removed the tunnel cleanly (no wg0, underlay table or probe set left).
+The helper discards the worker's stderr, so the cause is unknown; it matches the first-attempt
+failure seen in Steps 29B.1 and 29B.2b. After deleting that lab, six attempts all succeeded
+(2.9 to 4.0 s per controller command): two on one tunnel, and one on each of four more tunnels in
+fresh create, connect and probe cycles, the last as the first attempt after a helper restart. Each returned the same VPN exit address from both
+sources (`195.242.214.134`, not the host's address), `observed_at` equal to the Cloudflare
+observation, and `network_ready: false`. After a successful attempt the lab verified as
+`tunnel_configured`, the namespace had no process, the handshake was 16 s old, no
+`egresslab_probe4` set or permit remained, and the output chain was back to the sealed rules
+(`policy drop`; IPv6, DNS and DoT drops; `lo` accept). `disconnect` returned the lab to `sealed`
+and `delete-lab` removed it. Not run on WSL2 or native Linux.

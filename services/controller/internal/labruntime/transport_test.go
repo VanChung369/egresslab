@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/VanChung369/egresslab/services/controller/internal/control"
 )
@@ -145,6 +147,94 @@ func TestFakeHelperctl(t *testing.T) {
 			"\"observed_at\": \"2026-11-25T06:00:00Z\", \"handshake_at\": \"2026-11-25T05:59:59Z\", "+
 			"\"source\": \"cloudflare_trace\"}", profile, testNamespace, ip))
 
+	case "multi-probe-policy":
+		policy := control.LabMultiProbePolicy{
+			Policy:          control.LabMultiProbeOp,
+			IdentIPv4:       "9.9.9.9",
+			HelperID:        testHelperID,
+			RuntimeID:       "runtime_0123456789abcdef0123456789abcdef",
+			PublicKeySHA256: testFingerprint,
+		}
+
+		switch mode {
+		case "multi-disabled":
+			failWith(CodeOperationDisabled, "operation not enabled")
+		case "multi-invalid-policy":
+			policy.IdentIPv4 = "10.0.0.1"
+		case "multi-unsupported-policy":
+			policy.Policy = "PermitMultiProbeV2"
+		case "multi-failure-with-null-policy":
+			fmt.Printf(`{"version":1,"operation":"","ok":false,"network_ready":false,"code":%q,"error":"x",`+
+				`"multi_probe_policy":null}`, CodeOperationDisabled)
+			os.Exit(1)
+		case "multi-failure-with-policy":
+			raw, _ := json.Marshal(policy)
+			fmt.Printf(`{"version":1,"operation":"","ok":false,"network_ready":false,"code":%q,"error":"x",`+
+				`"multi_probe_policy":%s}`, CodeOperationDisabled, raw)
+			os.Exit(1)
+		}
+
+		raw, _ := json.Marshal(policy)
+		respond(control.LabMultiProbePolicyOp, `,"multi_probe_policy":`+string(raw))
+	case "probe-egress-multi":
+		var capability control.LabCapability
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil || len(args) != 3 || json.Unmarshal(data, &capability) != nil ||
+			capability.Claims.Intent != (control.LabIntent{Operation: control.LabMultiProbeOp, ProfileID: args[1],
+				Namespace: args[2], ProbeIPv4: "9.9.9.9"}) {
+			fail("invalid multi-source capability")
+		}
+
+		switch mode {
+		case "multi-disabled":
+			failWith(CodeOperationDisabled, "operation not enabled")
+		case "multi-missing-result":
+			respond(control.LabMultiProbeOp, "")
+		}
+
+		now := time.Unix(1795500000, 0).UTC()
+		ip := netip.MustParseAddr("8.8.4.4")
+		info := control.LabMultiProbeInfo{
+			ProfileID:   testProfile,
+			Namespace:   testNamespace,
+			IPv4:        ip,
+			StartedAt:   now,
+			FinishedAt:  now,
+			ObservedAt:  now,
+			HandshakeAt: now.Add(-time.Second),
+			Sources: []control.LabMultiProbeSourceInfo{
+				{Source: control.LabProbeSource, DestinationIPv4: netip.MustParseAddr(control.LabProbeIPv4), IPv4: ip,
+					ObservedAt: now},
+				{Source: control.LabMultiProbeIdentSource, DestinationIPv4: netip.MustParseAddr("9.9.9.9"), IPv4: ip,
+					ObservedAt: now},
+			},
+		}
+
+		switch mode {
+		case "multi-wrong-pin":
+			info.Sources[1].DestinationIPv4 = netip.MustParseAddr("8.8.8.8")
+		case "multi-mismatch":
+			info.Sources[1].IPv4 = netip.MustParseAddr("8.8.8.8")
+		case "multi-foreign-profile":
+			info.ProfileID = "profile_ffffffffffffffff"
+		case "multi-failure-with-null":
+			fmt.Printf(`{"version":1,"operation":"","ok":false,"network_ready":false,"code":%q,"error":"x",`+
+				`"multi_probe":null}`, CodeLabFaulted)
+			os.Exit(1)
+		case "multi-failure-with-evidence":
+			raw, _ := json.Marshal(info)
+			fmt.Printf(`{"version":1,"operation":"","ok":false,"network_ready":false,"code":%q,"error":"x",`+
+				`"multi_probe":%s}`, CodeLabFaulted, raw)
+			os.Exit(1)
+		}
+
+		raw, _ := json.Marshal(info)
+		extra := ""
+		if mode == "multi-with-lab" {
+			extra = lab(control.LabTunnelConfigured)
+		}
+
+		respond(control.LabMultiProbeOp, extra+`,"multi_probe":`+string(raw))
 	case "disconnect":
 		if mode == "faulted" {
 			respond("Disconnect", lab(control.LabFaulted))
@@ -517,6 +607,109 @@ func TestProbeTransport(t *testing.T) {
 
 		if mode == "probe-disabled" && ErrorCode(err) != CodeOperationDisabled {
 			t.Fatalf("operation disabled code lost: %v", err)
+		}
+	}
+}
+
+func TestMultiProbeTransport(t *testing.T) {
+	ctx := context.Background()
+	capability := control.LabCapability{Claims: control.LabClaims{Version: 1, Intent: control.LabIntent{
+		Operation: control.LabMultiProbeOp, ProfileID: testProfile, Namespace: testNamespace, ProbeIPv4: "9.9.9.9",
+	}}}
+
+	fake := &fakeLauncher{mode: "ok"}
+	tr := newCommandProvider(fake).Transport()
+
+	policy, err := tr.MultiProbePolicy(ctx)
+	if err != nil || policy.IdentIPv4 != "9.9.9.9" || len(fake.calls) != 1 ||
+		strings.Join(fake.calls[0], " ") != "multi-probe-policy" {
+		t.Fatalf("policy discovery: %+v %v %v", policy, err, fake.calls)
+	}
+
+	for name, intent := range map[string]control.LabIntent{
+		"legacy operation": {Operation: "PermitProbe", ProfileID: testProfile, Namespace: testNamespace,
+			ProbeIPv4: control.LabProbeIPv4},
+		"Cloudflare as pin": {Operation: control.LabMultiProbeOp, ProfileID: testProfile, Namespace: testNamespace,
+			ProbeIPv4: control.LabProbeIPv4},
+		"private pin": {Operation: control.LabMultiProbeOp, ProfileID: testProfile, Namespace: testNamespace,
+			ProbeIPv4: "10.0.0.1"},
+		"other namespace": {Operation: control.LabMultiProbeOp, ProfileID: testProfile,
+			Namespace: "egresslab-lab-ffffffffffffffff", ProbeIPv4: "9.9.9.9"},
+	} {
+		bad := capability
+		bad.Claims.Intent = intent
+
+		if _, err := tr.ProbeEgressMulti(ctx, testProfile, testNamespace, bad); ErrorCode(err) != CodeInvalidRequest ||
+			len(fake.calls) != 1 {
+			t.Fatalf("%s reached the launcher: %v", name, err)
+		}
+	}
+
+	info, err := tr.ProbeEgressMulti(ctx, testProfile, testNamespace, capability)
+	if err != nil || info.IPv4.String() != "8.8.4.4" || len(info.Sources) != 2 || len(fake.calls) != 2 {
+		t.Fatalf("multi-source result: %+v %v", info, err)
+	}
+
+	if strings.Join(fake.calls[1], " ") != strings.Join([]string{"probe-egress-multi", testProfile, testNamespace}, " ") {
+		t.Fatalf("unexpected launcher arguments: %v", fake.calls[1])
+	}
+
+	for mode, code := range map[string]string{
+		"multi-disabled":              CodeOperationDisabled,
+		"multi-missing-result":        "",
+		"multi-wrong-pin":             "",
+		"multi-mismatch":              "",
+		"multi-foreign-profile":       "",
+		"multi-with-lab":              "",
+		"multi-failure-with-evidence": CodeRuntimeUnavailable,
+		"multi-failure-with-null":     CodeRuntimeUnavailable,
+	} {
+		f := &fakeLauncher{mode: mode}
+
+		result, err := newCommandProvider(f).Transport().ProbeEgressMulti(ctx, testProfile, testNamespace, capability)
+		if err == nil || result.IPv4.IsValid() || result.Sources != nil || len(f.calls) != 1 ||
+			(code != "" && ErrorCode(err) != code) {
+			t.Fatalf("%s: response accepted, retried or misclassified: %v", mode, err)
+		}
+	}
+}
+
+func TestMultiProbePolicyTransportRefusals(t *testing.T) {
+	for mode, code := range map[string]string{
+		"multi-disabled":                 CodeOperationDisabled,
+		"multi-invalid-policy":           CodeRuntimeUntrusted,
+		"multi-unsupported-policy":       CodeRuntimeUntrusted,
+		"multi-failure-with-policy":      CodeRuntimeUnavailable,
+		"multi-failure-with-null-policy": CodeRuntimeUnavailable,
+	} {
+		fake := &fakeLauncher{mode: mode}
+
+		result, err := newCommandProvider(fake).Transport().MultiProbePolicy(context.Background())
+		if err == nil || result != (control.LabMultiProbePolicy{}) || len(fake.calls) != 1 ||
+			(code != "" && ErrorCode(err) != code) {
+			t.Fatalf("%s: policy accepted, retried or misclassified: %v", mode, err)
+		}
+	}
+}
+
+// decodeResponse checks the metadata itself, before any caller does.
+func TestDecodeMultiProbeMetadata(t *testing.T) {
+	policy := control.LabMultiProbePolicy{Policy: control.LabMultiProbeOp, IdentIPv4: "10.0.0.1", HelperID: testHelperID,
+		RuntimeID: "runtime_0123456789abcdef0123456789abcdef", PublicKeySHA256: testFingerprint}
+	rawPolicy, _ := json.Marshal(policy)
+
+	now := time.Unix(1795500000, 0).UTC()
+	evidence := control.LabMultiProbeInfo{ProfileID: testProfile, Namespace: testNamespace,
+		IPv4: netip.MustParseAddr("8.8.4.4"), StartedAt: now, FinishedAt: now, ObservedAt: now, HandshakeAt: now}
+	rawEvidence, _ := json.Marshal(evidence)
+
+	for op, field := range map[string]string{
+		control.LabMultiProbePolicyOp: `"multi_probe_policy":` + string(rawPolicy),
+		control.LabMultiProbeOp:       `"multi_probe":` + string(rawEvidence),
+	} {
+		doc := `{"version":1,"operation":"` + op + `","ok":true,"network_ready":false,` + field + `}`
+		if _, err := decodeResponse([]byte(doc), op); err == nil {
+			t.Errorf("%s: invalid metadata decoded", op)
 		}
 	}
 }

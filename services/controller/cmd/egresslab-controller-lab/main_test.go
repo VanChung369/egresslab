@@ -28,7 +28,10 @@ const (
 	labNS    = "egresslab-lab-0123456789abcdef"
 )
 
-type memoryKeys struct{ private ed25519.PrivateKey }
+type memoryKeys struct {
+	private ed25519.PrivateKey
+	signs   int
+}
 
 func (k *memoryKeys) Initialize() error {
 	if k.private != nil {
@@ -49,6 +52,7 @@ func (k *memoryKeys) PublicKey() (ed25519.PublicKey, error) {
 }
 
 func (k *memoryKeys) Sign(message []byte) ([]byte, error) {
+	k.signs++
 	return ed25519.Sign(k.private, message), nil
 }
 
@@ -70,6 +74,12 @@ type fakeRuntime struct {
 	probeCalls []control.LabCapability
 	probeErr   error
 	probeStale bool
+
+	multiProbeCalls []control.LabCapability
+	multiProbeErr   error
+	multiPolicyErr  error
+	multiPolicyEdit func(*control.LabMultiProbePolicy)
+	multiProbeEdit  func(*control.LabMultiProbeInfo)
 }
 
 func (f *fakeRuntime) HelperInfo(context.Context) (control.LabHelperInfo, error) {
@@ -205,6 +215,7 @@ type harness struct {
 	reached  int
 	out      bytes.Buffer
 	profile  control.RoutingProfile
+	now      func() time.Time // nil: a fixed time
 }
 
 func newHarness(t *testing.T) *harness {
@@ -254,7 +265,12 @@ func (h *harness) run(args ...string) error {
 			}
 			return &fakeRuntime{kind: "wsl", target: opts.WSLDistro, labs: map[string]string{}}, nil
 		},
-		now:    func() time.Time { return time.Unix(1795500000, 0) },
+		now: func() time.Time {
+			if h.now != nil {
+				return h.now()
+			}
+			return time.Unix(1795500000, 0)
+		},
 		stdout: &h.out,
 	})
 }

@@ -311,6 +311,8 @@ egresslab-controller-lab stage-info <profile ID>                              # 
 egresslab-controller-lab -approve connect-tunnel <profile ID> <namespace> <stage ID>   # needs -enable-tunnel
 egresslab-controller-lab -approve disconnect <profile ID> <namespace>
 egresslab-controller-lab -approve probe-egress <profile ID> <namespace>                # needs -enable-probe
+egresslab-controller-lab multi-probe-policy                                           # needs -enable-multi-probe
+egresslab-controller-lab -approve probe-egress-multi <profile ID> <namespace>          # needs -enable-multi-probe
 ```
 
 `-runtime auto` uses WSL on Windows (`-wsl-distro`; trust and lab commands need it named), Lima on macOS (`-lima-instance`, default `egresslab`) and the host itself on Linux. A profile stays bound to the runtime it was first used on (`unbind-profile` and `untrust-runtime` release it). Every failure carries a code such as `RECOVERY_REQUIRED` or `RUNTIME_UNTRUSTED`. Install `egresslab-helper` and `egresslab-helperctl` in `/usr/local/bin` inside the runtime (see above). On macOS, the Lima and Keychain paths are verified end to end (macOS 15.3.2, Lima 2.3.0, Ubuntu 24.04 guest with nft 1.0.9); copy the public key into the VM as shown below. If `create-lab` reports an uncertain result, run `list-labs` before retrying.
@@ -377,7 +379,7 @@ egresslab-probe --url https://example.com/      # invalid probe arguments, exit 
 egresslab-probe --source ident_me 2001:db8::1   # invalid probe destination, exit 1
 ```
 
-Build and test it on Linux before installing it. End-to-end multi-source testing over the VPN needs the controller integration of Step 29C.4c; do not open the lab firewall by hand to try it.
+Build and test it on Linux before installing it. End-to-end multi-source testing over the VPN goes through the controller (Step 29C.4c, see "Multi-source verification from the controller"); do not open the lab firewall by hand to try it.
 
 ### Multi-source helper (Step 29C.4b)
 
@@ -412,7 +414,20 @@ sudo /usr/local/bin/egresslab-helper -uid "$(id -u)" -gid "$(id -g)" \
   -enable-multi-probe -probe-uid "$(id -u egresslab-probe)" -probe-gid "$(id -g egresslab-probe)"
 ```
 
-A missing or unsafe pin file stops the start before the socket exists. `egresslab-helperctl multi-probe-policy` prints the policy version, the pin and the helper epoch, runtime ID and public-key fingerprint; compare the last three with `egresslab-helperctl helper-info`. The policy is metadata, not authorization. `egresslab-helperctl probe-egress-multi PROFILE_ID NAMESPACE < capability.json` takes the signed capability on stdin and no destination argument. Do not hand-craft capabilities or open the managed firewall by hand; the controller signs `PermitMultiProbeV1` in Step 29C.4c. Changing the pin needs the same provisioning and a helper restart (a new epoch).
+A missing or unsafe pin file stops the start before the socket exists. `egresslab-helperctl multi-probe-policy` prints the policy version, the pin and the helper epoch, runtime ID and public-key fingerprint; compare the last three with `egresslab-helperctl helper-info`. The policy is metadata, not authorization. `egresslab-helperctl probe-egress-multi PROFILE_ID NAMESPACE < capability.json` takes the signed capability on stdin and no destination argument. Do not hand-craft capabilities or open the managed firewall by hand; the controller signs `PermitMultiProbeV1`. Changing the pin needs the same provisioning and a helper restart (a new epoch).
+
+### Multi-source verification from the controller (Step 29C.4c)
+
+Start the helper with `-enable-multi-probe` and the pin of Step 29C.4b, with the controller's public key in `/etc/egresslab/helper-auth.pub`. From the host:
+
+```bash
+egresslab-controller-lab runtime-status
+egresslab-controller-lab helper-info
+egresslab-controller-lab multi-probe-policy          # same helper_id, runtime_id and public_key_sha256 as helper-info
+egresslab-controller-lab -approve probe-egress-multi <profile ID> <namespace>   # trusted runtime, configured tunnel
+```
+
+The answer holds the agreed public IPv4 address, the start and finish times, the earliest observation time (the Cloudflare source), the handshake time and each source's evidence, with `network_ready: false`; both sources must report the same address. Afterwards the tunnel stays configured and its firewall sealed: `verify-lab` says `tunnel_configured`, and read-only checks in the VM (`sudo ip netns pids <ns>`, `sudo ip netns exec <ns> wg show wg0 latest-handshakes`, `sudo ip netns exec <ns> nft list ruleset`) show no process and no `egresslab_probe4` set or permit. Do not retry an uncertain or faulted attempt automatically, and do not fall back to `probe-egress`: inspect `list-labs`, `recover-scan` and the helper log, then delete a faulted lab. Disconnect and delete the lab after a smoke test. The operation allocates no lease, activates no profile and permits no application traffic. Keep the clocks synchronized: the helper checks a capability's `issued_at` with no allowance, so a VM clock behind the host's by more than the request's transit time refuses a fresh capability (`AUTHORIZATION_DENIED`); the 5 s allowance applies only to the evidence the controller checks afterwards. Fix time synchronization rather than the tolerance.
 
 ## Security Notes
 
@@ -438,4 +453,4 @@ If DNS returns several addresses, do not take the first one blindly. The provide
 
 ## Next Milestone
 
-Multi-source public IP verification: the controller signer for `PermitMultiProbeV1`, checked against `MultiProbePolicy`, and real VPN verification (Step 29C.4c). The consensus engine (Step 29C.1), the pinned HTTPS sources (Step 29C.2), the managed multi-source lifecycle (Step 29C.3), the signed helper IPC (Step 29C.4a) and the trusted pin provisioning with `-enable-multi-probe` and helperctl (Step 29C.4b) exist. See `docs/PRIVILEGED-HELPER.md`.
+Multi-source public IP verification (Step 29C) is complete through the controller and verified with a real VPN tunnel on Lima. Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (seen in Steps 29B.1, 29B.2b and 29C.4c); a coded worker failure reason in the helper log would explain it. WSL2 and native Linux have not run the multi-source path. See `docs/PRIVILEGED-HELPER.md`.

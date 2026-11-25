@@ -37,6 +37,9 @@ type helperResponse struct {
 	Labs         []control.LabInfo      `json:"labs,omitempty"`
 	Stage        *control.LabStageInfo  `json:"stage,omitempty"`
 	Probe        *control.LabProbeInfo  `json:"probe,omitempty"`
+
+	MultiProbe       *control.LabMultiProbeInfo   `json:"multi_probe,omitempty"`
+	MultiProbePolicy *control.LabMultiProbePolicy `json:"multi_probe_policy,omitempty"`
 }
 
 type limitedBuffer struct {
@@ -126,11 +129,31 @@ func decodeStrict(data []byte) (helperResponse, error) {
 	return resp, nil
 }
 
+// metadataKeys may not appear in a failure document at all, not even as null: helperctl omits them.
+var metadataKeys = []string{"helper_info", "lab", "labs", "stage", "probe", "multi_probe", "multi_probe_policy"}
+
+func hasMetadataKey(data []byte) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return true
+	}
+
+	for _, key := range metadataKeys {
+		if _, ok := fields[key]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
 // decodeFailure reads helperctl's failure document. Unknown codes become INTERNAL.
 func decodeFailure(data []byte) (error, bool) {
 	resp, err := decodeStrict(data)
-	if err != nil || resp.Version != 1 || resp.OK || resp.NetworkReady || resp.Error == "" ||
-		resp.Info != nil || resp.Lab != nil || resp.Labs != nil || resp.Stage != nil || resp.Probe != nil {
+	if err != nil || hasMetadataKey(data) ||
+		resp.Version != 1 || resp.OK || resp.NetworkReady || resp.Error == "" ||
+		resp.Info != nil || resp.Lab != nil || resp.Labs != nil || resp.Stage != nil || resp.Probe != nil ||
+		resp.MultiProbe != nil || resp.MultiProbePolicy != nil {
 		return nil, false
 	}
 
@@ -169,8 +192,22 @@ func decodeResponse(data []byte, expected string) (helperResponse, error) {
 		return helperResponse{}, errors.New("unexpected managed probe metadata")
 	}
 
+	if (expected == control.LabMultiProbePolicyOp) != (resp.MultiProbePolicy != nil) {
+		return helperResponse{}, errors.New("unexpected multi-source policy metadata")
+	}
+
+	// Well-formed, but a policy this controller does not accept (a newer version, say).
+	if resp.MultiProbePolicy != nil && !resp.MultiProbePolicy.Valid() {
+		return helperResponse{}, Errorf(CodeRuntimeUntrusted, "unsupported or invalid multi-source policy")
+	}
+
+	if (expected == control.LabMultiProbeOp) != (resp.MultiProbe != nil) ||
+		(resp.MultiProbe != nil && !resp.MultiProbe.Valid()) {
+		return helperResponse{}, errors.New("unexpected managed multi-source probe metadata")
+	}
+
 	switch expected {
-	case "HelperInfo", "Ping", "StageInfo", "PermitProbe":
+	case "HelperInfo", "Ping", "StageInfo", "PermitProbe", control.LabMultiProbePolicyOp, control.LabMultiProbeOp:
 		if resp.Lab != nil || resp.Labs != nil {
 			return helperResponse{}, errors.New("unexpected lab metadata")
 		}

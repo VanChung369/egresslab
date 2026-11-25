@@ -43,24 +43,30 @@ var reservedProbeIPv4 = []netip.Prefix{
 	netip.MustParsePrefix("240.0.0.0/4"),
 }
 
+func validLabPublicIPv4(ip netip.Addr) bool {
+	if !ip.Is4() || !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		return false
+	}
+
+	for _, prefix := range reservedProbeIPv4 {
+		if prefix.Contains(ip) {
+			return false
+		}
+	}
+
+	return true
+}
+
 // Valid checks the observation on its own: identity format, a public IPv4 address, the fixed
 // source, and a handshake that fits the helper's 180 s freshness policy.
 func (p LabProbeInfo) Valid() bool {
 	if !ValidProfileID(p.ProfileID) ||
 		!ValidLabNamespace(p.Namespace) ||
-		!p.IPv4.Is4() ||
-		!p.IPv4.IsGlobalUnicast() ||
-		p.IPv4.IsPrivate() ||
+		!validLabPublicIPv4(p.IPv4) ||
 		p.Source != LabProbeSource ||
 		p.ObservedAt.Unix() <= 0 ||
 		p.HandshakeAt.Unix() <= 0 {
 		return false
-	}
-
-	for _, prefix := range reservedProbeIPv4 {
-		if prefix.Contains(p.IPv4) {
-			return false
-		}
 	}
 
 	return !p.HandshakeAt.Before(p.ObservedAt.Add(-labProbeHandshakeAge)) &&
@@ -81,6 +87,32 @@ func (p LabProbeInfo) ValidFor(profileID, namespace string, issuedAt, receivedAt
 		!p.HandshakeAt.Before(receivedAt.Add(-labProbeHandshakeAge-labProbeClockSkew))
 }
 
+// validateProbeTarget is the policy every probe signer applies: a strict, unconfigured profile, the
+// runtime binding of the current helper process, and the profile's own configured tunnel.
+func validateProbeTarget(profile RoutingProfile, binding RuntimeBinding, info LabHelperInfo, lab LabInfo) error {
+	if !ValidProfileID(profile.ID) ||
+		!profile.UniqueIPRequired ||
+		!profile.KillSwitchRequired ||
+		profile.Status != "unconfigured" ||
+		profile.TunnelID != "" {
+		return errors.New("profile does not satisfy probe policy")
+	}
+
+	if binding.ProfileID != profile.ID ||
+		!ValidRuntimeID(binding.RuntimeID) ||
+		binding.RuntimeID != info.RuntimeID ||
+		binding.HelperEpoch != info.HelperID ||
+		!ValidLabNamespace(binding.Namespace) {
+		return errors.New("stale or mismatched runtime binding")
+	}
+
+	if lab.ProfileID != profile.ID || lab.Namespace != binding.Namespace || lab.State != LabTunnelConfigured {
+		return errors.New("probe requires the profile's configured tunnel")
+	}
+
+	return nil
+}
+
 // MintPermitProbe signs one probe of the profile's own configured tunnel, in the helper process
 // the binding names, for the fixed destination only. It authorizes no lease and no proxy.
 func MintPermitProbe(
@@ -91,24 +123,8 @@ func MintPermitProbe(
 	lab LabInfo,
 	now time.Time,
 ) (LabCapability, error) {
-	if !ValidProfileID(profile.ID) ||
-		!profile.UniqueIPRequired ||
-		!profile.KillSwitchRequired ||
-		profile.Status != "unconfigured" ||
-		profile.TunnelID != "" {
-		return LabCapability{}, errors.New("profile does not satisfy probe policy")
-	}
-
-	if binding.ProfileID != profile.ID ||
-		!ValidRuntimeID(binding.RuntimeID) ||
-		binding.RuntimeID != info.RuntimeID ||
-		binding.HelperEpoch != info.HelperID ||
-		!ValidLabNamespace(binding.Namespace) {
-		return LabCapability{}, errors.New("stale or mismatched runtime binding")
-	}
-
-	if lab.ProfileID != profile.ID || lab.Namespace != binding.Namespace || lab.State != LabTunnelConfigured {
-		return LabCapability{}, errors.New("probe requires the profile's configured tunnel")
+	if err := validateProbeTarget(profile, binding, info, lab); err != nil {
+		return LabCapability{}, err
 	}
 
 	return mintLabCapability(signer, LabIntent{

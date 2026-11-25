@@ -1,7 +1,8 @@
-// Command egresslab-controller-lab signs CreateLab, ConnectTunnel and PermitProbe capabilities with
-// the controller key and drives the helper's sealed lab, tunnel and diagnostic probe through the
-// host's Linux runtime (WSL2, Lima or native Linux). The helper stays the source of truth for lab and tunnel state. It is a lab
-// tool: -approve is an operator confirmation, not user authentication.
+// Command egresslab-controller-lab signs CreateLab, ConnectTunnel, PermitProbe and
+// PermitMultiProbeV1 capabilities with the controller key and drives the helper's sealed lab, tunnel
+// and diagnostic probes through the host's Linux runtime (WSL2, Lima or native Linux). The helper
+// stays the source of truth for lab and tunnel state. It is a lab tool: -approve is an operator
+// confirmation, not user authentication.
 package main
 
 import (
@@ -30,7 +31,7 @@ type deps struct {
 
 var approvalRequired = map[string]bool{
 	"create-lab": true, "delete-lab": true, "trust-runtime": true, "untrust-runtime": true, "unbind-profile": true,
-	"connect-tunnel": true, "disconnect": true, "probe-egress": true,
+	"connect-tunnel": true, "disconnect": true, "probe-egress": true, "probe-egress-multi": true,
 }
 
 func main() {
@@ -139,6 +140,15 @@ func run(argv []string, d deps) error {
 			control.LabProbeInfo
 			NetworkReady bool `json:"network_ready"`
 		}{LabProbeInfo: observation}
+	case "multi-probe-policy":
+		result, err = s.provider.Transport().MultiProbePolicy(ctx)
+	case "probe-egress-multi":
+		var observation control.LabMultiProbeInfo
+		observation, err = s.probeEgressMulti(args[1], args[2])
+		result = struct {
+			control.LabMultiProbeInfo
+			NetworkReady bool `json:"network_ready"`
+		}{LabMultiProbeInfo: observation}
 	}
 
 	if err != nil {
@@ -150,7 +160,7 @@ func run(argv []string, d deps) error {
 
 func checkArgs(args []string) error {
 	switch args[0] {
-	case "runtime-status", "helper-info", "list-labs", "trust-runtime":
+	case "runtime-status", "helper-info", "list-labs", "trust-runtime", "multi-probe-policy":
 		if len(args) == 1 {
 			return nil
 		}
@@ -162,7 +172,7 @@ func checkArgs(args []string) error {
 		if len(args) == 2 && control.ValidRuntimeID(args[1]) {
 			return nil
 		}
-	case "verify-lab", "delete-lab", "disconnect", "probe-egress":
+	case "verify-lab", "delete-lab", "disconnect", "probe-egress", "probe-egress-multi":
 		if len(args) == 3 && control.ValidProfileID(args[1]) && control.ValidLabNamespace(args[2]) {
 			return nil
 		}
@@ -542,9 +552,9 @@ func loadProfile(dataDir, id string) (control.RoutingProfile, error) {
 
 func usageError() error {
 	return errors.New("usage: egresslab-controller-lab [-runtime auto|wsl|lima|native] [-wsl-distro NAME] [-lima-instance NAME] [-approve] COMMAND\n" +
-		"  init-key | public-key | runtimes | runtime-status | helper-info | list-labs\n" +
+		"  init-key | public-key | runtimes | runtime-status | helper-info | list-labs | multi-probe-policy\n" +
 		"  trust-runtime | untrust-runtime RUNTIME_ID | unbind-profile PROFILE_ID\n" +
 		"  create-lab PROFILE_ID | verify-lab PROFILE_ID NAMESPACE | delete-lab PROFILE_ID NAMESPACE\n" +
 		"  stage-info PROFILE_ID | connect-tunnel PROFILE_ID NAMESPACE STAGE_ID | disconnect PROFILE_ID NAMESPACE\n" +
-		"  probe-egress PROFILE_ID NAMESPACE")
+		"  probe-egress PROFILE_ID NAMESPACE | probe-egress-multi PROFILE_ID NAMESPACE")
 }

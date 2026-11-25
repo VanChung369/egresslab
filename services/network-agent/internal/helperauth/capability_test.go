@@ -310,6 +310,50 @@ func TestPermitProbeSigningMessageGolden(t *testing.T) {
 	}
 }
 
+// The controller's TestLabSignerGolden pins the same PermitMultiProbeV1 vector.
+func TestPermitMultiProbeSigningMessageGolden(t *testing.T) {
+	private := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, ed25519.SeedSize))
+
+	intent, err := NewMultiProbeIntent(testProfile, testLab, "9.9.9.9")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claims := Claims{
+		Version:  Version,
+		Intent:   intent,
+		HelperID: testHelper,
+		Nonce:    "00112233445566778899aabbccddeeff",
+		IssuedAt: 1795500000,
+		NotAfter: 1795500030,
+	}
+
+	wantMessage := "egresslab/helper-capability/v1\x00" +
+		`{"version":1,"intent":{"operation":"PermitMultiProbeV1","profile_id":"profile_0123456789abcdef",` +
+		`"namespace":"egresslab-lab-0123456789abcdef","probe_ipv4":"9.9.9.9"},` +
+		`"helper_id":"helper_0123456789abcdef0123456789abcdef","nonce":"00112233445566778899aabbccddeeff",` +
+		`"issued_at":1795500000,"not_after":1795500030}`
+
+	msg, err := signingMessage(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if string(msg) != wantMessage {
+		t.Fatalf("signing message changed:\n got %q\nwant %q", msg, wantMessage)
+	}
+
+	token, err := Mint(private, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const wantSignature = "XepTcoWImAW-vewRsc-T_gOfB3NWD1Rr6-xch0blj9kS2ECoA_DBoybFDCUmSDJPuu_j5Tw8IPSmysPeosU5BA"
+	if token.Signature != wantSignature {
+		t.Fatalf("signature changed: %s", token.Signature)
+	}
+}
+
 // TestSigningMessageGolden pins the exact signed bytes. Another implementation (for example the
 // controller, which is a separate Go module) must produce the same message and signature.
 func TestSigningMessageGolden(t *testing.T) {
