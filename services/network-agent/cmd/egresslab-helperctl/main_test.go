@@ -111,3 +111,41 @@ func TestFailureOutputCarriesCode(t *testing.T) {
 		t.Errorf("capability error code: %v", err)
 	}
 }
+
+func TestMultiProbeCommandArguments(t *testing.T) {
+	profile := "profile_0123456789abcdef"
+	namespace := "egresslab-lab-0123456789abcdef"
+
+	for _, args := range [][]string{
+		{"multi-probe-policy", "extra"},
+		{"probe-egress-multi"},
+		{"probe-egress-multi", profile},
+		{"probe-egress-multi", "invalid-profile", namespace},
+		{"probe-egress-multi", profile, "../default"},
+		{"probe-egress-multi", profile, namespace, "9.9.9.9"},
+		{"probe-egress-multi", profile, namespace, "https://example.com/"},
+		{"probe-egress-multi", profile, namespace, "--insecure"},
+	} {
+		var out bytes.Buffer
+
+		err := run(args, strings.NewReader(validCapability), &out)
+		if err == nil || !strings.Contains(err.Error(), "usage") || out.Len() != 0 {
+			t.Fatalf("invalid arguments accepted: %v %v", args, err)
+		}
+	}
+}
+
+// Every input is refused before the helper is contacted, including a well-formed capability for
+// another operation.
+func TestMultiProbeRequiresCapability(t *testing.T) {
+	args := []string{"probe-egress-multi", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef"}
+
+	for _, input := range []string{"", "not JSON", "{}{}", validCapability} {
+		var out bytes.Buffer
+
+		err := run(args, strings.NewReader(input), &out)
+		if helperipc.ErrorCode(err) != helperipc.CodeInvalidRequest || out.Len() != 0 {
+			t.Fatalf("invalid capability %q accepted: %v", input, err)
+		}
+	}
+}

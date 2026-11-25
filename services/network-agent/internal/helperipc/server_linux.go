@@ -208,7 +208,7 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 	v, labs := opts.Verifier, opts.Labs
 
 	switch req.Operation {
-	case OpPing, OpRecoverScan, OpHelperInfo, OpListLabs:
+	case OpPing, OpRecoverScan, OpHelperInfo, OpListLabs, OpMultiProbePolicy:
 		if hasAuthFields {
 			return refuse(CodeInvalidRequest, "unexpected authorization fields")
 		}
@@ -246,6 +246,23 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 			RuntimeID:               opts.RuntimeID,
 		}
 		resp.OK = true
+
+	case OpMultiProbePolicy:
+		if labs == nil || labs.multiProbes == nil || v == nil {
+			return refuse(CodeOperationDisabled, "operation not enabled")
+		}
+
+		policyCtx, cancel := context.WithTimeout(ctx, scanTimeout)
+		policy, err := labs.readMultiProbePolicy(policyCtx, v, opts.RuntimeID)
+		cancel()
+
+		if err != nil {
+			code := labCode(err)
+			return refuse(code, labMessages[code])
+		}
+
+		resp.OK = true
+		resp.MultiProbePolicy = &policy
 
 	case OpAuthorizeCheck:
 		if v == nil || req.Intent == nil || req.Capability == nil {

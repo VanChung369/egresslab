@@ -62,6 +62,8 @@ type Response struct {
 	Stage        *StageInfo      `json:"stage,omitempty"`
 	Probe        *ProbeInfo      `json:"probe,omitempty"`
 	MultiProbe   *MultiProbeInfo `json:"multi_probe,omitempty"`
+
+	MultiProbePolicy *MultiProbePolicyInfo `json:"multi_probe_policy,omitempty"`
 }
 
 var ErrInvalidFrame = errors.New("invalid helper IPC frame")
@@ -121,7 +123,7 @@ func WriteFrame(w io.Writer, value any) error {
 // Call sends one read-only operation (Ping, RecoverScan, HelperInfo or ListLabs) to the helper.
 // It never retries.
 func Call(ctx context.Context, socketPath string, op string) (Response, error) {
-	if op != OpPing && op != OpRecoverScan && op != OpHelperInfo && op != OpListLabs {
+	if op != OpPing && op != OpRecoverScan && op != OpHelperInfo && op != OpListLabs && op != OpMultiProbePolicy {
 		return Response{}, errors.New("operation is not available to the helper client")
 	}
 
@@ -226,6 +228,10 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 
 	if !validMultiProbeResponse(req, resp) {
 		return Response{}, errors.New("invalid managed multi-source probe response")
+	}
+
+	if !validMultiProbePolicyResponse(req, resp) {
+		return Response{}, errors.New("invalid multi-source policy response")
 	}
 
 	// The attempt must lie between writing this request and reading its answer.

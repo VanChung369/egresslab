@@ -145,7 +145,7 @@ func olderHelperDisabled(req Request, resp Response) bool {
 		resp.Version == Version && !resp.OK && !resp.NetworkReady &&
 		resp.Operation == "" && resp.Code == CodeOperationDisabled &&
 		len(resp.Items) == 0 && resp.Info == nil && resp.Lab == nil && len(resp.Labs) == 0 &&
-		resp.Stage == nil && resp.Probe == nil && resp.MultiProbe == nil
+		resp.Stage == nil && resp.Probe == nil && resp.MultiProbe == nil && resp.MultiProbePolicy == nil
 }
 
 func validMultiProbeResponse(req Request, resp Response) bool {

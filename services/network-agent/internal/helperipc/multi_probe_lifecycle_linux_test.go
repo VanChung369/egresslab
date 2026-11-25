@@ -146,10 +146,12 @@ func TestOlderHelperRefusesMultiProbe(t *testing.T) {
 		resp Response
 		code string
 	}{
-		"bare refusal":        {refusal, CodeOperationDisabled},
-		"other code":          {Response{Version: Version, Code: CodeLabBusy, Error: "busy"}, CodeInternal},
-		"unnamed success":     {Response{Version: Version, OK: true}, CodeInternal},
-		"refusal with a lab":  {Response{Version: Version, Code: CodeOperationDisabled, Lab: &LabInfo{}}, CodeInternal},
+		"bare refusal":       {refusal, CodeOperationDisabled},
+		"other code":         {Response{Version: Version, Code: CodeLabBusy, Error: "busy"}, CodeInternal},
+		"unnamed success":    {Response{Version: Version, OK: true}, CodeInternal},
+		"refusal with a lab": {Response{Version: Version, Code: CodeOperationDisabled, Lab: &LabInfo{}}, CodeInternal},
+		"refusal with a policy": {Response{Version: Version, Code: CodeOperationDisabled,
+			MultiProbePolicy: &MultiProbePolicyInfo{}}, CodeInternal},
 		"refusal for version": {Response{Version: Version + 1, Code: CodeOperationDisabled}, CodeInternal},
 	} {
 		socket := fakeHelper(t, func(Request) Response { return tt.resp })

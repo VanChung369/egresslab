@@ -8,8 +8,12 @@
 // namespaces; -enable-vault adds the managed WireGuard vault (StageInfo), and -enable-tunnel the
 // signed ConnectTunnel and Disconnect of a vault stage in a sealed lab (one tunnel per helper), and
 // -enable-probe (with -probe-uid and -probe-gid) the signed PermitProbe, one diagnostic egress probe
-// run by an unprivileged worker. The offline commands vault-init, vault-stage and vault-revoke
-// administer the vault. Proxy operations are not implemented.
+// run by an unprivileged worker. -enable-multi-probe (with the same IDs, and instead of
+// -enable-probe) enables the signed PermitMultiProbeV1 and MultiProbePolicy instead, with the
+// ident.me pin read from /etc/egresslab/multi-probe-pin at startup. The offline commands
+// vault-init, vault-stage and vault-revoke administer the vault, and check-multi-probe-pin applies
+// the startup rules to a staged pin file. Proxy operations are not
+// implemented.
 //
 // In this step it runs as root under sudo; the production design keeps only CAP_NET_ADMIN.
 package main
@@ -21,12 +25,14 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
 	"github.com/VanChung369/egresslab/services/network-agent/internal/agent"
+	"github.com/VanChung369/egresslab/services/network-agent/internal/helperauth"
 	"github.com/VanChung369/egresslab/services/network-agent/internal/helperipc"
 )
 
@@ -37,6 +43,15 @@ func main() {
 			if err := runVaultAdmin(os.Args[1:]); err != nil {
 				log.Fatal(err)
 			}
+			return
+
+		case "check-multi-probe-pin":
+			pin, err := checkMultiProbePinCommand(os.Args[2:])
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			fmt.Println(pin)
 			return
 		}
 	}
@@ -50,6 +65,8 @@ func main() {
 	enableVault := flag.Bool("enable-vault", false, "enable the root-managed WireGuard vault (requires -enable-lab-lifecycle)")
 	enableTunnel := flag.Bool("enable-tunnel", false, "enable the managed WireGuard tunnel lifecycle (requires -enable-vault)")
 	enableProbe := flag.Bool("enable-probe", false, "enable signed managed egress probes (requires -enable-tunnel)")
+	enableMultiProbe := flag.Bool("enable-multi-probe", false,
+		"enable signed multi-source egress verification (requires -enable-tunnel; excludes -enable-probe)")
 	probeUID := flag.Int("probe-uid", -1, "dedicated unprivileged probe UID")
 	probeGID := flag.Int("probe-gid", -1, "dedicated unprivileged probe GID")
 	flag.Parse()
@@ -57,14 +74,51 @@ func main() {
 	if os.Geteuid() != 0 || *uid <= 0 || *gid <= 0 || flag.NArg() != 0 {
 		log.Fatal("usage: sudo egresslab-helper -uid <non-root UID> -gid <non-root GID> " +
 			"[-auth-public-key-file <path> [-enable-lab-lifecycle [-enable-vault [-enable-tunnel\n" +
-			"       [-enable-probe -probe-uid <UID> -probe-gid <GID>]]]]]\n" +
-			"       sudo egresslab-helper vault-init | vault-stage PROFILE_ID | vault-revoke PROFILE_ID")
+			"       [(-enable-probe | -enable-multi-probe) -probe-uid <UID> -probe-gid <GID>]]]]]\n" +
+			"       sudo egresslab-helper vault-init | vault-stage PROFILE_ID | vault-revoke PROFILE_ID\n" +
+			"       sudo egresslab-helper check-multi-probe-pin PATH")
 	}
 
 	if err := run(*uid, *gid, *publicKeyFile, *enableLifecycle, *enableVault, *enableTunnel, *enableProbe,
-		*probeUID, *probeGID); err != nil {
+		*probeUID, *probeGID, *enableMultiProbe); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// validID accepts a non-root ID that fits uid_t/gid_t, excluding (uid_t)-1.
+func validID(id int) bool {
+	return id > 0 && uint64(id) < uint64(^uint32(0))
+}
+
+// validateProbeFlags allows one probe mode at most. The probe worker never shares the agent's
+// identity: it needs neither the socket nor the vault. The agent's IDs are bounded first, so a
+// value beyond 32 bits cannot compare unequal here and still name the worker once truncated.
+func validateProbeFlags(uid, gid int, enableTunnel, enableProbe, enableMultiProbe bool, probeUID, probeGID int) error {
+	if !validID(uid) || !validID(gid) {
+		return errors.New("agent UID and GID must be non-root 32-bit IDs")
+	}
+
+	if enableProbe && enableMultiProbe {
+		return errors.New("single-source and multi-source probe modes are mutually exclusive")
+	}
+
+	if !enableProbe && !enableMultiProbe {
+		if probeUID != -1 || probeGID != -1 {
+			return errors.New("probe UID and GID require -enable-probe or -enable-multi-probe")
+		}
+
+		return nil
+	}
+
+	if !enableTunnel {
+		return errors.New("managed probe requires managed tunnel")
+	}
+
+	if !validID(probeUID) || !validID(probeGID) || probeUID == uid || probeGID == gid {
+		return errors.New("managed probe requires a separate non-root UID and GID")
+	}
+
+	return nil
 }
 
 func run(
@@ -72,22 +126,31 @@ func run(
 	publicKeyFile string,
 	enableLifecycle, enableVault, enableTunnel, enableProbe bool,
 	probeUID, probeGID int,
+	enableMultiProbe bool,
 ) error {
-	// The probe worker never shares the agent's identity: it needs neither the socket nor the vault.
-	if enableProbe {
-		if !enableTunnel {
-			return errors.New("managed probe requires managed tunnel")
-		}
-
-		if probeUID <= 0 || probeGID <= 0 || probeUID == uid || probeGID == gid {
-			return errors.New("managed probe requires a separate non-root UID and GID")
-		}
-	} else if probeUID != -1 || probeGID != -1 {
-		return errors.New("probe UID and GID require -enable-probe")
+	if err := validateProbeFlags(uid, gid, enableTunnel, enableProbe, enableMultiProbe, probeUID, probeGID); err != nil {
+		return err
 	}
 
 	if enableTunnel && !enableVault {
 		return errors.New("managed tunnel requires managed vault")
+	}
+
+	if enableVault && !enableLifecycle {
+		return errors.New("managed vault requires authorized lab lifecycle")
+	}
+
+	// The trusted source policy is read before the key, the socket, the vault or the kernel: a
+	// missing or unsafe pin refuses the start, with no fallback to the single-source probe.
+	var identPin netip.Addr
+
+	if enableMultiProbe {
+		pin, err := loadMultiProbePin()
+		if err != nil {
+			return fmt.Errorf("multi-source probe configuration: %w", err)
+		}
+
+		identPin = pin
 	}
 
 	// Load the key before touching /run/egresslab, so a bad configuration changes nothing.
@@ -137,10 +200,14 @@ func run(
 		if enableTunnel {
 			var tunnels *agent.ManagedTunnelBackend
 
-			if enableProbe {
+			switch {
+			case enableMultiProbe:
+				tunnels, err = agent.NewManagedMultiProbeTunnelBackend(backend.SealedLabBackend,
+					vault.WireGuardConfigVault, probeUID, probeGID, identPin)
+			case enableProbe:
 				tunnels, err = agent.NewManagedProbeTunnelBackend(backend.SealedLabBackend, vault.WireGuardConfigVault,
 					probeUID, probeGID)
-			} else {
+			default:
 				tunnels, err = agent.NewManagedTunnelBackend(backend.SealedLabBackend, vault.WireGuardConfigVault)
 			}
 
@@ -148,9 +215,12 @@ func run(
 				return fmt.Errorf("initialize managed tunnel: %w", err)
 			}
 
-			if enableProbe {
+			switch {
+			case enableMultiProbe:
+				labs = helperipc.NewMultiProbeLifecycle(backend, tunnelBackend{tunnels})
+			case enableProbe:
 				labs = helperipc.NewProbeLifecycle(backend, tunnelBackend{tunnels})
-			} else {
+			default:
 				labs = helperipc.NewTunnelLifecycle(backend, tunnelBackend{tunnels})
 			}
 		}
@@ -191,6 +261,12 @@ func run(
 
 		if enableProbe {
 			mode = "signed sealed lab, managed tunnel and diagnostic probe enabled; proxy disabled"
+		}
+
+		if enableMultiProbe {
+			mode = "signed sealed lab, managed tunnel and multi-source verification enabled; single-source probe and proxy disabled"
+
+			log.Printf("Multi-source policy: %s; ident.me pin: %s", helperauth.OpPermitMultiProbe, identPin)
 		}
 
 		if err := backend.Preflight(ctx); err != nil {

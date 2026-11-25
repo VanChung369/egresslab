@@ -1,6 +1,6 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 29C.4a — signed multi-source helper IPC (not enabled in the helper yet).** A controller
+Status: **Step 29C.4b — trusted multi-source provisioning and helperctl (controller signer pending).** A controller
 CLI signs `CreateLab`, `ConnectTunnel` and `PermitProbe` and drives the helper's sealed lab, tunnel
 and diagnostic probe in the Linux runtime; the helper holds the encrypted WireGuard configs,
 disables IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once and pins
@@ -49,15 +49,18 @@ operations only" on are partly design.
 - The client checks that the production socket is served by root (`SO_PEERCRED`) before it sends
   anything.
 - `egresslab-helperctl` covers every helper operation except `AuthorizeCheck`, including
-  `stage-info`, `connect-tunnel`, `disconnect` and `probe-egress`. `create-lab`, `connect-tunnel`
-  and `probe-egress` read the capability from stdin only, never from argv. It refuses to run as
-  root.
+  `stage-info`, `connect-tunnel`, `disconnect`, `probe-egress`, `multi-probe-policy` and
+  `probe-egress-multi`. `create-lab`, `connect-tunnel`, `probe-egress` and `probe-egress-multi`
+  read the capability from stdin only, never from argv. It refuses to run as root.
 - The managed WireGuard vault and `StageInfo` (see "Managed WireGuard vault").
 - Signed `ConnectTunnel` and `Disconnect` behind `-enable-tunnel` (see "Signed tunnel lifecycle"),
   on the managed tunnel kernel backend (see "Managed tunnel backend").
 - Signed `PermitProbe` behind `-enable-probe`, with a dedicated probe UID and GID: one diagnostic
   observation through a kernel-timed firewall window and an unprivileged worker (see "Signed
   probe").
+- Instead, signed `PermitMultiProbeV1` and the read-only `MultiProbePolicy` behind
+  `-enable-multi-probe`, with the ident.me pin from `/etc/egresslab/multi-probe-pin` (see "Trusted
+  multi-source provisioning").
 - Controller side (see "Controller and runtimes"):
   - an Ed25519 signer for `CreateLab`, `ConnectTunnel` and `PermitProbe`, checked against the
     three golden vectors the helper also pins; `ConnectTunnel` is signed only for the profile's
@@ -1067,8 +1070,81 @@ echo rule allowed letters only); the client maps exactly that bare refusal to
 not.
 
 The `multi_probe` response is diagnostic evidence only: `network_ready` stays false, and no lease
-or application traffic exists. `egresslab-helper` does not enable the operation yet: Step 29C.4b
-adds the trusted pin provisioning, the helper startup flag and `egresslab-helperctl`, and Step
-29C.4c the controller signer and end-to-end verification over the VPN. The lifecycle is tested
-with a fake kernel backend, including over a real Unix socket with the real framing, dispatcher
-and verifier on Lima; the new binaries were built but not installed.
+or application traffic exists. Step 29C.4b enables the operation in `egresslab-helper`, and Step
+29C.4c adds the controller signer and end-to-end verification over the VPN. The lifecycle is
+tested with a fake kernel backend, including over a real Unix socket with the real framing,
+dispatcher and verifier on Lima.
+
+### Trusted multi-source provisioning (Step 29C.4b)
+
+`-enable-multi-probe` (with `-enable-tunnel` and a dedicated `-probe-uid`/`-probe-gid`, like
+`-enable-probe`) enables `PermitMultiProbeV1` and `MultiProbePolicy`. Every UID and GID, the
+agent's and the worker's, must be a non-root 32-bit ID other than `(uid_t)-1`, checked before the
+worker's are compared with the agent's, so a value that would be truncated cannot alias them. The two probe modes are
+mutually exclusive: starting with both is refused, and in multi-source mode `PermitProbe` answers
+`OPERATION_DISABLED`, so nothing falls back to one source.
+
+| Flags | `PermitProbe` | `PermitMultiProbeV1`, `MultiProbePolicy` |
+|---|---|---|
+| neither | disabled | disabled |
+| `-enable-probe` | enabled | disabled |
+| `-enable-multi-probe` | disabled | enabled |
+| both | start refused | start refused |
+
+The ident.me pin comes from `/etc/egresslab/multi-probe-pin` only: never from a flag, an
+environment variable, an IPC request or a DNS lookup. The file holds one canonical public IPv4
+address other than `1.1.1.1`, optionally followed by one LF, and nothing else (no CR, spaces,
+second line, port, URL or `KEY=` prefix), at most 64 bytes. It must be a regular file owned by
+root and not writable by group or others (0600 recommended), in real, root-owned directories that
+nobody else can write, up to `/`; a symlink (the file or a parent), a FIFO, a directory, an empty
+or oversized file and an invalid address are refused. The file is opened with `O_NOFOLLOW` and
+`O_NONBLOCK` and must be the same file that was checked (`os.SameFile`). This assumes root and the
+root-owned directories are trusted; it does not defend against a malicious root process. The path
+must be absolute and canonical (no `..`, `//` or trailing `/`): it is not cleaned, so the file
+checked is the file a rename of the same path replaces.
+
+The helper reads the pin after checking its flags and before the authorization key, the socket,
+the vault or the kernel backend: a missing, unsafe or invalid pin refuses the start
+(`multi-source probe configuration: …`) and changes nothing, and the helper never starts in
+another mode instead. The pin is fixed for the helper's lifetime; changing it means trusted
+provisioning and a restart, which also starts a new helper epoch, so every capability minted for
+the old process is refused. The start log names the policy and the pin. The mode needs the Step
+29C.3 worker (`--source`); an older `egresslab-probe` passes the binary checks but would fail the
+first attempt, so the upgrade reinstalls it (`docs/DEV-LINUX-VM.md`). `sudo egresslab-helper
+check-multi-probe-pin PATH` applies the same rules to a staged file and prints the pin, so a
+rotation can be checked before it replaces the working file (see `docs/DEV-LINUX-VM.md`).
+
+`MultiProbePolicy` is read-only: it takes no intent or capability (`INVALID_REQUEST` if it gets
+one), creates no lab, opens no window, runs no worker and consumes no nonce. It answers
+`{policy, ident_ipv4, helper_id, runtime_id, public_key_sha256}`, the policy version and pin bound
+to the helper epoch, runtime ID and public-key fingerprint they belong to, so the controller can
+compare them with what it trusts before it signs (Step 29C.4c). It does not wait behind a running
+operation (`LAB_BUSY`; shutdown is reported first, as `RUNTIME_UNAVAILABLE`), and answers `OPERATION_DISABLED` without the multi-source mode,
+`RUNTIME_UNAVAILABLE` while shutting down or without a readable policy, and `STATE_UNCERTAIN` when
+the kernel state is uncertain, including while a tunnel whose removal was not confirmed is still
+tracked on its faulted lab. The client checks every field (the policy name, a valid pin, the
+identity formats) and refuses the metadata on any other operation or on a failure. Reading it is
+not authorization: `PermitMultiProbeV1` still needs a capability for exactly that pin. The
+fields are not added to `HelperInfo`, which older controllers decode strictly.
+
+`egresslab-helperctl multi-probe-policy` prints the policy, and `egresslab-helperctl
+probe-egress-multi PROFILE_ID NAMESPACE < capability.json` runs one signed attempt (200 s client
+budget, like `probe-egress`). There is no destination, URL, host, port or TLS argument; any extra
+argument is a usage error, and the capability is read from stdin only and checked against the
+V1 intent before the helper is contacted.
+
+Provisioned on Lima on 2026-11-25 (an observation, not a constant): `4.ident.me` resolved to
+`65.108.151.63` only, from the host and from the VM, the address recorded in Step 29C.2. A pinned
+HTTPS request from the VM returned HTTP 200 with a verified certificate and no redirect, and a
+12-byte body that was one IPv4 address, the same one the Cloudflare trace reported (neither was
+printed). The pin file was installed root:root 0600 by an atomic rename, and the new binaries
+were installed. The helper refused to start in multi-source mode before the file existed (before
+creating `/run/egresslab`), and refused both probe modes together, also while another helper was
+running. Started with `-enable-multi-probe` (against a throwaway public key whose private half was
+never stored, and an empty vault), it logged the policy and pin; `multi-probe-policy` returned
+them with the same epoch, runtime ID and fingerprint as `helper-info`; `probe-egress-multi`
+without a capability or with a destination argument was refused as `INVALID_REQUEST` by
+helperctl, and `PermitProbe` as `OPERATION_DISABLED` by the helper; `list-labs` and
+`recover-scan` were empty, and SIGTERM stopped it and removed the socket. No signed probe ran:
+the controller signer and the VPN verification are Step 29C.4c. No lease or application traffic
+is authorized.

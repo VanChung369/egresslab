@@ -22,10 +22,11 @@ import (
 const maxCapabilityBytes = 8192
 
 var readOnlyOperations = map[string]string{
-	"ping":         helperipc.OpPing,
-	"helper-info":  helperipc.OpHelperInfo,
-	"recover-scan": helperipc.OpRecoverScan,
-	"list-labs":    helperipc.OpListLabs,
+	"ping":               helperipc.OpPing,
+	"helper-info":        helperipc.OpHelperInfo,
+	"recover-scan":       helperipc.OpRecoverScan,
+	"list-labs":          helperipc.OpListLabs,
+	"multi-probe-policy": helperipc.OpMultiProbePolicy,
 }
 
 func main() {
@@ -70,7 +71,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 
 	// A probe's worst case (failed probe plus independent cleanups) is longer than other operations.
 	timeout := 135 * time.Second
-	if args[0] == "probe-egress" {
+	if args[0] == "probe-egress" || args[0] == "probe-egress-multi" {
 		timeout = 200 * time.Second
 	}
 
@@ -81,7 +82,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	var err error
 
 	switch args[0] {
-	case "ping", "helper-info", "recover-scan", "list-labs":
+	case "ping", "helper-info", "recover-scan", "list-labs", "multi-probe-policy":
 		if len(args) != 1 {
 			return usageError()
 		}
@@ -125,6 +126,20 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		}
 
 		result, err = helperipc.ProbeEgress(ctx, helperipc.SocketPath, args[1], args[2], capability)
+
+	case "probe-egress-multi":
+		// No destination argument either: the capability names the pin, and the helper's own policy
+		// must match it.
+		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
+			return usageError()
+		}
+
+		capability, readErr := readCapability(stdin)
+		if readErr != nil {
+			return readErr
+		}
+
+		result, err = helperipc.ProbeEgressMulti(ctx, helperipc.SocketPath, args[1], args[2], capability)
 
 	case "disconnect":
 		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
@@ -189,12 +204,13 @@ func readCapability(r io.Reader) (helperauth.SignedCapability, error) {
 }
 
 func usageError() error {
-	return invalid("usage: egresslab-helperctl ping|helper-info|recover-scan|list-labs\n" +
+	return invalid("usage: egresslab-helperctl ping|helper-info|recover-scan|list-labs|multi-probe-policy\n" +
 		"       egresslab-helperctl create-lab PROFILE_ID < capability.json\n" +
 		"       egresslab-helperctl stage-info PROFILE_ID\n" +
 		"       egresslab-helperctl verify-lab PROFILE_ID NAMESPACE\n" +
 		"       egresslab-helperctl delete-lab PROFILE_ID NAMESPACE\n" +
 		"       egresslab-helperctl connect-tunnel PROFILE_ID NAMESPACE STAGE_ID < capability.json\n" +
 		"       egresslab-helperctl disconnect PROFILE_ID NAMESPACE\n" +
-		"       egresslab-helperctl probe-egress PROFILE_ID NAMESPACE < capability.json")
+		"       egresslab-helperctl probe-egress PROFILE_ID NAMESPACE < capability.json\n" +
+		"       egresslab-helperctl probe-egress-multi PROFILE_ID NAMESPACE < capability.json")
 }

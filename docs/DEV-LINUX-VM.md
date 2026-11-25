@@ -377,7 +377,42 @@ egresslab-probe --url https://example.com/      # invalid probe arguments, exit 
 egresslab-probe --source ident_me 2001:db8::1   # invalid probe destination, exit 1
 ```
 
-Build and test it on Linux before installing it. End-to-end multi-source testing over the VPN needs the helper provisioning of Step 29C.4b and the controller integration of Step 29C.4c; do not open the lab firewall by hand to try it.
+Build and test it on Linux before installing it. End-to-end multi-source testing over the VPN needs the controller integration of Step 29C.4c; do not open the lab firewall by hand to try it.
+
+### Multi-source helper (Step 29C.4b)
+
+Choose the ident.me pin outside the lab namespace (see "Multi-source HTTPS endpoint provisioning"): resolve `4.ident.me` (`getent ahostsv4 4.ident.me` in the VM, `dig +short A 4.ident.me` on the host), do not take the first answer blindly, and verify the chosen address with pinned HTTPS and normal certificate checks. Then install it as root, atomically:
+
+```bash
+# Inside the VM, with the new egresslab-helper installed; PIN is the address verified in this
+# session. The subshell stops at the first failure, and the working pin is replaced only after the
+# helper's own startup rules accepted the staged file.
+(
+  set -eu
+  : "${PIN:?set PIN to the verified address}"
+  sudo install -d -o root -g root -m 0755 /etc/egresslab
+  stage=$(sudo mktemp -d /etc/egresslab/.multi-probe-pin.XXXXXX)   # unique, root-only, same filesystem
+  printf '%s\n' "$PIN" | sudo tee "$stage/multi-probe-pin" > /dev/null
+  sudo chmod 0600 "$stage/multi-probe-pin"
+  sudo /usr/local/bin/egresslab-helper check-multi-probe-pin "$stage/multi-probe-pin"
+  sudo mv -T "$stage/multi-probe-pin" /etc/egresslab/multi-probe-pin
+  sudo rmdir "$stage"
+  sudo stat -c 'owner=%U group=%G mode=%a type=%F' /etc/egresslab/multi-probe-pin   # owner=root group=root mode=600 type=regular file
+)
+```
+
+Upgrading from single-source mode also needs the Step 29C.3 worker: rebuild and reinstall `egresslab-probe` with the helper (see "Managed probe worker"). An older worker passes the helper's ownership checks but refuses `--source`, so the first signed attempt would fail and fault the lab. Check it before starting the helper: `/usr/local/bin/egresslab-probe --source unknown 9.9.9.9` must print `unknown probe source` (an older worker prints `probe accepts no arguments`).
+
+The file holds one canonical public IPv4 address other than `1.1.1.1` and at most one trailing LF: no `IDENT_PIN=`, URL, host name or port. `check-multi-probe-pin` applies exactly the rules the helper applies at startup (ownership, directories, size, address policy) to an absolute, canonical path (no `..`, `//` or trailing `/`, so the file checked is the file renamed) and prints the pin; if it refuses, the working pin is untouched and the root-only staging directory `/etc/egresslab/.multi-probe-pin.*` is left for you to inspect and remove. Start the helper with `-enable-multi-probe` instead of `-enable-probe` (never both):
+
+```bash
+sudo /usr/local/bin/egresslab-helper -uid "$(id -u)" -gid "$(id -g)" \
+  -auth-public-key-file /etc/egresslab/helper-auth.pub \
+  -enable-lab-lifecycle -enable-vault -enable-tunnel \
+  -enable-multi-probe -probe-uid "$(id -u egresslab-probe)" -probe-gid "$(id -g egresslab-probe)"
+```
+
+A missing or unsafe pin file stops the start before the socket exists. `egresslab-helperctl multi-probe-policy` prints the policy version, the pin and the helper epoch, runtime ID and public-key fingerprint; compare the last three with `egresslab-helperctl helper-info`. The policy is metadata, not authorization. `egresslab-helperctl probe-egress-multi PROFILE_ID NAMESPACE < capability.json` takes the signed capability on stdin and no destination argument. Do not hand-craft capabilities or open the managed firewall by hand; the controller signs `PermitMultiProbeV1` in Step 29C.4c. Changing the pin needs the same provisioning and a helper restart (a new epoch).
 
 ## Security Notes
 
@@ -399,8 +434,8 @@ curl -q --noproxy '*' --ipv4 --proto '=https' --connect-timeout 5 --max-time 10 
   --resolve "4.ident.me:443:<candidate IPv4>" -H 'Accept-Encoding: identity' -fsS https://4.ident.me/
 ```
 
-If DNS returns several addresses, do not take the first one blindly. The provider does not promise a stable address. DNS at probe time, automatic replacement of the address and skipping certificate verification (`curl -k`) are not allowed. A host-side check reveals the host's own public IP to the provider; it is not a managed observation and never activates an egress lease. No helper configuration takes the pin yet: `NewManagedMultiProbeTunnelBackend` accepts it (Step 29C.3) and the signed `PermitMultiProbeV1` operation checks requests against it (Step 29C.4a), but the helper exposes no flag for it until Step 29C.4b.
+If DNS returns several addresses, do not take the first one blindly. The provider does not promise a stable address. DNS at probe time, automatic replacement of the address and skipping certificate verification (`curl -k`) are not allowed. A host-side check reveals the host's own public IP to the provider; it is not a managed observation and never activates an egress lease. The helper reads the approved pin from `/etc/egresslab/multi-probe-pin` at startup (Step 29C.4b, see "Multi-source helper").
 
 ## Next Milestone
 
-Multi-source public IP verification: trusted pin provisioning, the helper startup flag and `egresslab-helperctl` (Step 29C.4b), then the controller signer and real VPN verification (Step 29C.4c). The consensus engine (Step 29C.1), the pinned HTTPS sources (Step 29C.2), the managed multi-source lifecycle (Step 29C.3) and the signed `PermitMultiProbeV1` helper IPC (Step 29C.4a) exist, but the installed helper does not enable the operation yet. See `docs/PRIVILEGED-HELPER.md`.
+Multi-source public IP verification: the controller signer for `PermitMultiProbeV1`, checked against `MultiProbePolicy`, and real VPN verification (Step 29C.4c). The consensus engine (Step 29C.1), the pinned HTTPS sources (Step 29C.2), the managed multi-source lifecycle (Step 29C.3), the signed helper IPC (Step 29C.4a) and the trusted pin provisioning with `-enable-multi-probe` and helperctl (Step 29C.4b) exist. See `docs/PRIVILEGED-HELPER.md`.
