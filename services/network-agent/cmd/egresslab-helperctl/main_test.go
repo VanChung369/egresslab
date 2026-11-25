@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -152,6 +153,83 @@ func TestMultiProbeRequiresCapability(t *testing.T) {
 		if helperipc.ErrorCode(err) != helperipc.CodeInvalidRequest || out.Len() != 0 {
 			t.Fatalf("invalid capability %q accepted: %v", input, err)
 		}
+	}
+}
+
+func TestCandidateCommandArguments(t *testing.T) {
+	profile := "profile_0123456789abcdef"
+	namespace := "egresslab-lab-0123456789abcdef"
+
+	for _, args := range [][]string{
+		{"reserve-egress-candidate"},
+		{"reserve-egress-candidate", profile},
+		{"reserve-egress-candidate", profile, "../default"},
+		{"reserve-egress-candidate", "invalid", namespace},
+		{"reserve-egress-candidate", profile, namespace, "8.8.4.4"},
+		{"reserve-egress-candidate", profile, namespace, "--force"},
+	} {
+		var out bytes.Buffer
+
+		err := run(args, strings.NewReader(validCapability), &out)
+		if err == nil || !strings.Contains(err.Error(), "usage") || out.Len() != 0 {
+			t.Fatalf("invalid candidate arguments accepted: %v %v", args, err)
+		}
+	}
+}
+
+// Refused before the helper is contacted, including a capability for another operation.
+func TestCandidateCommandRequiresCapability(t *testing.T) {
+	args := []string{"reserve-egress-candidate", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef"}
+	v2 := `{"claims":{"version":1,"intent":{"operation":"PermitMultiProbeV2","profile_id":"profile_0123456789abcdef",` +
+		`"namespace":"egresslab-lab-0123456789abcdef","probe_ipv4":"9.9.9.9",` +
+		`"tunnel_generation":"tunnelgen_0123456789abcdef0123456789abcdef"},` +
+		`"helper_id":"helper_0123456789abcdef0123456789abcdef","nonce":"00112233445566778899aabbccddeeff",` +
+		`"issued_at":1795500000,"not_after":1795500030},"signature":"x"}`
+	foreignProfile := `{"claims":{"version":1,"intent":{"operation":"ReserveEgressCandidateV1",` +
+		`"profile_id":"profile_ffffffffffffffff","namespace":"egresslab-lab-0123456789abcdef","probe_ipv4":"9.9.9.9",` +
+		`"tunnel_generation":"tunnelgen_0123456789abcdef0123456789abcdef",` +
+		`"evidence_nonce":"ffeeddccbbaa99887766554433221100"},` +
+		`"helper_id":"helper_0123456789abcdef0123456789abcdef","nonce":"00112233445566778899aabbccddeeff",` +
+		`"issued_at":1795500000,"not_after":1795500030},"signature":"x"}`
+
+	for _, input := range []string{
+		"",
+		"not JSON",
+		"{}{}",
+		validCapability,
+		`{"claims":{"intent":{"operation":"PermitMultiProbeV2"}}}`,
+		v2,
+		foreignProfile,
+	} {
+		var out bytes.Buffer
+
+		err := run(args, strings.NewReader(input), &out)
+		if helperipc.ErrorCode(err) != helperipc.CodeInvalidRequest || out.Len() != 0 {
+			t.Fatalf("invalid candidate capability %q accepted: %v", input, err)
+		}
+	}
+}
+
+// A capability that matches the arguments passes every local check and reaches the socket, which
+// here does not exist: the command is wired, and nothing local refused it.
+func TestCandidateCommandReachesHelper(t *testing.T) {
+	previous := socketPath
+	socketPath = filepath.Join(t.TempDir(), "missing.sock")
+	t.Cleanup(func() { socketPath = previous })
+
+	capability := `{"claims":{"version":1,"intent":{"operation":"ReserveEgressCandidateV1",` +
+		`"profile_id":"profile_0123456789abcdef","namespace":"egresslab-lab-0123456789abcdef","probe_ipv4":"9.9.9.9",` +
+		`"tunnel_generation":"tunnelgen_0123456789abcdef0123456789abcdef",` +
+		`"evidence_nonce":"ffeeddccbbaa99887766554433221100"},` +
+		`"helper_id":"helper_0123456789abcdef0123456789abcdef","nonce":"00112233445566778899aabbccddeeff",` +
+		`"issued_at":1795500000,"not_after":1795500030},"signature":"x"}`
+
+	var out bytes.Buffer
+
+	err := run([]string{"reserve-egress-candidate", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef"},
+		strings.NewReader(capability), &out)
+	if helperipc.ErrorCode(err) != helperipc.CodeRuntimeUnavailable || out.Len() != 0 {
+		t.Fatalf("candidate command did not reach the helper socket: %v", err)
 	}
 }
 

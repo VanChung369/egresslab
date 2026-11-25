@@ -357,3 +357,13 @@ func TestControllerGenerationRediscovery(t *testing.T) {
 
 	h.mustRun("-approve", "-wsl-distro", "Ubuntu-A", "delete-lab", p, labNS)
 }
+
+// Temporary stub for the CLI test suite; Step 31D.2 replaces it with a fake candidate lifecycle.
+func (f *fakeRuntime) ReserveEgressCandidate(
+	_ context.Context,
+	_, _ string,
+	_ control.LabCapability,
+) (control.LabCandidateInfo, error) {
+	return control.LabCandidateInfo{}, labruntime.Errorf(labruntime.CodeOperationDisabled,
+		"candidate orchestration is not wired into the CLI yet")
+}

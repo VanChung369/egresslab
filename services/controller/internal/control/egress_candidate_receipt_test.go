@@ -1,6 +1,8 @@
 package control
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -258,5 +260,80 @@ func TestCandidateAdmissionRejectsAnotherAttempt(t *testing.T) {
 
 	if _, err := validateCandidateAdmission(a, base.Add(11*time.Second)); !errors.Is(err, ErrReservationCandidateInvalid) {
 		t.Fatalf("receipt bound to another probe attempt accepted: %v", err)
+	}
+}
+
+func TestMintReserveEgressCandidate(t *testing.T) {
+	base := reservationTestBase
+	valid := testReservationAdmission(t, 1, 1, 1, "8.8.4.4", base)
+
+	mint := func(a candidateAdmission, signer LabSigner, now time.Time) (LabCapability, error) {
+		return mintReserveEgressCandidate(signer, a.profile, a.binding, a.helper, a.lab, a.target, a.probe,
+			a.probeCapability, a.probeSentAt, a.probeReceivedAt, now)
+	}
+
+	signer := newSeedSigner()
+	now := valid.reserveSentAt
+
+	capability, err := mint(valid, signer, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected, err := NewLabReserveEgressCandidateIntent(valid.profile.ID, valid.binding.Namespace, valid.target.IdentIPv4,
+		valid.target.TunnelGeneration, valid.probe.AttemptNonce)
+	if err != nil || capability.Claims.Intent != expected || capability.Claims.HelperID != valid.helper.HelperID ||
+		capability.Claims.IssuedAt != now.Unix() || capability.Claims.Nonce == valid.probe.AttemptNonce ||
+		!verifyIssuedLabCapability(valid.publicKey, capability) || signer.signs != 1 {
+		t.Fatalf("unexpected candidate capability: %+v %v", capability, err)
+	}
+
+	for name, tt := range map[string]struct {
+		mutate func(*candidateAdmission, *time.Time)
+		want   error
+	}{
+		"tampered probe signature": {func(a *candidateAdmission, _ *time.Time) {
+			sig := []byte(a.probeCapability.Signature)
+			sig[0] ^= 1
+			a.probeCapability.Signature = string(sig)
+		}, ErrReservationCandidateInvalid},
+		"other generation": {func(a *candidateAdmission, _ *time.Time) {
+			a.target.TunnelGeneration = "tunnelgen_ffffffffffffffffffffffffffffffff"
+		}, ErrReservationCandidateInvalid},
+		"foreign target helper": {func(a *candidateAdmission, _ *time.Time) {
+			a.target.HelperID = "helper_ffffffffffffffffffffffffffffffff"
+		}, ErrReservationCandidateInvalid},
+		"other attempt": {func(a *candidateAdmission, _ *time.Time) {
+			a.probe.AttemptNonce = "ffffffffffffffffffffffffffffffff"
+		}, ErrReservationCandidateInvalid},
+		"clock before the probe": {func(a *candidateAdmission, now *time.Time) {
+			*now = a.probeSentAt.Add(-time.Second)
+		}, ErrReservationCandidateInvalid},
+		"60 s after sending": {func(a *candidateAdmission, now *time.Time) {
+			*now = a.probeSentAt.Add(labGenerationProbeFreshness)
+		}, ErrReservationCandidateExpired},
+		"55 s after the observation": {func(a *candidateAdmission, now *time.Time) {
+			*now = a.probe.ObservedAt.Add(labGenerationProbeFreshness - labProbeClockSkew)
+		}, ErrReservationCandidateExpired},
+		"stale binding": {func(a *candidateAdmission, _ *time.Time) {
+			a.binding.HelperEpoch = "helper_ffffffffffffffffffffffffffffffff"
+		}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, at := valid, now
+			tt.mutate(&a, &at)
+
+			s := newSeedSigner()
+			_, err := mint(a, s, at)
+
+			if err == nil || (tt.want != nil && !errors.Is(err, tt.want)) || s.signs != 0 {
+				t.Fatalf("got %v after %d signatures", err, s.signs)
+			}
+		})
+	}
+
+	other := &seedSigner{private: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x24}, ed25519.SeedSize))}
+	if _, err := mint(valid, other, now); !errors.Is(err, ErrReservationCandidateInvalid) || other.signs != 0 {
+		t.Fatalf("another controller key signed: %v", err)
 	}
 }

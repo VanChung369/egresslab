@@ -21,6 +21,9 @@ import (
 
 const maxCapabilityBytes = 8192
 
+// socketPath is a variable only so tests can point it at a socket that does not exist.
+var socketPath = helperipc.SocketPath
+
 var readOnlyOperations = map[string]string{
 	"ping":               helperipc.OpPing,
 	"helper-info":        helperipc.OpHelperInfo,
@@ -87,7 +90,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 			return usageError()
 		}
 
-		result, err = helperipc.Call(ctx, helperipc.SocketPath, readOnlyOperations[args[0]])
+		result, err = helperipc.Call(ctx, socketPath, readOnlyOperations[args[0]])
 
 	case "create-lab":
 		if len(args) != 2 || !helperauth.ValidProfileID(args[1]) {
@@ -99,7 +102,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 			return readErr
 		}
 
-		result, err = helperipc.CreateSealedLab(ctx, helperipc.SocketPath, args[1], capability)
+		result, err = helperipc.CreateSealedLab(ctx, socketPath, args[1], capability)
 
 	case "connect-tunnel":
 		if len(args) != 4 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) ||
@@ -112,7 +115,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 			return readErr
 		}
 
-		result, err = helperipc.ConnectTunnel(ctx, helperipc.SocketPath, args[1], args[2], args[3], capability)
+		result, err = helperipc.ConnectTunnel(ctx, socketPath, args[1], args[2], args[3], capability)
 
 	case "probe-egress":
 		// No destination, URL or port argument: the helper probes only its fixed endpoint.
@@ -125,14 +128,14 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 			return readErr
 		}
 
-		result, err = helperipc.ProbeEgress(ctx, helperipc.SocketPath, args[1], args[2], capability)
+		result, err = helperipc.ProbeEgress(ctx, socketPath, args[1], args[2], capability)
 
 	case "multi-probe-target":
 		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
 			return usageError()
 		}
 
-		result, err = helperipc.ReadMultiProbeTarget(ctx, helperipc.SocketPath, args[1], args[2])
+		result, err = helperipc.ReadMultiProbeTarget(ctx, socketPath, args[1], args[2])
 
 	case "probe-egress-multi":
 		// V2 only: the signed intent names the generation and the pin; neither comes from argv.
@@ -145,21 +148,34 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 			return readErr
 		}
 
-		result, err = helperipc.ProbeEgressMultiV2(ctx, helperipc.SocketPath, args[1], args[2], capability)
+		result, err = helperipc.ProbeEgressMultiV2(ctx, socketPath, args[1], args[2], capability)
+
+	case "reserve-egress-candidate":
+		// The address comes from the helper's evidence; the signed intent names everything else.
+		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
+			return usageError()
+		}
+
+		capability, readErr := readCapability(stdin)
+		if readErr != nil {
+			return readErr
+		}
+
+		result, err = helperipc.ReserveEgressCandidate(ctx, socketPath, args[1], args[2], capability)
 
 	case "disconnect":
 		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
 			return usageError()
 		}
 
-		result, err = helperipc.DisconnectTunnel(ctx, helperipc.SocketPath, args[1], args[2])
+		result, err = helperipc.DisconnectTunnel(ctx, socketPath, args[1], args[2])
 
 	case "stage-info":
 		if len(args) != 2 || !helperauth.ValidProfileID(args[1]) {
 			return usageError()
 		}
 
-		result, err = helperipc.ReadStageInfo(ctx, helperipc.SocketPath, args[1])
+		result, err = helperipc.ReadStageInfo(ctx, socketPath, args[1])
 
 	case "verify-lab", "delete-lab":
 		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
@@ -167,9 +183,9 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		}
 
 		if args[0] == "verify-lab" {
-			result, err = helperipc.VerifySealedLab(ctx, helperipc.SocketPath, args[1], args[2])
+			result, err = helperipc.VerifySealedLab(ctx, socketPath, args[1], args[2])
 		} else {
-			result, err = helperipc.DeleteSealedLab(ctx, helperipc.SocketPath, args[1], args[2])
+			result, err = helperipc.DeleteSealedLab(ctx, socketPath, args[1], args[2])
 		}
 
 	default:
@@ -219,5 +235,6 @@ func usageError() error {
 		"       egresslab-helperctl disconnect PROFILE_ID NAMESPACE\n" +
 		"       egresslab-helperctl multi-probe-target PROFILE_ID NAMESPACE\n" +
 		"       egresslab-helperctl probe-egress PROFILE_ID NAMESPACE < capability.json\n" +
-		"       egresslab-helperctl probe-egress-multi PROFILE_ID NAMESPACE < capability.json")
+		"       egresslab-helperctl probe-egress-multi PROFILE_ID NAMESPACE < capability.json\n" +
+		"       egresslab-helperctl reserve-egress-candidate PROFILE_ID NAMESPACE < capability.json")
 }

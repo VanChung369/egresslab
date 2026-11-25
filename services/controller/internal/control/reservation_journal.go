@@ -2,6 +2,7 @@ package control
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
@@ -421,8 +422,15 @@ func reserveDurableEgress(dataDir string, admission candidateAdmission) (EgressR
 // registry between calls. A failure does not prove that no hold exists: after an uncertain write
 // the caller must inspect the journal, never retry with a new capability.
 func reserveDurableEgressAt(dataDir string, admission candidateAdmission, now func() time.Time) (
-	reservation EgressReservation, resultErr error) {
-	if now == nil {
+	EgressReservation, error) {
+	return reserveDurableEgressContext(context.Background(), dataDir, admission, now)
+}
+
+// reserveDurableEgressContext also refuses to append once ctx is done: before the write a
+// cancellation leaves nothing durable; after it, the hold stays.
+func reserveDurableEgressContext(ctx context.Context, dataDir string, admission candidateAdmission,
+	now func() time.Time) (reservation EgressReservation, resultErr error) {
+	if ctx == nil || now == nil {
 		return EgressReservation{}, ErrReservationUnavailable
 	}
 
@@ -464,6 +472,10 @@ func reserveDurableEgressAt(dataDir string, admission candidateAdmission, now fu
 
 	if !hold.FreshAt(now()) {
 		return EgressReservation{}, ErrReservationCandidateExpired
+	}
+
+	if err := ctx.Err(); err != nil {
+		return EgressReservation{}, err
 	}
 
 	if err := appendReservationHold(file, state, hold); err != nil {

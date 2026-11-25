@@ -57,7 +57,7 @@ The unique-IP invariant needs one authority across runtimes: two Linux runtimes,
 - Four indexes (owner, public IPv4, profile and reservation ID) change together; validation, the collision checks and publication run under one mutex, so requests through one registry instance never hold the same address twice, and an existing hold is never overwritten or evicted.
 - Expiry ends eligibility for activation, not the hold: an address is released only once a later lifecycle confirms its owner can no longer use it, and no release exists yet.
 
-The registry alone is in memory and coordinates one process; Step 31C puts it behind a durable journal shared by controller processes. It is not wired into the CLI or the HTTP API. Signed reservation and lease activation (Step 31D) and collision and recovery tests (Step 31E) come later; no application traffic is allowed.
+The registry alone is in memory and coordinates one process; Step 31C puts it behind a durable journal shared by controller processes. It is not wired into the CLI or the HTTP API. The signed reservation workflow (Step 31D.1) builds on it; the command and provisioning (Step 31D.2), lease activation and release (Step 31D.3) and collision and recovery tests (Step 31E) come later; no application traffic is allowed.
 
 ### Durable reservation authority (Step 31C)
 
@@ -70,7 +70,18 @@ The controller keeps exclusive IPv4 ownership in an append-only journal, `egress
 - A reservation is returned only after its record and, on Linux and macOS, the journal's directory entry are flushed. If eligibility ends during the flush, the hold stays and no grant is returned. A failure after the write began is uncertain: the caller must inspect durable state, not retry with a new capability. Every transaction, inspection included, flushes the journal before reading it, so a complete record left by a writer that died before its own flush is made durable instead of being reported from the cache.
 - Holds survive the process: an exit releases the lock, not the ownership. A record read back is a recovered hold; its timestamps lost the monotonic reading, so it keeps its address but is never eligible for activation. Expiry does not release an address either.
 
-The checksum chain detects corruption, not deliberate rewriting or a rollback to an earlier complete prefix. The authority does not coordinate separate data directories or hosts, and Windows has no directory flush. Locking and recovery are tested with real child processes on Windows and Linux; macOS is compile-checked here and runs the same tests in CI. Safe release, the production command and lifecycle integration (Step 31D) remain pending; no application traffic is allowed.
+The checksum chain detects corruption, not deliberate rewriting or a rollback to an earlier complete prefix. The authority does not coordinate separate data directories or hosts, and Windows has no directory flush. Locking and recovery are tested with real child processes on Windows and Linux; macOS is compile-checked here and runs the same tests in CI. Safe release, the production command and lifecycle integration (Steps 31D.2 and 31D.3) remain pending; no application traffic is allowed.
+
+### Signed reservation orchestration (Step 31D.1)
+
+`ReserveVerifiedEgress` (`internal/control/egress_reservation_flow.go`) runs one complete reservation attempt through the trusted runtime transport, from a context the caller assembles from trusted controller state and the runtime in use, never from a request body. The transport must belong to the same provider target as that trusted runtime, as the CLI's `currentRuntime` ensures; the workflow cannot check it, because the receipt carries no helper signature.
+
+1. Preflight: the journal must exist and be healthy, the profile must hold no reservation and the registry must have room. This only rejects early, before any runtime call or signature; the lock is released again, and the durable transaction decides uniqueness.
+2. It discovers the current tunnel generation, signs one `PermitMultiProbeV2` capability and validates the returned observation.
+3. It signs one `ReserveEgressCandidateV1` capability for exactly that attempt; the signer needs the original probe capability and the validated observation, not just a generation. Each capability is checked again right before it is submitted, since the key store (DPAPI, Keychain) can be slow, and a candidate request that is no longer fresh for the evidence is not submitted.
+4. The candidate receipt is checked against both controller-issued capabilities and the original verified public IPv4. The internal admission is built from this operation's own observations only, and the durable authority reloads its journal under the exclusive OS lock for the final admission and uniqueness checks.
+
+No journal lock is held during network operations, and a failed phase stops every later one. A failed global reservation does not restore consumed helper evidence, and a lost candidate response is an uncertain outcome. Nothing is retried, falls back, activates or releases. A cancellation up to the journal append leaves nothing durable; after the commit, cancellation or expiry keeps the hold and returns no grant. Collisions do not disconnect the tunnel: cleanup needs the right owner and generation and belongs to the lease lifecycle. A durable reservation remains an exclusive address hold, not an active lease. Production CLI integration and authority provisioning (Step 31D.2) remain pending; the workflow is tested with synthetic observations, real signatures and real journals.
 
 ### Windows / macOS / Linux
 

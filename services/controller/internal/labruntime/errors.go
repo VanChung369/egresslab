@@ -21,6 +21,7 @@ const (
 	CodeKernelIncompatible  = "KERNEL_INCOMPATIBLE"
 	CodeStateUncertain      = "STATE_UNCERTAIN"
 	CodeStageNotFound       = "STAGE_NOT_FOUND"
+	CodeEvidenceUnavailable = "EVIDENCE_UNAVAILABLE"
 	CodeInternal            = "INTERNAL"
 )
 
@@ -29,7 +30,7 @@ var helperCodes = map[string]bool{
 	CodeInvalidRequest: true, CodeLabBusy: true, CodeLabNotFound: true, CodeLabExists: true,
 	CodeLabLimit: true, CodeLabFaulted: true, CodeOwnershipMismatch: true, CodeFirewallDrift: true,
 	CodeRecoveryRequired: true, CodeKernelIncompatible: true, CodeStateUncertain: true, CodeStageNotFound: true,
-	CodeInternal: true,
+	CodeEvidenceUnavailable: true, CodeInternal: true,
 }
 
 type Error struct {

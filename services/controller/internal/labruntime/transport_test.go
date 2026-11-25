@@ -24,6 +24,7 @@ const (
 
 	transportTestGeneration = "tunnelgen_0123456789abcdef0123456789abcdef"
 	transportTestNonce      = "00112233445566778899aabbccddeeff"
+	transportEvidenceNonce  = "ffeeddccbbaa99887766554433221100"
 )
 
 var testFingerprint = strings.Repeat("ab", 32)
@@ -215,6 +216,9 @@ func TestFakeHelperctl(t *testing.T) {
 			respond(control.LabMultiProbeTargetOp, "")
 		case "multi-target-with-lab":
 			extra = lab(control.LabTunnelConfigured)
+		case "multi-target-with-candidate":
+			raw, _ := json.Marshal(testCandidateReceipt(time.Unix(1795500000, 0).UTC()))
+			extra = `,"candidate":` + string(raw)
 		case "multi-target-failure-with-null":
 			fmt.Printf(`{"version":1,"operation":"","ok":false,"network_ready":false,"code":%q,"error":"x",`+
 				`"multi_probe_target":null}`, CodeOperationDisabled)
@@ -296,6 +300,56 @@ func TestFakeHelperctl(t *testing.T) {
 		}
 
 		respond(op, extra+`,"multi_probe":`+string(raw))
+	case "reserve-egress-candidate":
+		var capability control.LabCapability
+		data, err := io.ReadAll(os.Stdin)
+		expected, intentErr := control.NewLabReserveEgressCandidateIntent(testProfile, testNamespace, "9.9.9.9",
+			transportTestGeneration, transportEvidenceNonce)
+		if err != nil || intentErr != nil || len(args) != 3 || args[1] != testProfile || args[2] != testNamespace ||
+			json.Unmarshal(data, &capability) != nil || capability.Claims.Intent != expected ||
+			capability.Claims.Nonce != transportTestNonce {
+			fail("invalid candidate reservation request")
+		}
+
+		now := time.Unix(1795500000, 0).UTC()
+		receipt := testCandidateReceipt(now)
+
+		extra := ""
+
+		switch mode {
+		case "candidate-disabled":
+			failWith(CodeOperationDisabled, "operation not enabled")
+		case "candidate-evidence-unavailable":
+			failWith(CodeEvidenceUnavailable, "evidence expired")
+		case "candidate-missing":
+			respond(control.LabReserveEgressCandidateOp, "")
+		case "candidate-wrong-generation":
+			receipt.TunnelGeneration = "tunnelgen_ffffffffffffffffffffffffffffffff"
+		case "candidate-wrong-evidence":
+			receipt.EvidenceNonce = strings.Repeat("a", 32)
+		case "candidate-wrong-nonce":
+			receipt.ReservationNonce = strings.Repeat("a", 32)
+		case "candidate-foreign-helper":
+			receipt.HelperID = "helper_ffffffffffffffffffffffffffffffff"
+		case "candidate-private-ip":
+			receipt.IPv4 = netip.MustParseAddr("10.0.0.1")
+		case "candidate-extended-ttl":
+			receipt.ExpiresAt = now.Add(61 * time.Second)
+		case "candidate-with-lab":
+			extra = lab(control.LabTunnelConfigured)
+		case "candidate-failure-with-null":
+			fmt.Printf(`{"version":1,"operation":"","ok":false,"network_ready":false,"code":%q,"error":"x","candidate":null}`,
+				CodeEvidenceUnavailable)
+			os.Exit(1)
+		case "candidate-failure-with-candidate":
+			raw, _ := json.Marshal(receipt)
+			fmt.Printf(`{"version":1,"operation":"","ok":false,"network_ready":false,"code":%q,"error":"x","candidate":%s}`,
+				CodeEvidenceUnavailable, raw)
+			os.Exit(1)
+		}
+
+		raw, _ := json.Marshal(receipt)
+		respond(control.LabReserveEgressCandidateOp, extra+`,"candidate":`+string(raw))
 	case "disconnect":
 		if mode == "faulted" {
 			respond("Disconnect", lab(control.LabFaulted))
@@ -304,6 +358,28 @@ func TestFakeHelperctl(t *testing.T) {
 	}
 
 	fail("unexpected arguments")
+}
+
+func testCandidateReceipt(now time.Time) control.LabCandidateInfo {
+	return control.LabCandidateInfo{
+		LabMultiProbeTarget: control.LabMultiProbeTarget{
+			ProfileID:        testProfile,
+			Namespace:        testNamespace,
+			TunnelGeneration: transportTestGeneration,
+			LabMultiProbePolicy: control.LabMultiProbePolicy{
+				Policy:          control.LabMultiProbeV2Op,
+				IdentIPv4:       "9.9.9.9",
+				HelperID:        testHelperID,
+				RuntimeID:       "runtime_0123456789abcdef0123456789abcdef",
+				PublicKeySHA256: testFingerprint,
+			},
+		},
+		EvidenceNonce:    transportEvidenceNonce,
+		ReservationNonce: transportTestNonce,
+		IPv4:             netip.MustParseAddr("8.8.4.4"),
+		ObservedAt:       now,
+		ExpiresAt:        now.Add(60 * time.Second),
+	}
 }
 
 type fakeLauncher struct {
@@ -893,5 +969,94 @@ func TestDecodeFailureRefusesFoldedMetadataKeys(t *testing.T) {
 		if err, ok := decodeFailure([]byte(doc)); ok {
 			t.Errorf("%q: failure document with metadata accepted as %v", key, err)
 		}
+	}
+}
+
+func TestCandidateTransport(t *testing.T) {
+	ctx := context.Background()
+
+	intent, err := control.NewLabReserveEgressCandidateIntent(testProfile, testNamespace, "9.9.9.9",
+		transportTestGeneration, transportEvidenceNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	capability := control.LabCapability{
+		Claims: control.LabClaims{Version: 1, HelperID: testHelperID, Nonce: transportTestNonce, Intent: intent},
+	}
+
+	fake := &fakeLauncher{mode: "ok"}
+	transport := newCommandProvider(fake).Transport()
+
+	receipt, err := transport.ReserveEgressCandidate(ctx, testProfile, testNamespace, capability)
+	if err != nil || !receipt.MatchesCapability(capability) || receipt.IPv4.String() != "8.8.4.4" || len(fake.calls) != 1 {
+		t.Fatalf("candidate transport failed: %+v %v", receipt, err)
+	}
+
+	if strings.Join(fake.calls[0], " ") != "reserve-egress-candidate "+testProfile+" "+testNamespace {
+		t.Fatalf("unexpected candidate arguments: %v", fake.calls[0])
+	}
+
+	// Another signed operation, or a request for other arguments, never reaches the launcher.
+	wrongOp := capability
+	wrongOp.Claims.Intent.Operation = control.LabMultiProbeV2Op
+
+	for name, call := range map[string]func() error{
+		"other operation": func() error {
+			_, err := transport.ReserveEgressCandidate(ctx, testProfile, testNamespace, wrongOp)
+			return err
+		},
+		"other namespace": func() error {
+			_, err := transport.ReserveEgressCandidate(ctx, testProfile, "egresslab-lab-ffffffffffffffff", capability)
+			return err
+		},
+	} {
+		if err := call(); ErrorCode(err) != CodeInvalidRequest || len(fake.calls) != 1 {
+			t.Fatalf("%s reached the launcher: %v", name, err)
+		}
+	}
+
+	// A valid receipt on another operation's response is refused too.
+	if _, err := newCommandProvider(&fakeLauncher{mode: "multi-target-with-candidate"}).Transport().MultiProbeTarget(ctx,
+		testProfile, testNamespace); err == nil {
+		t.Fatal("candidate metadata accepted on a target response")
+	}
+
+	for _, mode := range []string{
+		"candidate-disabled",
+		"candidate-evidence-unavailable",
+		"candidate-missing",
+		"candidate-wrong-generation",
+		"candidate-wrong-evidence",
+		"candidate-wrong-nonce",
+		"candidate-foreign-helper",
+		"candidate-private-ip",
+		"candidate-extended-ttl",
+		"candidate-with-lab",
+		"candidate-failure-with-null",
+		"candidate-failure-with-candidate",
+		"crash",
+	} {
+		t.Run(mode, func(t *testing.T) {
+			f := &fakeLauncher{mode: mode}
+
+			receipt, err := newCommandProvider(f).Transport().ReserveEgressCandidate(ctx, testProfile, testNamespace,
+				capability)
+			if err == nil || receipt.IPv4.IsValid() || len(f.calls) != 1 {
+				t.Fatalf("candidate accepted or retried: %+v %v", receipt, err)
+			}
+
+			expected := CodeStateUncertain
+			switch mode {
+			case "candidate-disabled":
+				expected = CodeOperationDisabled
+			case "candidate-evidence-unavailable":
+				expected = CodeEvidenceUnavailable
+			}
+
+			if ErrorCode(err) != expected {
+				t.Fatalf("unexpected refusal: %v", err)
+			}
+		})
 	}
 }

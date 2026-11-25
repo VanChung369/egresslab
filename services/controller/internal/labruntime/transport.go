@@ -41,6 +41,7 @@ type helperResponse struct {
 	MultiProbe       *control.LabMultiProbeInfo   `json:"multi_probe,omitempty"`
 	MultiProbePolicy *control.LabMultiProbePolicy `json:"multi_probe_policy,omitempty"`
 	MultiProbeTarget *control.LabMultiProbeTarget `json:"multi_probe_target,omitempty"`
+	Candidate        *control.LabCandidateInfo    `json:"candidate,omitempty"`
 }
 
 type limitedBuffer struct {
@@ -134,6 +135,7 @@ func decodeStrict(data []byte) (helperResponse, error) {
 // Matched like encoding/json matches field names, case-insensitively.
 var metadataKeys = []string{
 	"helper_info", "lab", "labs", "stage", "probe", "multi_probe", "multi_probe_policy", "multi_probe_target",
+	"candidate",
 }
 
 func hasMetadataKey(data []byte) bool {
@@ -159,7 +161,8 @@ func decodeFailure(data []byte) (error, bool) {
 	if err != nil || hasMetadataKey(data) ||
 		resp.Version != 1 || resp.OK || resp.NetworkReady || resp.Error == "" ||
 		resp.Info != nil || resp.Lab != nil || resp.Labs != nil || resp.Stage != nil || resp.Probe != nil ||
-		resp.MultiProbe != nil || resp.MultiProbePolicy != nil || resp.MultiProbeTarget != nil {
+		resp.MultiProbe != nil || resp.MultiProbePolicy != nil || resp.MultiProbeTarget != nil ||
+		resp.Candidate != nil {
 		return nil, false
 	}
 
@@ -224,9 +227,17 @@ func decodeResponse(data []byte, expected string) (helperResponse, error) {
 		return helperResponse{}, Errorf(CodeRuntimeUntrusted, "invalid generation-bound target")
 	}
 
+	if (expected == control.LabReserveEgressCandidateOp) != (resp.Candidate != nil) {
+		return helperResponse{}, errors.New("unexpected egress candidate metadata")
+	}
+
+	if resp.Candidate != nil && !resp.Candidate.Valid() {
+		return helperResponse{}, errors.New("invalid egress candidate metadata")
+	}
+
 	switch expected {
 	case "HelperInfo", "Ping", "StageInfo", "PermitProbe", control.LabMultiProbePolicyOp, control.LabMultiProbeOp,
-		control.LabMultiProbeV2Op, control.LabMultiProbeTargetOp:
+		control.LabMultiProbeV2Op, control.LabMultiProbeTargetOp, control.LabReserveEgressCandidateOp:
 		if resp.Lab != nil || resp.Labs != nil {
 			return helperResponse{}, errors.New("unexpected lab metadata")
 		}

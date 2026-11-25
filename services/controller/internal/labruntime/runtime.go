@@ -61,6 +61,11 @@ type HelperTransport interface {
 		profileID, namespace string,
 		capability control.LabCapability,
 	) (control.LabMultiProbeInfo, error)
+	ReserveEgressCandidate(
+		ctx context.Context,
+		profileID, namespace string,
+		capability control.LabCapability,
+	) (control.LabCandidateInfo, error)
 }
 
 type Options struct {

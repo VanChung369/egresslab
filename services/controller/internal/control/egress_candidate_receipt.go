@@ -247,3 +247,78 @@ func validateCandidateAdmission(a candidateAdmission, now time.Time) (admittedCa
 
 	return admittedCandidate{owner: owner, receipt: c, eligibleUntil: now.Add(remaining)}, nil
 }
+
+// candidateEvidenceFresh is the host-side conservative cutoff for signing and submitting a
+// candidate request; the helper checks its original monotonic deadline again.
+func candidateEvidenceFresh(probeSentAt, observedAt, at time.Time) bool {
+	return at.Before(probeSentAt.Add(labGenerationProbeFreshness)) &&
+		at.Round(0).Before(observedAt.Add(labGenerationProbeFreshness-labProbeClockSkew))
+}
+
+// mintReserveEgressCandidate signs a request to consume exactly the V2 attempt this trusted
+// controller operation just made and validated; it never signs from a generation ID alone or from
+// user-supplied JSON.
+func mintReserveEgressCandidate(
+	signer LabSigner,
+	profile RoutingProfile,
+	binding RuntimeBinding,
+	info LabHelperInfo,
+	lab LabInfo,
+	target LabMultiProbeTarget,
+	probe LabMultiProbeInfo,
+	probeCapability LabCapability,
+	probeSentAt, probeReceivedAt, now time.Time,
+) (LabCapability, error) {
+	if err := validateProbeTarget(profile, binding, info, lab); err != nil {
+		return LabCapability{}, err
+	}
+
+	if !target.Matches(info, binding) {
+		return LabCapability{}, ErrReservationCandidateInvalid
+	}
+
+	expected, err := NewLabGenerationProbeIntent(target.ProfileID, target.Namespace, target.IdentIPv4,
+		target.TunnelGeneration)
+	if err != nil ||
+		probeCapability.Claims.Intent != expected ||
+		probeCapability.Claims.HelperID != info.HelperID ||
+		!probe.ValidForCapability(probeCapability, probeSentAt, probeReceivedAt) {
+		return LabCapability{}, ErrReservationCandidateInvalid
+	}
+
+	if !stableReservationClock(probeSentAt, probeReceivedAt) ||
+		!stableReservationClock(probeReceivedAt, now) ||
+		!stableReservationClock(probeSentAt, now) {
+		return LabCapability{}, ErrReservationCandidateInvalid
+	}
+
+	if !candidateEvidenceFresh(probeSentAt, probe.ObservedAt, now) {
+		return LabCapability{}, ErrReservationCandidateExpired
+	}
+
+	public, err := signer.PublicKey()
+	if err != nil {
+		return LabCapability{}, err
+	}
+
+	if LabPublicKeySHA256(public) != info.PublicKeySHA256 || !verifyIssuedLabCapability(public, probeCapability) {
+		return LabCapability{}, ErrReservationCandidateInvalid
+	}
+
+	intent, err := NewLabReserveEgressCandidateIntent(target.ProfileID, target.Namespace, target.IdentIPv4,
+		target.TunnelGeneration, probe.AttemptNonce)
+	if err != nil {
+		return LabCapability{}, err
+	}
+
+	capability, err := mintLabCapability(signer, intent, info, now)
+	if err != nil {
+		return LabCapability{}, err
+	}
+
+	if capability.Claims.Nonce == probe.AttemptNonce {
+		return LabCapability{}, ErrReservationCandidateInvalid
+	}
+
+	return capability, nil
+}
