@@ -73,6 +73,7 @@ func (f *fakeRuntime) ProbeEgressMulti(
 ) (control.LabMultiProbeInfo, error) {
 	f.calls = append(f.calls, control.LabMultiProbeV2Op)
 	f.multiProbeCalls = append(f.multiProbeCalls, capability)
+	f.lastMultiProbe = nil
 
 	if f.multiProbeErr != nil {
 		return control.LabMultiProbeInfo{}, f.multiProbeErr
@@ -111,6 +112,8 @@ func (f *fakeRuntime) ProbeEgressMulti(
 	if f.multiProbeEdit != nil {
 		f.multiProbeEdit(&result)
 	}
+
+	f.lastMultiProbe = &result
 
 	return result, nil
 }
@@ -358,12 +361,51 @@ func TestControllerGenerationRediscovery(t *testing.T) {
 	h.mustRun("-approve", "-wsl-distro", "Ubuntu-A", "delete-lab", p, labNS)
 }
 
-// Temporary stub for the CLI test suite; Step 31D.2 replaces it with a fake candidate lifecycle.
+// ReserveEgressCandidate simulates consuming the last verified attempt once, to test the CLI
+// orchestration; the real signature checks and monotonic deadline are the helper's (Step 31A tests).
 func (f *fakeRuntime) ReserveEgressCandidate(
 	_ context.Context,
-	_, _ string,
-	_ control.LabCapability,
+	profileID, namespace string,
+	capability control.LabCapability,
 ) (control.LabCandidateInfo, error) {
-	return control.LabCandidateInfo{}, labruntime.Errorf(labruntime.CodeOperationDisabled,
-		"candidate orchestration is not wired into the CLI yet")
+	f.calls = append(f.calls, control.LabReserveEgressCandidateOp)
+	f.candidateCalls = append(f.candidateCalls, capability)
+
+	if f.candidateErr != nil {
+		return control.LabCandidateInfo{}, f.candidateErr
+	}
+
+	probe := f.lastMultiProbe
+	if probe == nil {
+		return control.LabCandidateInfo{}, labruntime.Errorf(labruntime.CodeEvidenceUnavailable, "no verified evidence")
+	}
+
+	if f.tunnelProfile != profileID || f.labs[profileID] != namespace || probe.TunnelGeneration != f.tunnelGeneration {
+		return control.LabCandidateInfo{}, labruntime.Errorf(labruntime.CodeAuthorizationDenied, "stale generation")
+	}
+
+	policy := f.multiPolicy()
+
+	expected, err := control.NewLabReserveEgressCandidateIntent(profileID, namespace, policy.IdentIPv4, f.tunnelGeneration,
+		probe.AttemptNonce)
+	if err != nil || capability.Claims.Intent != expected || capability.Claims.HelperID != f.info.HelperID ||
+		capability.Claims.Nonce == probe.AttemptNonce {
+		return control.LabCandidateInfo{}, labruntime.Errorf(labruntime.CodeAuthorizationDenied, "candidate intent mismatch")
+	}
+
+	f.lastMultiProbe = nil
+
+	return control.LabCandidateInfo{
+		LabMultiProbeTarget: control.LabMultiProbeTarget{
+			ProfileID:           profileID,
+			Namespace:           namespace,
+			TunnelGeneration:    f.tunnelGeneration,
+			LabMultiProbePolicy: policy,
+		},
+		EvidenceNonce:    probe.AttemptNonce,
+		ReservationNonce: capability.Claims.Nonce,
+		IPv4:             probe.IPv4,
+		ObservedAt:       probe.ObservedAt,
+		ExpiresAt:        probe.ObservedAt.Add(60 * time.Second),
+	}, nil
 }

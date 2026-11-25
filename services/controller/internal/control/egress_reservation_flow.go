@@ -43,22 +43,31 @@ func (c ReservationContext) validAt(now time.Time) bool {
 		now.Unix() > 0
 }
 
-// ReserveVerifiedEgress performs one verification and durable reservation attempt: no activation,
-// retry or release.
-func ReserveVerifiedEgress(
+// ReserveVerifiedEgress performs one verification and durable reservation attempt against this
+// provisioned authority: no activation, retry or release. A raw directory is not enough to run the
+// production workflow.
+func (a *ReservationAuthority) ReserveVerifiedEgress(
 	ctx context.Context,
-	dataDir string,
 	transport ReservationTransport,
 	signer LabSigner,
 	trust ReservationContext,
 ) (EgressReservation, error) {
-	return reserveVerifiedEgressAt(ctx, dataDir, transport, signer, trust, time.Now)
+	journal, err := a.journal()
+	if err != nil {
+		return EgressReservation{}, err
+	}
+
+	if trust.Runtime.PublicKeySHA256 != a.info.PublicKeySHA256 {
+		return EgressReservation{}, ErrReservationAuthorityMismatch
+	}
+
+	return reserveVerifiedEgressJournalAt(ctx, journal, transport, signer, trust, time.Now)
 }
 
 // reservationPreflight only rejects early (missing or corrupt journal, a profile already held, a
 // full registry) before any runtime call; the durable transaction decides uniqueness.
-func reservationPreflight(dataDir, profileID string) error {
-	items, err := inspectReservationJournal(dataDir)
+func reservationPreflight(journal reservationJournalSpec, profileID string) error {
+	items, err := inspectReservationJournalSpec(journal)
 	if err != nil {
 		return err
 	}
@@ -102,6 +111,17 @@ func reserveVerifiedEgressAt(
 	trust ReservationContext,
 	now func() time.Time,
 ) (EgressReservation, error) {
+	return reserveVerifiedEgressJournalAt(ctx, legacyReservationJournal(dataDir), transport, signer, trust, now)
+}
+
+func reserveVerifiedEgressJournalAt(
+	ctx context.Context,
+	journal reservationJournalSpec,
+	transport ReservationTransport,
+	signer LabSigner,
+	trust ReservationContext,
+	now func() time.Time,
+) (EgressReservation, error) {
 	if ctx == nil || transport == nil || signer == nil || now == nil {
 		return EgressReservation{}, ErrReservationUnavailable
 	}
@@ -126,7 +146,7 @@ func reserveVerifiedEgressAt(
 
 	profileID, namespace := trust.Profile.ID, trust.Binding.Namespace
 
-	if err := reservationPreflight(dataDir, profileID); err != nil {
+	if err := reservationPreflight(journal, profileID); err != nil {
 		return EgressReservation{}, fmt.Errorf("reservation preflight: %w", err)
 	}
 
@@ -240,7 +260,7 @@ func reserveVerifiedEgressAt(
 	}
 
 	// Phase 4: the authoritative admission and uniqueness check, under the journal's OS lock.
-	hold, err := reserveDurableEgressContext(ctx, dataDir, admission, now)
+	hold, err := reserveDurableEgressJournal(ctx, journal, admission, now)
 	if err != nil {
 		return EgressReservation{}, fmt.Errorf("commit durable reservation: %w", err)
 	}

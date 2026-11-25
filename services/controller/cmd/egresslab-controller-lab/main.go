@@ -1,8 +1,9 @@
-// Command egresslab-controller-lab signs CreateLab, ConnectTunnel, PermitProbe and
-// PermitMultiProbeV2 capabilities with the controller key and drives the helper's sealed lab, tunnel
-// and diagnostic probes through the host's Linux runtime (WSL2, Lima or native Linux). The helper
-// stays the source of truth for lab and tunnel state. It is a lab tool: -approve is an operator
-// confirmation, not user authentication.
+// Command egresslab-controller-lab signs CreateLab, ConnectTunnel, PermitProbe, PermitMultiProbeV2
+// and ReserveEgressCandidateV1 capabilities with the controller key and drives the helper's sealed
+// lab, tunnel and diagnostic probes through the host's Linux runtime (WSL2, Lima or native Linux).
+// It also provisions and uses the per-user egress reservation authority. The helper stays the
+// source of truth for lab and tunnel state. It is a lab tool: -approve is an operator confirmation,
+// not user authentication.
 package main
 
 import (
@@ -27,15 +28,27 @@ type deps struct {
 	newRuntime func(kind string, opts labruntime.Options) (labruntime.RuntimeProvider, error)
 	now        func() time.Time
 	stdout     io.Writer
+
+	// reservationRoot is injected for tests only; there is no flag for it.
+	reservationRoot func() (string, error)
 }
 
 var approvalRequired = map[string]bool{
 	"create-lab": true, "delete-lab": true, "trust-runtime": true, "untrust-runtime": true, "unbind-profile": true,
 	"connect-tunnel": true, "disconnect": true, "probe-egress": true, "probe-egress-multi": true,
+	"init-reservations": true, "reserve-egress": true,
 }
 
 func main() {
-	if err := run(os.Args[1:], deps{keystore.Open, labruntime.New, time.Now, os.Stdout}); err != nil {
+	d := deps{
+		openKeys:        keystore.Open,
+		newRuntime:      labruntime.New,
+		now:             time.Now,
+		stdout:          os.Stdout,
+		reservationRoot: defaultReservationRoot,
+	}
+
+	if err := run(os.Args[1:], d); err != nil {
 		fmt.Fprintln(os.Stderr, "controller-lab:", err)
 		os.Exit(1)
 	}
@@ -53,7 +66,7 @@ func run(argv []string, d deps) error {
 	kind := flags.String("runtime", "auto", "network runtime: auto, wsl, lima, native or remote")
 	distro := flags.String("wsl-distro", "", "WSL distribution (required to trust a WSL runtime)")
 	instance := flags.String("lima-instance", "", "Lima instance (default: egresslab)")
-	approve := flags.Bool("approve", false, "approve a lab, tunnel or runtime mutation")
+	approve := flags.Bool("approve", false, "approve a lab, tunnel, runtime or reservation mutation")
 
 	if err := flags.Parse(argv); err != nil {
 		return err
@@ -71,6 +84,10 @@ func run(argv []string, d deps) error {
 
 	s := &session{d: d, dataDir: dataDir}
 
+	if approvalRequired[args[0]] && !*approve {
+		return fmt.Errorf("%s requires -approve", args[0])
+	}
+
 	switch args[0] {
 	case "init-key", "public-key":
 		if len(args) != 1 {
@@ -87,10 +104,19 @@ func run(argv []string, d deps) error {
 			return err
 		}
 		return s.print(state)
-	}
 
-	if approvalRequired[args[0]] && !*approve {
-		return fmt.Errorf("%s requires -approve", args[0])
+	// Local: neither reaches a runtime or the helper.
+	case "init-reservations":
+		if len(args) != 1 {
+			return usageError()
+		}
+		return s.initReservations()
+
+	case "list-reservations":
+		if len(args) != 1 {
+			return usageError()
+		}
+		return s.listReservations()
 	}
 
 	if err := checkArgs(args); err != nil {
@@ -151,13 +177,25 @@ func run(argv []string, d deps) error {
 			control.LabMultiProbeInfo
 			NetworkReady bool `json:"network_ready"`
 		}{LabMultiProbeInfo: observation}
+	case "reserve-egress":
+		result, err = s.reserveEgress(args[1], args[2])
 	}
 
 	if err != nil {
 		return err
 	}
 
-	return s.print(result)
+	// The hold is durable before its receipt is written; a lost receipt must not read as a refusal.
+	if err := s.print(result); err != nil {
+		if args[0] == "reserve-egress" {
+			return labruntime.Errorf(labruntime.CodeStateUncertain,
+				"reservation committed but its receipt was not written; run list-reservations: "+err.Error())
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 func checkArgs(args []string) error {
@@ -174,7 +212,8 @@ func checkArgs(args []string) error {
 		if len(args) == 2 && control.ValidRuntimeID(args[1]) {
 			return nil
 		}
-	case "verify-lab", "delete-lab", "disconnect", "probe-egress", "probe-egress-multi", "multi-probe-target":
+	case "verify-lab", "delete-lab", "disconnect", "probe-egress", "probe-egress-multi", "multi-probe-target",
+		"reserve-egress":
 		if len(args) == 3 && control.ValidProfileID(args[1]) && control.ValidLabNamespace(args[2]) {
 			return nil
 		}
@@ -537,6 +576,21 @@ func dataDirectory() (string, error) {
 	return filepath.Abs(root)
 }
 
+// defaultReservationRoot is the one per-user reservation authority. It is independent of
+// EGRESSLAB_DATA_DIR and of the runtime: another data directory must not select another authority.
+func defaultReservationRoot() (string, error) {
+	config, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+
+	if !filepath.IsAbs(config) {
+		return "", errors.New("configuration directory must be absolute")
+	}
+
+	return filepath.Join(config, "EgressLab"), nil
+}
+
 func loadProfile(dataDir, id string) (control.RoutingProfile, error) {
 	store, err := control.NewStore(filepath.Join(dataDir, "state.json"))
 	if err != nil {
@@ -555,9 +609,10 @@ func loadProfile(dataDir, id string) (control.RoutingProfile, error) {
 func usageError() error {
 	return errors.New("usage: egresslab-controller-lab [-runtime auto|wsl|lima|native] [-wsl-distro NAME] [-lima-instance NAME] [-approve] COMMAND\n" +
 		"  init-key | public-key | runtimes | runtime-status | helper-info | list-labs | multi-probe-policy\n" +
+		"  init-reservations | list-reservations\n" +
 		"  trust-runtime | untrust-runtime RUNTIME_ID | unbind-profile PROFILE_ID\n" +
 		"  create-lab PROFILE_ID | verify-lab PROFILE_ID NAMESPACE | delete-lab PROFILE_ID NAMESPACE\n" +
 		"  stage-info PROFILE_ID | connect-tunnel PROFILE_ID NAMESPACE STAGE_ID | disconnect PROFILE_ID NAMESPACE\n" +
 		"  probe-egress PROFILE_ID NAMESPACE | probe-egress-multi PROFILE_ID NAMESPACE\n" +
-		"  multi-probe-target PROFILE_ID NAMESPACE")
+		"  multi-probe-target PROFILE_ID NAMESPACE | reserve-egress PROFILE_ID NAMESPACE")
 }

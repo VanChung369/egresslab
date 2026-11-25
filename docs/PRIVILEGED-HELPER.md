@@ -1,21 +1,21 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 31D.1 — signed candidate transport and durable reservation orchestration (controller
-core).** A controller CLI signs `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV2`
-and drives the helper's sealed lab, tunnel and diagnostic probes in the Linux runtime; the helper
-holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports inside its labs,
-resolves a hostname endpoint once and pins it, checks the peer state and the IPv4 addresses, MTU,
-rules and routes the kernel reports against the staged config, and stays the source of truth for lab
-and tunnel state. A single-source probe yields one observation of the tunnel's public IPv4 address,
-and a multi-source probe the unanimous evidence of two independent HTTPS sources; both are printed
-only. The helper can consume that evidence once into a local egress candidate
-(`ReserveEgressCandidateV1`, also through helperctl), and the controller has the shared authority
-that holds each address for one tunnel owner, durably and across controller processes (an
-append-only journal under an OS file lock), and a workflow that chains the verification, the
-candidate and the durable reservation; no controller command runs it yet, and a reservation is not a
-lease. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to end, except that the
-multi-source probe has run on WSL2 and Lima only, not on native Linux. No lease or proxy traffic
-exists; the sections from "Typed operations only" on are partly design.
+Status: **Step 31D.2 — reservation authority provisioning and controller CLI integration.** A
+controller CLI signs `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV2` and drives
+the helper's sealed lab, tunnel and diagnostic probes in the Linux runtime; the helper holds the
+encrypted WireGuard configs, disables IPv6 and drops DNS transports inside its labs, resolves a
+hostname endpoint once and pins it, checks the peer state and the IPv4 addresses, MTU, rules and
+routes the kernel reports against the staged config, and stays the source of truth for lab and
+tunnel state. A single-source probe yields one observation of the tunnel's public IPv4 address, and
+a multi-source probe the unanimous evidence of two independent HTTPS sources; both are printed only.
+The helper can consume that evidence once into a local egress candidate (`ReserveEgressCandidateV1`,
+also through helperctl), and the controller has the shared authority that holds each address for one
+tunnel owner, durably and across controller processes (an append-only journal under an OS file
+lock), and a workflow that chains the verification, the candidate and the durable reservation, which
+`reserve-egress` runs against an explicitly provisioned per-user authority (`init-reservations`); a
+reservation is not a lease. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to
+end, except that the multi-source probe has run on WSL2 and Lima only, not on native Linux. No lease
+or proxy traffic exists; the sections from "Typed operations only" on are partly design.
 
 ## Implemented
 
@@ -70,8 +70,8 @@ exists; the sections from "Typed operations only" on are partly design.
   `/etc/egresslab/multi-probe-pin` (see "Trusted multi-source provisioning" and "Sticky IP");
   `PermitMultiProbeV1` (Steps 29C.4a to 30B.1) is disabled in that mode.
 - `ReserveEgressCandidateV1` in the same mode: one verified V2 attempt consumed into a local
-  candidate (see "Egress candidates"). helperctl sends it (Step 31D.1); no controller command does
-  yet.
+  candidate (see "Egress candidates"). helperctl sends it (Step 31D.1), and so does the controller's
+  `reserve-egress` (Step 31D.2).
 - Controller side (see "Controller and runtimes"):
   - an Ed25519 signer for `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV2`
     (the `PermitMultiProbeV1` signer stays for compatibility tests), checked against the five golden
@@ -83,7 +83,8 @@ exists; the sections from "Typed operations only" on are partly design.
   - signing-key storage per platform;
   - runtime providers that reach the helper from each host OS;
   - `egresslab-controller-lab`, which needs `-approve` for every mutation, including
-    `connect-tunnel` and `disconnect`;
+    `connect-tunnel`, `disconnect`, `init-reservations` and `reserve-egress` (`list-reservations` is
+    read-only);
   - trusted runtimes and persistent profile-to-runtime bindings (see "Trusted runtimes and
     profile bindings").
 - A recovery gate and a kernel compatibility check before `CreateLab` (see "Sealed lab
@@ -98,10 +99,9 @@ exists; the sections from "Typed operations only" on are partly design.
 - A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
-- Authority provisioning and the production reservation command (Step 31D.2), signed lease
-  preparation, revocation and safe release (Step 31D.3), and the multi-runtime collision and
-  recovery tests (Step 31E); the controller's reservation workflow (Step 31D.1) is not wired to a
-  command.
+- Signed lease preparation, revocation and safe release (Step 31D.3), key rotation and authority
+  migration, and the multi-runtime collision and recovery tests (Step 31E); no reservation hold is
+  ever released yet.
 - Open from earlier steps: egress-IP leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
 - DNS for applications in the lab (a session resolver, with filesystem and resolver IPC
@@ -1498,8 +1498,9 @@ attempt, `Disconnect`, `DeleteLab`, a reconnect, a failed verification or cleanu
 shutdown drop it, and an expired one is no longer fresh. A candidate is not a global reservation, an
 active lease or permission to send traffic: two helpers can still produce candidates for the same
 address, and the shared authority decides durable ownership afterwards (Steps 31B to 31D.1).
-helperctl sends it since Step 31D.1, no controller command does yet, and it has not run on a real
-tunnel; the tests use real Unix sockets and signatures with the fake kernel backend.
+helperctl sends it since Step 31D.1 and the controller's `reserve-egress` since Step 31D.2, and it
+has not run on a real tunnel; the tests use real Unix sockets and signatures with the fake kernel
+backend.
 
 ### Shared atomic reservation registry (Step 31B)
 
@@ -1515,12 +1516,13 @@ the same address; a profile holds at most one reservation, and a reconnect or a 
 runtime does not get a second one. Expiry never releases a hold. A reservation is not a lease:
 before any later activation the helper must confirm its candidate and local deadline again. The
 sixth golden vector is pinned in both modules now. Step 31C makes the registry durable and shared
-between processes; it is not wired into the lifecycle yet, and application traffic stays disabled.
+between processes, and Step 31D.2 puts it behind a provisioned authority; application traffic stays
+disabled.
 
 ### Durable reservations and process coordination (Step 31C)
 
-The shared authority now lives in an append-only journal in a data directory its caller names, under
-an exclusive OS file lock (`LockFileEx` on Windows, `flock` on Linux and macOS; see
+The shared authority now lives in an append-only journal in the per-user authority directory (Step
+31D.2), under an exclusive OS file lock (`LockFileEx` on Windows, `flock` on Linux and macOS; see
 `docs/ARCHITECTURE.md`). Every reservation attempt reloads and validates the whole journal under
 that lock before it checks uniqueness, appends one checksummed record and flushes it, so two
 controller processes using the same journal cannot hold the same address, and a process started
@@ -1529,9 +1531,8 @@ recovered holds: without the monotonic clock of the process that wrote them they
 but never authorize an activation, and expired holds keep their address too. An incomplete or
 invalid journal blocks every reservation and inspection; nothing truncates it or replaces it with an
 empty one, and a missing journal is refused, never created implicitly. The helper's candidate and
-its monotonic deadline stay authoritative for any later activation. There is no production
-reservation or provisioning command, no release and no lease activation yet, and application traffic
-stays disabled.
+its monotonic deadline stay authoritative for any later activation. There is no release and no lease
+activation yet, and application traffic stays disabled.
 
 ### Signed candidate transport (Step 31D.1)
 
@@ -1549,5 +1550,25 @@ one `ReserveEgressCandidateV1` for exactly that attempt and validates the receip
 original generation-bound probe; the durable registry then arbitrates ownership across all
 participating runtimes. An unsuccessful global reservation restores no evidence and authorizes no
 application traffic, and candidate freshness and generation identity must be checked again before
-any later lease preparation. No controller command runs the workflow yet, the new helperctl is not
-installed in a runtime, and nothing of it has run on a real tunnel.
+any later lease preparation. Step 31D.2 runs the workflow from `reserve-egress`; the new helperctl
+is not installed in a runtime, and nothing of it has run on a real tunnel.
+
+### Provisioned reservation authority (Step 31D.2)
+
+The production controller workflow runs only against an explicitly provisioned authority (`-approve
+init-reservations`), whose marker and journal must agree with the controller's current signing key;
+runtime configuration overrides such as `EGRESSLAB_DATA_DIR` do not select another authority (see
+`docs/ARCHITECTURE.md`). `-approve reserve-egress PROFILE_ID NAMESPACE` checks the trusted runtime,
+the profile's binding and the helper's configured lab, then signs and submits one
+`PermitMultiProbeV2` and one `ReserveEgressCandidateV1` and commits the address durably; a profile
+bound to another runtime, or a sealed lab, is refused before anything is signed. A successful run
+persists an exclusive IPv4 hold. The helper-local candidate may expire or be dropped after the hold
+is committed, and no CLI receipt authorizes application networking: a future signed lease
+preparation must revalidate the candidate against the exact tunnel generation, evidence nonce,
+reservation nonce and authority. Holds are not released on expiry, controller exit or tunnel
+teardown, so the command has not been run against a real tunnel: until safe release (Step 31D.3) a
+test hold would stay forever. On Windows on 2026-11-25, `-approve init-reservations` provisioned the
+per-user authority in `%APPDATA%\EgressLab` with the controller's DPAPI key (the fingerprint pinned
+for the trusted WSL2 runtime), `list-reservations` listed it with no reservations, the 91-byte V2
+journal header carried the SHA-256 of the 210-byte marker, no temporary file was left, and a second
+`init-reservations` answered `RESERVATION_AUTHORITY_EXISTS`.

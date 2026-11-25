@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,6 +63,7 @@ type fakeRuntime struct {
 	kind, target string
 	info         control.LabHelperInfo
 	labs         map[string]string // profile -> namespace
+	namespace    string            // CreateLab's namespace; empty: labNS
 	createErr    error
 	created      []control.LabCapability
 	calls        []string
@@ -83,6 +85,10 @@ type fakeRuntime struct {
 	multiPolicyEdit func(*control.LabMultiProbePolicy)
 	multiProbeEdit  func(*control.LabMultiProbeInfo)
 	multiTargetEdit func(*control.LabMultiProbeTarget)
+
+	lastMultiProbe *control.LabMultiProbeInfo
+	candidateCalls []control.LabCapability
+	candidateErr   error
 }
 
 func (f *fakeRuntime) HelperInfo(context.Context) (control.LabHelperInfo, error) {
@@ -109,13 +115,18 @@ func (f *fakeRuntime) CreateLab(_ context.Context, profileID string, c control.L
 		return control.LabInfo{}, f.createErr
 	}
 
-	f.labs[profileID] = labNS
+	ns := labNS
+	if f.namespace != "" {
+		ns = f.namespace
+	}
+
+	f.labs[profileID] = ns
 
 	if f.afterChange != nil {
 		f.afterChange()
 	}
 
-	return control.LabInfo{ProfileID: profileID, Namespace: labNS, State: control.LabSealed}, nil
+	return control.LabInfo{ProfileID: profileID, Namespace: ns, State: control.LabSealed}, nil
 }
 
 func (f *fakeRuntime) lab(op, p, n, state string) (control.LabInfo, error) {
@@ -220,6 +231,7 @@ type harness struct {
 	out      bytes.Buffer
 	profile  control.RoutingProfile
 	now      func() time.Time // nil: a fixed time
+	stdout   io.Writer        // nil: out
 }
 
 func newHarness(t *testing.T) *harness {
@@ -275,8 +287,18 @@ func (h *harness) run(args ...string) error {
 			}
 			return time.Unix(1795500000, 0)
 		},
-		stdout: &h.out,
+		stdout: h.writer(),
+		// Never the real per-user authority.
+		reservationRoot: func() (string, error) { return h.dir, nil },
 	})
+}
+
+func (h *harness) writer() io.Writer {
+	if h.stdout != nil {
+		return h.stdout
+	}
+
+	return &h.out
 }
 
 func (h *harness) mustRun(args ...string) {

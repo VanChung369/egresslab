@@ -3,8 +3,10 @@ package control
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,7 +23,8 @@ const (
 	reservationJournalMagic = "egresslab-reservations/v1\n"
 
 	maxReservationRecordBytes  = 8 * 1024
-	maxReservationJournalBytes = len(reservationJournalMagic) +
+	maxReservationHeaderBytes  = 128
+	maxReservationJournalBytes = maxReservationHeaderBytes +
 		maxEgressReservations*(4+maxReservationRecordBytes+sha256.Size)
 )
 
@@ -106,39 +109,67 @@ func openLockedReservationJournal(path string, create bool) (*os.File, error) {
 
 // initializeReservationJournal provisions a new authority explicitly. It is never a fallback for a
 // failed open: a missing journal is no proof that nothing was ever reserved. Tests only for now.
-func initializeReservationJournal(dataDir string) (resultErr error) {
+func initializeReservationJournal(dataDir string) error {
+	return initializeReservationJournalWithHeader(dataDir, reservationJournalMagic)
+}
+
+func initializeReservationJournalWithHeader(dataDir, headerText string) error {
+	if len(headerText) == 0 || len(headerText) > maxReservationHeaderBytes {
+		return ErrReservationUnavailable
+	}
+
 	path, err := reservationJournalPath(dataDir)
 	if err != nil {
 		return err
 	}
 
-	file, err := openLockedReservationJournal(path, true)
-	if err != nil {
-		return err
+	return publishReservationFile(filepath.Dir(path), reservationJournalFile, []byte(headerText))
+}
+
+// publishReservationFile writes data to a private temporary file, flushes it and links it into place
+// exclusively. The published name never shows an empty or partial file: if it did, a reader could
+// lock it first, the creator would fail, and the leftover would block the authority for good.
+func publishReservationFile(dir, name string, data []byte) error {
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return errors.Join(ErrReservationUnavailable, err)
 	}
 
-	defer func() {
-		if err := file.Close(); err != nil {
-			resultErr = errors.Join(resultErr, ErrReservationStateUncertain, err)
-		}
-	}()
+	tmp := filepath.Join(dir, "."+name+".tmp-"+hex.EncodeToString(suffix[:]))
 
-	header := []byte(reservationJournalMagic)
+	file, err := openReservationFile(tmp, true)
+	if err != nil {
+		return errors.Join(ErrReservationUnavailable, err)
+	}
 
-	n, err := file.Write(header)
-	if err == nil && n != len(header) {
+	// The temporary name is private to this call; the published one is never removed.
+	defer os.Remove(tmp)
+
+	n, err := file.Write(data)
+	if err == nil && n != len(data) {
 		err = io.ErrShortWrite
 	}
 
+	if err == nil {
+		err = file.Sync()
+	}
+
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+
 	if err != nil {
-		return errors.Join(ErrReservationStateUncertain, err)
+		return errors.Join(ErrReservationUnavailable, err)
 	}
 
-	if err := file.Sync(); err != nil {
-		return errors.Join(ErrReservationStateUncertain, err)
+	// A hard link fails if the name exists: the exclusive step that arbitrates concurrent creators.
+	if err := os.Link(tmp, filepath.Join(dir, name)); err != nil {
+		return errors.Join(ErrReservationUnavailable, err)
 	}
 
-	if err := syncReservationDirectory(filepath.Dir(path)); err != nil {
+	_ = os.Remove(tmp)
+
+	if err := syncReservationDirectory(dir); err != nil {
 		return errors.Join(ErrReservationStateUncertain, err)
 	}
 
@@ -289,9 +320,14 @@ func restoreJournalHold(registry *egressReservationRegistry, reservation EgressR
 // parseReservationJournal validates the whole journal before returning anything: a damaged record
 // 15 never yields the first 14 as a usable registry.
 func parseReservationJournal(data []byte) (reservationJournalState, error) {
-	header := []byte(reservationJournalMagic)
+	return parseReservationJournalWithHeader(data, reservationJournalMagic)
+}
 
-	if len(data) > maxReservationJournalBytes || !bytes.HasPrefix(data, header) {
+func parseReservationJournalWithHeader(data []byte, headerText string) (reservationJournalState, error) {
+	header := []byte(headerText)
+
+	if len(header) == 0 || len(header) > maxReservationHeaderBytes || len(data) > maxReservationJournalBytes ||
+		!bytes.HasPrefix(data, header) {
 		return reservationJournalState{}, ErrReservationJournalCorrupt
 	}
 
@@ -345,12 +381,16 @@ func parseReservationJournal(data []byte) (reservationJournalState, error) {
 
 // readReservationJournal reads through the locked handle.
 func readReservationJournal(file *os.File) (reservationJournalState, error) {
+	return readReservationJournalWithHeader(file, reservationJournalMagic)
+}
+
+func readReservationJournalWithHeader(file *os.File, headerText string) (reservationJournalState, error) {
 	info, err := file.Stat()
 	if err != nil {
 		return reservationJournalState{}, errors.Join(ErrReservationUnavailable, err)
 	}
 
-	if info.Size() < int64(len(reservationJournalMagic)) || info.Size() > int64(maxReservationJournalBytes) {
+	if info.Size() < int64(len(headerText)) || info.Size() > int64(maxReservationJournalBytes) {
 		return reservationJournalState{}, ErrReservationJournalCorrupt
 	}
 
@@ -373,7 +413,7 @@ func readReservationJournal(file *os.File) (reservationJournalState, error) {
 		return reservationJournalState{}, ErrReservationJournalCorrupt
 	}
 
-	return parseReservationJournal(data)
+	return parseReservationJournalWithHeader(data, headerText)
 }
 
 // appendReservationHold appends one complete frame and flushes it before reporting success. Once
@@ -429,37 +469,44 @@ func reserveDurableEgressAt(dataDir string, admission candidateAdmission, now fu
 // reserveDurableEgressContext also refuses to append once ctx is done: before the write a
 // cancellation leaves nothing durable; after it, the hold stays.
 func reserveDurableEgressContext(ctx context.Context, dataDir string, admission candidateAdmission,
+	now func() time.Time) (EgressReservation, error) {
+	return reserveDurableEgressJournal(ctx, legacyReservationJournal(dataDir), admission, now)
+}
+
+// reserveDurableEgressJournal is the transaction itself, against one journal format and, in
+// production, one provisioned authority.
+func reserveDurableEgressJournal(ctx context.Context, journal reservationJournalSpec, admission candidateAdmission,
 	now func() time.Time) (reservation EgressReservation, resultErr error) {
 	if ctx == nil || now == nil {
 		return EgressReservation{}, ErrReservationUnavailable
 	}
 
-	path, err := reservationJournalPath(dataDir)
-	if err != nil {
-		return EgressReservation{}, err
+	if journal.authority != nil && admission.runtime.PublicKeySHA256 != journal.authority.PublicKeySHA256 {
+		return EgressReservation{}, ErrReservationAuthorityMismatch
 	}
 
-	// Never create a missing journal here.
-	file, err := openLockedReservationJournal(path, false)
+	handle, err := journal.open()
 	if err != nil {
 		return EgressReservation{}, err
 	}
 
 	defer func() {
-		if err := file.Close(); err != nil {
+		if err := handle.Close(); err != nil {
 			reservation = EgressReservation{}
 			resultErr = errors.Join(resultErr, ErrReservationStateUncertain, err)
 		}
 	}()
 
-	state, err := readReservationJournal(file)
+	file := handle.File
+
+	state, err := journal.read(file)
 	if err != nil {
 		return EgressReservation{}, err
 	}
 
 	// An interrupted initialization may not have flushed the journal's directory entry; a grant
 	// must not rely on a name that a crash can still remove.
-	if err := syncReservationDirectory(filepath.Dir(path)); err != nil {
+	if err := syncReservationDirectory(journal.directory); err != nil {
 		return EgressReservation{}, errors.Join(ErrReservationUnavailable, err)
 	}
 
@@ -492,25 +539,24 @@ func reserveDurableEgressContext(ctx context.Context, dataDir string, admission 
 
 // inspectReservationJournal takes the same exclusive lock, so it never reads a half-written frame.
 // A damaged journal is an error, never an empty list.
-func inspectReservationJournal(dataDir string) (items []EgressReservation, resultErr error) {
-	path, err := reservationJournalPath(dataDir)
-	if err != nil {
-		return nil, err
-	}
+func inspectReservationJournal(dataDir string) ([]EgressReservation, error) {
+	return inspectReservationJournalSpec(legacyReservationJournal(dataDir))
+}
 
-	file, err := openLockedReservationJournal(path, false)
+func inspectReservationJournalSpec(journal reservationJournalSpec) (items []EgressReservation, resultErr error) {
+	handle, err := journal.open()
 	if err != nil {
 		return nil, err
 	}
 
 	defer func() {
-		if err := file.Close(); err != nil {
+		if err := handle.Close(); err != nil {
 			items = nil
 			resultErr = errors.Join(resultErr, ErrReservationUnavailable, err)
 		}
 	}()
 
-	state, err := readReservationJournal(file)
+	state, err := journal.read(handle.File)
 	if err != nil {
 		return nil, err
 	}

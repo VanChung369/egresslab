@@ -402,18 +402,28 @@ func TestReservationFlowSlowCandidateSigning(t *testing.T) {
 	}
 }
 
-// The production entry point on the real clock, with observations stamped at call time.
+// The production entry point on the real clock, through a provisioned authority, with observations
+// stamped at call time.
 func TestReserveVerifiedEgressRealClock(t *testing.T) {
-	dir := newTestReservationJournal(t)
+	dir := t.TempDir()
 	transport, trust, signer := newReservationFlowFixture(t, 1, "8.8.4.4")
 	transport.mode = "live"
 
-	hold, err := ReserveVerifiedEgress(context.Background(), dir, transport, signer, trust)
+	if _, err := InitializeReservationAuthority(dir, signer); err != nil {
+		t.Fatal(err)
+	}
+
+	authority, err := OpenReservationAuthority(dir, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hold, err := authority.ReserveVerifiedEgress(context.Background(), transport, signer, trust)
 	if err != nil || !hold.FreshAt(time.Now()) || hold.IPv4.String() != "8.8.4.4" {
 		t.Fatalf("real-clock reservation: %+v %v", hold, err)
 	}
 
-	if items, err := inspectReservationJournal(dir); err != nil || len(items) != 1 || items[0].ID != hold.ID {
+	if items, err := authority.List(); err != nil || len(items) != 1 || items[0].ID != hold.ID {
 		t.Fatalf("durable hold: %v", err)
 	}
 }
