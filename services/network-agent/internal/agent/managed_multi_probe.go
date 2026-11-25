@@ -54,6 +54,8 @@ type ManagedProbeSourceObservation struct {
 // ManagedMultiProbeObservation is unanimous diagnostic evidence from every mandatory source.
 // ObservedAt is the oldest source observation. It authorizes no lease and no application traffic.
 type ManagedMultiProbeObservation struct {
+	TunnelGeneration string `json:"tunnel_generation"`
+
 	IPv4        netip.Addr `json:"ipv4"`
 	StartedAt   time.Time  `json:"started_at"`
 	FinishedAt  time.Time  `json:"finished_at"`
@@ -99,6 +101,27 @@ func (b *ManagedTunnelBackend) MultiProbePolicyPin() (netip.Addr, error) {
 func (b *ManagedTunnelBackend) ProbeConfiguredMulti(
 	ctx context.Context,
 	namespace string,
+) (ManagedMultiProbeObservation, error) {
+	return b.probeConfiguredMulti(ctx, namespace, "")
+}
+
+// ProbeConfiguredMultiForGeneration is ProbeConfiguredMulti for exactly one tunnel generation,
+// checked under the same lock as the attempt itself, so the tunnel cannot change in between. A
+// mismatch is refused before anything starts and leaves the tunnel as it is.
+func (b *ManagedTunnelBackend) ProbeConfiguredMultiForGeneration(
+	ctx context.Context,
+	namespace, generation string,
+) (ManagedMultiProbeObservation, error) {
+	if generation == "" {
+		return ManagedMultiProbeObservation{}, ErrManagedTunnelGenerationMismatch
+	}
+
+	return b.probeConfiguredMulti(ctx, namespace, generation)
+}
+
+func (b *ManagedTunnelBackend) probeConfiguredMulti(
+	ctx context.Context,
+	namespace, expectedGeneration string,
 ) (observation ManagedMultiProbeObservation, resultErr error) {
 	b.sealed.manager.mu.Lock()
 	defer b.sealed.manager.mu.Unlock()
@@ -120,6 +143,10 @@ func (b *ManagedTunnelBackend) ProbeConfiguredMulti(
 
 	if t.faulted || t.linkRemoved {
 		return ManagedMultiProbeObservation{}, ErrManagedTunnelUncertain
+	}
+
+	if expectedGeneration != "" && expectedGeneration != t.generation {
+		return ManagedMultiProbeObservation{}, ErrManagedTunnelGenerationMismatch
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -286,11 +313,12 @@ func (b *ManagedTunnelBackend) ProbeConfiguredMulti(
 	}
 
 	return ManagedMultiProbeObservation{
-		IPv4:        consensus.ipv4,
-		StartedAt:   startedAt,
-		FinishedAt:  finishedAt,
-		ObservedAt:  consensus.observedAt,
-		HandshakeAt: handshake,
-		Sources:     evidence,
+		TunnelGeneration: t.generation,
+		IPv4:             consensus.ipv4,
+		StartedAt:        startedAt,
+		FinishedAt:       finishedAt,
+		ObservedAt:       consensus.observedAt,
+		HandshakeAt:      handshake,
+		Sources:          evidence,
 	}, nil
 }

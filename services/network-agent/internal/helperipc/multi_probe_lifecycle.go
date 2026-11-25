@@ -20,6 +20,9 @@ type MultiProbeSourceObservation struct {
 
 // MultiProbeObservation is diagnostic consensus evidence. It activates no lease and no traffic.
 type MultiProbeObservation struct {
+	// Set by the generation-bound (V2) probe only, from the agent's own tunnel.
+	TunnelGeneration string `json:"tunnel_generation,omitempty"`
+
 	IPv4        netip.Addr `json:"ipv4"`
 	StartedAt   time.Time  `json:"started_at"`
 	FinishedAt  time.Time  `json:"finished_at"`
@@ -34,6 +37,9 @@ type MultiProbeInfo struct {
 	Namespace string `json:"namespace"`
 
 	MultiProbeObservation
+
+	// V2 only: the nonce of the capability this attempt consumed. It authorizes nothing.
+	AttemptNonce string `json:"attempt_nonce,omitempty"`
 }
 
 // MultiProbeTunnelBackend: the backend that owns the tunnel also holds the source policy and runs
@@ -59,7 +65,18 @@ func validMultiProbeIntent(intent *helperauth.Intent) bool {
 		return false
 	}
 
-	expected, err := helperauth.NewMultiProbeIntent(intent.ProfileID, intent.Namespace, intent.ProbeIPv4)
+	var expected helperauth.Intent
+	var err error
+
+	switch intent.Operation {
+	case helperauth.OpPermitMultiProbe:
+		expected, err = helperauth.NewMultiProbeIntent(intent.ProfileID, intent.Namespace, intent.ProbeIPv4)
+	case helperauth.OpPermitMultiProbeV2:
+		expected, err = helperauth.NewGenerationProbeIntent(intent.ProfileID, intent.Namespace, intent.ProbeIPv4,
+			intent.TunnelGeneration)
+	default:
+		return false
+	}
 
 	return err == nil && *intent == expected
 }
@@ -67,12 +84,28 @@ func validMultiProbeIntent(intent *helperauth.Intent) bool {
 // validMultiProbeInfo checks the evidence independently of the agent's consensus engine: exactly
 // the V1 sources in execution order with their destinations, one public IPv4 address they all
 // report, timestamps in order inside an interval of at most 80 s, the earliest as ObservedAt, and a
-// handshake at most 180 whole seconds old at FinishedAt (the agent's own rule).
+// handshake at most 180 whole seconds old at FinishedAt (the agent's own rule). V2 evidence also
+// names the signed tunnel generation and an attempt nonce; V1 evidence carries neither.
 func validMultiProbeInfo(info *MultiProbeInfo, intent *helperauth.Intent) bool {
 	if info == nil || !validMultiProbeIntent(intent) ||
 		info.ProfileID != intent.ProfileID ||
 		info.Namespace != intent.Namespace ||
 		!helperauth.ValidPublicProbeIPv4(info.IPv4) {
+		return false
+	}
+
+	switch intent.Operation {
+	case helperauth.OpPermitMultiProbe:
+		if info.TunnelGeneration != "" || info.AttemptNonce != "" {
+			return false
+		}
+	case helperauth.OpPermitMultiProbeV2:
+		if info.TunnelGeneration != intent.TunnelGeneration ||
+			!helperauth.ValidTunnelGeneration(info.TunnelGeneration) ||
+			!helperauth.ValidCapabilityNonce(info.AttemptNonce) {
+			return false
+		}
+	default:
 		return false
 	}
 
@@ -127,6 +160,10 @@ func validMultiProbeForCapability(
 		return false
 	}
 
+	if intent.Operation == helperauth.OpPermitMultiProbeV2 && info.AttemptNonce != capability.Claims.Nonce {
+		return false
+	}
+
 	return !info.StartedAt.Before(time.Unix(capability.Claims.IssuedAt, 0))
 }
 
@@ -145,36 +182,40 @@ func olderHelperDisabled(req Request, resp Response) bool {
 		resp.Version == Version && !resp.OK && !resp.NetworkReady &&
 		resp.Operation == "" && resp.Code == CodeOperationDisabled &&
 		len(resp.Items) == 0 && resp.Info == nil && resp.Lab == nil && len(resp.Labs) == 0 &&
-		resp.Stage == nil && resp.Probe == nil && resp.MultiProbe == nil && resp.MultiProbePolicy == nil
+		resp.Stage == nil && resp.Probe == nil && resp.MultiProbe == nil && resp.MultiProbePolicy == nil &&
+		resp.MultiProbeTarget == nil
 }
 
 func validMultiProbeResponse(req Request, resp Response) bool {
-	if req.Operation != helperauth.OpPermitMultiProbe || !resp.OK {
+	multi := req.Operation == helperauth.OpPermitMultiProbe || req.Operation == helperauth.OpPermitMultiProbeV2
+	if !multi || !resp.OK {
 		return resp.MultiProbe == nil
 	}
 
-	if resp.NetworkReady || resp.Probe != nil {
+	if resp.NetworkReady || resp.Probe != nil || req.Intent == nil || req.Intent.Operation != req.Operation {
 		return false
 	}
 
 	return validMultiProbeForCapability(resp.MultiProbe, req.Intent, req.Capability)
 }
 
-// executeMultiProbe runs one signed multi-source attempt. The ident.me pin is read from the
-// backend's trusted policy and must equal the signed one: a valid signature for another pin is
-// refused, and the request never chooses a destination. Refusals before the nonce is consumed leave
-// the lab untouched; after it, any failure faults the lab and removes the tunnel.
+// executeMultiProbe runs one signed multi-source attempt, V1 or (in a generation lifecycle) V2. The
+// ident.me pin, and for V2 the tunnel generation, are read from the backend and must equal the
+// signed ones: the request never chooses a destination or a tunnel. Refusals before the nonce is
+// consumed leave the lab and any trusted evidence untouched; after it, the previous evidence is
+// dropped at once, and any failure faults the lab and removes the tunnel. Only a V2 attempt that
+// passes every check records new evidence.
 func (l *LabLifecycle) executeMultiProbe(
 	ctx context.Context,
 	req Request,
 	v *helperauth.Verifier,
 ) (MultiProbeInfo, error) {
-	if l == nil || l.backend == nil || req.Version != Version || req.Operation != helperauth.OpPermitMultiProbe ||
-		!validMultiProbeIntent(req.Intent) {
+	if l == nil || l.backend == nil || req.Version != Version || !validMultiProbeIntent(req.Intent) ||
+		req.Operation != req.Intent.Operation {
 		return MultiProbeInfo{}, errLabInvalid
 	}
 
-	if l.multiProbes == nil {
+	if !l.multiProbeOperationEnabled(req.Operation) {
 		return MultiProbeInfo{}, errLabUnavailable
 	}
 
@@ -215,7 +256,26 @@ func (l *LabLifecycle) executeMultiProbe(
 		return MultiProbeInfo{}, fmt.Errorf("%w: multi-source policy unavailable: %v", errLabUnavailable, err)
 	}
 
-	expected, err := helperauth.NewMultiProbeIntent(lab.ProfileID, lab.Namespace, pin.String())
+	generationBound := requested.Operation == helperauth.OpPermitMultiProbeV2
+
+	var expected helperauth.Intent
+
+	if generationBound {
+		generation, readErr := l.generationProbes.CurrentTunnelGeneration(lab.Namespace)
+		if readErr != nil {
+			return MultiProbeInfo{}, errLabUncertain
+		}
+
+		// A capability for an earlier tunnel of the same lab is refused, even unused and unexpired.
+		if requested.TunnelGeneration != generation {
+			return MultiProbeInfo{}, errLabAuthorization
+		}
+
+		expected, err = helperauth.NewGenerationProbeIntent(lab.ProfileID, lab.Namespace, pin.String(), generation)
+	} else {
+		expected, err = helperauth.NewMultiProbeIntent(lab.ProfileID, lab.Namespace, pin.String())
+	}
+
 	if err != nil {
 		return MultiProbeInfo{}, errLabUnavailable
 	}
@@ -233,23 +293,50 @@ func (l *LabLifecycle) executeMultiProbe(
 		return MultiProbeInfo{}, fmt.Errorf("%w: %w", errLabAuthorization, err)
 	}
 
-	acceptedAt := time.Now().UTC()
+	// Monotonic, for the evidence deadline.
+	acceptedAt := time.Now()
+
+	// An accepted attempt drops the previous evidence, even if it then fails.
+	l.verifiedEvidence = nil
 
 	// Ownership is kept, as faulted, while the attempt runs.
 	faulted := lab
 	faulted.State = LabFaulted
 	l.labs[lab.ProfileID] = faulted
 
-	observation, err := l.multiProbes.ProbeConfiguredMulti(ctx, lab.Namespace)
+	var observation MultiProbeObservation
+
+	if generationBound {
+		// Evidence recorded after this deadline is refused anyway, so the attempt stops there; the
+		// cleanups keep their own contexts. The agent checks the generation again under its own lock.
+		probeCtx, cancelProbe := context.WithDeadline(ctx, acceptedAt.Add(verifiedProbeEvidenceTTL))
+		defer cancelProbe()
+
+		observation, err = l.generationProbes.ProbeConfiguredMultiForGeneration(probeCtx, lab.Namespace,
+			expected.TunnelGeneration)
+	} else {
+		observation, err = l.multiProbes.ProbeConfiguredMulti(ctx, lab.Namespace)
+	}
 
 	info := MultiProbeInfo{ProfileID: lab.ProfileID, Namespace: lab.Namespace, MultiProbeObservation: observation}
+	if generationBound {
+		info.AttemptNonce = req.Capability.Claims.Nonce
+	}
 
 	if err == nil && !validMultiProbeForCapability(&info, &expected, req.Capability) {
 		err = errors.New("invalid backend multi-source observation")
 	}
 
-	if err == nil && !multiProbeWithin(&info, acceptedAt, time.Now()) {
+	now := time.Now()
+
+	if err == nil && !multiProbeWithin(&info, acceptedAt, now) {
 		err = errors.New("multi-source observation outside the accepted attempt")
+	}
+
+	var verified *verifiedMultiProbeEvidence
+
+	if err == nil && generationBound {
+		verified, err = newVerifiedMultiProbeEvidence(info, *req.Capability, acceptedAt, now)
 	}
 
 	if err == nil {
@@ -271,6 +358,7 @@ func (l *LabLifecycle) executeMultiProbe(
 
 	// Every source was verified and the backend resealed the firewall.
 	l.labs[lab.ProfileID] = lab
+	l.verifiedEvidence = verified
 
 	return info, nil
 }

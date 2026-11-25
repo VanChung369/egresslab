@@ -1,6 +1,6 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 30A — generation-scoped sticky IP enforcement in the helper.** A
+Status: **Step 30B.1 — signed tunnel generation binding and trusted evidence in the helper (not enabled yet).** A
 controller CLI signs `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV1` and drives
 the helper's sealed lab, tunnel and diagnostic probes in the Linux runtime; the helper holds the encrypted WireGuard configs,
 disables IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once and pins
@@ -185,6 +185,8 @@ The helper exposes a fixed set of operations, never a command line:
 `CreateLab` (creates and seals), `ConnectTunnel{profile_id, namespace, stage_id}`,
 `PermitProbe{profile_id, namespace, probe_ipv4}` (fixed to `1.1.1.1`),
 `PermitMultiProbeV1{profile_id, namespace, probe_ipv4}` (the provisioned ident.me pin),
+`PermitMultiProbeV2{profile_id, namespace, probe_ipv4, tunnel_generation}` (V1 bound to one tunnel),
+`MultiProbeTarget{profile_id, namespace}` (read-only),
 `VerifyLab`, `Disconnect`, `DeleteLab`, `RecoverScan`, `RecoverClean`.
 
 Every argument is validated with the existing patterns: `egresslab-lab-<16 hex>`,
@@ -194,7 +196,7 @@ Every argument is validated with the existing patterns: `egresslab-lab-<16 hex>`
 ## Authorization
 
 `CreateLab` and each operation that opens traffic (`ConnectTunnel`, `PermitProbe`,
-`PermitMultiProbeV1`) need a
+`PermitMultiProbeV1`, `PermitMultiProbeV2`) need a
 capability that the controller mints. Implemented format, version 1:
 
 ```text
@@ -202,7 +204,8 @@ claims = {"version":1,
           "intent":{"operation":..., "profile_id":"profile_<16 hex>",
                     "namespace":"egresslab-lab-<16 hex>",  ("" for CreateLab)
                     "stage_id":"wgstage_<32 hex>"          (ConnectTunnel only)
-                    "probe_ipv4":"<dotted IPv4>"},          (PermitProbe, PermitMultiProbeV1)
+                    "probe_ipv4":"<dotted IPv4>",          (PermitProbe, PermitMultiProbeV1, V2)
+                    "tunnel_generation":"tunnelgen_<32 hex>"}, (PermitMultiProbeV2 only)
           "helper_id":"helper_<32 hex>", "nonce":"<32 hex>",
           "issued_at":<unix s>, "not_after":<unix s, at most issued_at + 30>}
 
@@ -1213,7 +1216,8 @@ and `delete-lab` removed it. Not run on WSL2 or native Linux.
 | Step | Content |
 |---|---|
 | 30A | Tunnel generations and sticky IP enforcement in the helper |
-| 30B | Signed generation binding and the verified evidence lifecycle |
+| 30B.1 | Signed generation binding and trusted evidence in the helper |
+| 30B.2 | Controller integration and the V2 runtime cutover |
 
 ### Generation-scoped sticky IP (Step 30A)
 
@@ -1240,8 +1244,8 @@ backend (even with a runner set by mistake), so its evidence cannot bypass the p
 
 The pin detects a change only when a verification runs; EgressLab cannot make a provider keep an
 address. It is not a lease, a reservation or proof that the address stays the same, and it says
-nothing about other profiles (uniqueness comes separately). The generation and the pin are not in
-the signed protocol yet (Step 30B); no continuous monitoring and no application traffic exist.
+nothing about other profiles (uniqueness comes separately). Step 30B.1 puts the generation in the
+signed protocol (not the pin); no continuous monitoring and no application traffic exist.
 
 Verified on Lima on 2026-11-25 with the real Proton tunnel (scratch Keychain key and profile,
 removed afterwards), through the controller: two separately approved `probe-egress-multi` attempts
@@ -1254,3 +1258,62 @@ a fresh lab then succeeded. A metadata-only `strace` of the helper (program name
 and exit codes) during the successful cycle showed four workers exiting 0; the failure was not
 captured. A provider changing its address was tested with a synthetic runner only, not provoked on
 the real tunnel.
+
+### Signed tunnel generation binding (Step 30B.1)
+
+A `PermitMultiProbeV1` capability names the profile, namespace and pin, and the helper epoch, but
+not the tunnel: one minted for a tunnel that was then disconnected and reconnected, unused and
+still within its 30 s, would be accepted for the new tunnel. Replay protection does not help, as
+it was never used. `PermitMultiProbeV2` closes this by signing the tunnel generation too. V1 keeps
+its meaning and its bytes; the operation name is the policy version.
+
+| | `PermitMultiProbeV1` | `PermitMultiProbeV2` |
+|---|---|---|
+| profile, namespace, pin, helper epoch, single-use nonce | yes | yes |
+| tunnel generation | no | yes |
+| trusted evidence record | no | yes |
+
+`tunnel_generation` (`tunnelgen_` and 32 hex characters) is the last intent field and is omitted
+when empty, so every earlier intent signs exactly the bytes it did before (all four earlier golden
+vectors are unchanged); it is mandatory for V2 and refused on every other operation, including in
+the helper's own validators for read-only, lifecycle, stage and single-source requests. A fifth
+golden vector, cross-checked with OpenSSL 3, pins the V2 bytes.
+
+`MultiProbeTarget{profile_id, namespace}` is read-only: it takes an intent naming the lab and never
+a capability (`INVALID_REQUEST` otherwise). It answers one snapshot of the lab's tracked tunnel
+generation and the V2 policy of this helper generation: `{profile_id, namespace,
+tunnel_generation, policy: PermitMultiProbeV2, ident_ipv4, helper_id, runtime_id,
+public_key_sha256}`. It reports helper state, not a verified kernel, and authorizes nothing; it
+creates nothing, opens no window and consumes nothing, and does not wait behind a running
+operation. A sealed lab has no tunnel to target (`INVALID_REQUEST`), a faulted one answers
+`LAB_FAULTED`, and a generation the backend cannot vouch for or any uncertain state
+`STATE_UNCERTAIN`.
+
+For V2 the helper reads the current generation from the backend and builds the expected intent
+from it and the trusted pin. A capability for another generation is `AUTHORIZATION_DENIED` before
+its nonce is consumed; one for another pin is `INVALID_REQUEST`. The agent checks the generation
+again under the namespace manager lock (`ProbeConfiguredMultiForGeneration`) and refuses a mismatch
+before anything starts, leaving the tunnel untouched; the helper lifecycle lock is held throughout,
+always taken before the manager lock. The evidence must name that generation (the one the agent
+probed, never the one the request named) and the capability's nonce (`attempt_nonce`); V1
+evidence carries neither field. The client checks the same, against its own request.
+
+A successful V2 attempt records trusted evidence in the helper, in memory only: the signed intent,
+the helper epoch, the nonce, the agreed address and the oldest observation time. It is never built
+from anything a client sends, and it is neither a reservation nor a lease. It expires at the
+earlier of 60 s after the helper accepted the capability and 60 s after the oldest observation, on
+the monotonic clock; a reading earlier than the record, or a wall-clock step of more than 1 s
+against monotonic time, makes it unusable. Since nothing recorded later could be used, a V2
+attempt's context ends 60 s after acceptance (the cleanups keep their own deadlines). A refusal before the nonce is consumed and every read
+leave it as it is. An accepted attempt drops it at once, a failed one leaves none, a sticky
+violation drops it, and so do `Disconnect`, `DeleteLab` of that lab, a failed `VerifyLab`, a
+reconnect and shutdown. Nothing consumes the evidence yet (Step 31). Expiry does not touch the
+sticky pin.
+
+A lifecycle built with `NewGenerationProbeLifecycle` enables V2 only: `PermitMultiProbeV1` and
+`PermitProbe` are refused (`OPERATION_DISABLED` over the socket) and `MultiProbePolicy` advertises
+`PermitMultiProbeV2`. A plain multi-source lifecycle keeps V1 and refuses V2 and
+`MultiProbeTarget`. The installed helper is unchanged in this step: it still runs the V1
+lifecycle, because the controller signs V1 only until Step 30B.2 switches both together. The V2
+path is tested with a fake kernel backend, including over a real Unix socket on Lima; no kernel ran
+it, and the refactored V1 path is covered by tests only until then.

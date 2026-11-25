@@ -64,6 +64,7 @@ type Response struct {
 	MultiProbe   *MultiProbeInfo `json:"multi_probe,omitempty"`
 
 	MultiProbePolicy *MultiProbePolicyInfo `json:"multi_probe_policy,omitempty"`
+	MultiProbeTarget *MultiProbeTargetInfo `json:"multi_probe_target,omitempty"`
 }
 
 var ErrInvalidFrame = errors.New("invalid helper IPC frame")
@@ -232,6 +233,10 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 
 	if !validMultiProbePolicyResponse(req, resp) {
 		return Response{}, errors.New("invalid multi-source policy response")
+	}
+
+	if !validMultiProbeTargetResponse(req, resp) {
+		return Response{}, errors.New("invalid multi-source target response")
 	}
 
 	// The attempt must lie between writing this request and reading its answer.

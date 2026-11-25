@@ -66,6 +66,9 @@ func (l *LabLifecycle) connectTunnelLocked(
 		return LabInfo{}, fmt.Errorf("%w: %w", errLabAuthorization, err)
 	}
 
+	// A new tunnel inherits no evidence.
+	l.verifiedEvidence = nil
+
 	// Tracked before any kernel change.
 	l.tunnelProfile = lab.ProfileID
 	sealed := lab
@@ -94,6 +97,9 @@ func (l *LabLifecycle) connectTunnelLocked(
 // clearTunnelLocked releases the tunnel slot if lab holds it. A failed cleanup faults the lab and
 // keeps the slot. The caller must hold l.mu.
 func (l *LabLifecycle) clearTunnelLocked(ctx context.Context, lab LabInfo) error {
+	// Before the cleanup, whatever its outcome.
+	l.invalidateEvidenceLocked(lab.ProfileID)
+
 	if l.tunnelProfile != lab.ProfileID {
 		return nil
 	}
@@ -143,6 +149,7 @@ func (l *LabLifecycle) disconnectTunnelLocked(ctx context.Context, lab LabInfo) 
 // fresh bounded context. The caller must hold l.mu.
 func (l *LabLifecycle) verifyTunnelLocked(ctx context.Context, lab LabInfo) (LabInfo, error) {
 	if l.tunnels == nil || l.tunnelProfile != lab.ProfileID {
+		l.invalidateEvidenceLocked(lab.ProfileID)
 		lab.State = LabFaulted
 		l.labs[lab.ProfileID] = lab
 
@@ -154,6 +161,7 @@ func (l *LabLifecycle) verifyTunnelLocked(ctx context.Context, lab LabInfo) (Lab
 		return lab, nil
 	}
 
+	l.invalidateEvidenceLocked(lab.ProfileID)
 	lab.State = LabFaulted
 	l.labs[lab.ProfileID] = lab
 

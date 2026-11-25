@@ -383,3 +383,95 @@ func TestAcceptStickyConsensus(t *testing.T) {
 		}
 	}
 }
+
+func TestManagedProbeGenerationBinding(t *testing.T) {
+	ctx := context.Background()
+	b, kernel, window, _ := multiProbeFixture(t)
+
+	observedIP := "8.8.4.4"
+	installStickyTestRunner(t, b, kernel, window, &observedIP)
+
+	old, err := b.CurrentTunnelGeneration(vpnTestNS)
+	if err != nil || old != b.active.generation {
+		t.Fatalf("missing tunnel generation: %v", err)
+	}
+
+	if err := b.Disconnect(ctx, vpnTestNS); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := b.CurrentTunnelGeneration(vpnTestNS); !errors.Is(err, ErrNoManagedTunnel) {
+		t.Fatalf("removed generation still reported: %v", err)
+	}
+
+	if err := b.connectConfig(ctx, vpnTestNS, vpnTestConfig(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	current, err := b.CurrentTunnelGeneration(vpnTestNS)
+	if err != nil || current == "" || current == old {
+		t.Fatalf("generation reused after reconnect: %v", err)
+	}
+
+	tracked := b.active
+
+	for _, wrong := range []string{"", old, "tunnelgen_invalid"} {
+		result, err := b.ProbeConfiguredMultiForGeneration(ctx, vpnTestNS, wrong)
+		if !errors.Is(err, ErrManagedTunnelGenerationMismatch) || !reflect.DeepEqual(result, ManagedMultiProbeObservation{}) {
+			t.Fatalf("generation %q accepted: %v", wrong, err)
+		}
+	}
+
+	if window.opened != 0 || b.active != tracked || tracked.faulted || tracked.expectedIPv4.IsValid() {
+		t.Fatal("a refused generation changed the tunnel")
+	}
+
+	result, err := b.ProbeConfiguredMultiForGeneration(ctx, vpnTestNS, current)
+	if err != nil || result.TunnelGeneration != current || result.IPv4.String() != observedIP || window.open ||
+		window.opened != 2 || tracked.expectedIPv4 != result.IPv4 {
+		t.Fatalf("current generation probe failed: %+v %v", result, err)
+	}
+
+	// The unbound entry point reports the generation too; the V1 adapter drops it.
+	if plain, err := b.ProbeConfiguredMulti(ctx, vpnTestNS); err != nil || plain.TunnelGeneration != current {
+		t.Fatalf("unbound probe: %+v %v", plain, err)
+	}
+
+	if err := b.Disconnect(ctx, vpnTestNS); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCurrentTunnelGenerationRefusals(t *testing.T) {
+	b, _, _, _ := multiProbeFixture(t)
+
+	if _, err := b.CurrentTunnelGeneration(vpnTestNS); !errors.Is(err, ErrManagedProbeUnavailable) {
+		t.Fatalf("generation of a backend without the multi-source probe: %v", err)
+	}
+
+	observedIP := "8.8.4.4"
+	installStickyTestRunner(t, b, nil, nil, &observedIP)
+
+	if _, err := b.CurrentTunnelGeneration("egresslab-lab-00000000000000bb"); !errors.Is(err, ErrNoManagedTunnel) {
+		t.Fatalf("generation of another namespace: %v", err)
+	}
+
+	for name, edit := range map[string]func(*managedTunnel){
+		"faulted":       func(t *managedTunnel) { t.faulted = true },
+		"link removed":  func(t *managedTunnel) { t.linkRemoved = true },
+		"no generation": func(t *managedTunnel) { t.generation = "" },
+	} {
+		saved := *b.active
+		edit(b.active)
+
+		if _, err := b.CurrentTunnelGeneration(vpnTestNS); !errors.Is(err, ErrManagedTunnelUncertain) {
+			t.Errorf("%s tunnel: %v", name, err)
+		}
+
+		*b.active = saved
+	}
+
+	if generation, err := b.CurrentTunnelGeneration(vpnTestNS); err != nil || generation != b.active.generation {
+		t.Fatalf("healthy tunnel: %v", err)
+	}
+}

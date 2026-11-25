@@ -59,6 +59,7 @@ func validProbeIntent(in *helperauth.Intent) bool {
 		helperauth.ValidProfileID(in.ProfileID) &&
 		helperauth.ValidLabNamespace(in.Namespace) &&
 		in.StageID == "" &&
+		in.TunnelGeneration == "" &&
 		in.ProbeIPv4 == ProbeDestinationIPv4
 }
 
@@ -90,7 +91,8 @@ func validProbeResponse(req Request, resp Response) bool {
 }
 
 func operationResponseTimeout(operation string) time.Duration {
-	if operation == helperauth.OpPermitProbe || operation == helperauth.OpPermitMultiProbe {
+	if operation == helperauth.OpPermitProbe || operation == helperauth.OpPermitMultiProbe ||
+		operation == helperauth.OpPermitMultiProbeV2 {
 		return probeResponseTimeout
 	}
 

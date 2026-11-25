@@ -264,6 +264,28 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 		resp.OK = true
 		resp.MultiProbePolicy = &policy
 
+	case OpMultiProbeTarget:
+		// Read-only, but it names a lab: an intent, never a capability.
+		if req.Capability != nil || !validMultiProbeTargetIntent(req.Intent) {
+			return refuse(CodeInvalidRequest, "invalid multi-source target request")
+		}
+
+		if labs == nil || labs.generationProbes == nil || v == nil {
+			return refuse(CodeOperationDisabled, "operation not enabled")
+		}
+
+		targetCtx, cancel := context.WithTimeout(ctx, scanTimeout)
+		target, err := labs.readMultiProbeTarget(targetCtx, req.Intent, v, opts.RuntimeID)
+		cancel()
+
+		if err != nil {
+			code := labCode(err)
+			return refuse(code, labMessages[code])
+		}
+
+		resp.OK = true
+		resp.MultiProbeTarget = &target
+
 	case OpAuthorizeCheck:
 		if v == nil || req.Intent == nil || req.Capability == nil {
 			return refuse(CodeOperationDisabled, "authorization unavailable")
@@ -338,8 +360,8 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 		resp.OK = true
 		resp.Probe = &info
 
-	case helperauth.OpPermitMultiProbe:
-		if labs == nil || labs.multiProbes == nil {
+	case helperauth.OpPermitMultiProbe, helperauth.OpPermitMultiProbeV2:
+		if !labs.multiProbeOperationEnabled(req.Operation) {
 			return refuse(CodeOperationDisabled, "operation not enabled")
 		}
 

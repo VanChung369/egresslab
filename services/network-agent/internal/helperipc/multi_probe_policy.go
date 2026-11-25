@@ -20,7 +20,8 @@ type MultiProbePolicyInfo struct {
 }
 
 func (p *MultiProbePolicyInfo) valid() bool {
-	if p == nil || p.Policy != helperauth.OpPermitMultiProbe || !helperauth.ValidMultiProbePin(p.IdentIPv4) ||
+	if p == nil || (p.Policy != helperauth.OpPermitMultiProbe && p.Policy != helperauth.OpPermitMultiProbeV2) ||
+		!helperauth.ValidMultiProbePin(p.IdentIPv4) ||
 		!ValidRuntimeID(p.RuntimeID) {
 		return false
 	}
@@ -77,6 +78,12 @@ func (l *LabLifecycle) readMultiProbePolicy(
 		return MultiProbePolicyInfo{}, errLabUncertain
 	}
 
+	return l.multiProbePolicyLocked(v, runtimeID)
+}
+
+// multiProbePolicyLocked reports the one operation this lifecycle enables: V2 in a generation
+// lifecycle, V1 otherwise. The caller must hold l.mu and have checked the lifecycle state.
+func (l *LabLifecycle) multiProbePolicyLocked(v *helperauth.Verifier, runtimeID string) (MultiProbePolicyInfo, error) {
 	pin, err := l.multiProbes.MultiProbePolicyPin()
 	if err != nil {
 		return MultiProbePolicyInfo{}, errLabUnavailable
@@ -84,8 +91,13 @@ func (l *LabLifecycle) readMultiProbePolicy(
 
 	helperID, fingerprint := v.Identity()
 
+	policy := helperauth.OpPermitMultiProbe
+	if l.generationProbes != nil {
+		policy = helperauth.OpPermitMultiProbeV2
+	}
+
 	info := MultiProbePolicyInfo{
-		Policy:          helperauth.OpPermitMultiProbe,
+		Policy:          policy,
 		IdentIPv4:       pin.String(),
 		HelperID:        helperID,
 		RuntimeID:       runtimeID,

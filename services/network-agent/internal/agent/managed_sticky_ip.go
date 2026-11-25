@@ -9,7 +9,10 @@ import (
 
 const managedTunnelGenerationPrefix = "tunnelgen_"
 
-var ErrManagedStickyIPChanged = errors.New("managed tunnel public IPv4 differs from its generation pin")
+var (
+	ErrManagedStickyIPChanged          = errors.New("managed tunnel public IPv4 differs from its generation pin")
+	ErrManagedTunnelGenerationMismatch = errors.New("managed tunnel generation mismatch")
+)
 
 // newManagedTunnelGeneration names one managed tunnel lifetime with 128 random bits. It is an
 // identifier, not a secret: a reconnect of the same profile, namespace and config gets a new one.
@@ -21,6 +24,28 @@ func newManagedTunnelGeneration() (string, error) {
 	}
 
 	return managedTunnelGenerationPrefix + hex.EncodeToString(id[:]), nil
+}
+
+// CurrentTunnelGeneration names the tracked, healthy tunnel of a multi-source backend in namespace.
+// It is metadata, not proof of egress.
+func (b *ManagedTunnelBackend) CurrentTunnelGeneration(namespace string) (string, error) {
+	b.sealed.manager.mu.Lock()
+	defer b.sealed.manager.mu.Unlock()
+
+	if b.multiProbe == nil || b.multiProbe.run == nil {
+		return "", ErrManagedProbeUnavailable
+	}
+
+	t := b.active
+	if t == nil || t.namespace != namespace {
+		return "", ErrNoManagedTunnel
+	}
+
+	if _, owned := b.sealed.manager.owned[namespace]; !owned || t.faulted || t.linkRemoved || t.generation == "" {
+		return "", ErrManagedTunnelUncertain
+	}
+
+	return t.generation, nil
 }
 
 // acceptStickyConsensusLocked pins the generation's expected IPv4 at its first complete

@@ -121,7 +121,7 @@ func TestMultiProbePolicyResponseValidation(t *testing.T) {
 	}
 
 	for name, mutate := range map[string]func(*MultiProbePolicyInfo){
-		"unsupported policy":  func(p *MultiProbePolicyInfo) { p.Policy = "PermitMultiProbeV2" },
+		"unsupported policy":  func(p *MultiProbePolicyInfo) { p.Policy = "PermitMultiProbeV3" },
 		"legacy policy":       func(p *MultiProbePolicyInfo) { p.Policy = helperauth.OpPermitProbe },
 		"missing pin":         func(p *MultiProbePolicyInfo) { p.IdentIPv4 = "" },
 		"Cloudflare as pin":   func(p *MultiProbePolicyInfo) { p.IdentIPv4 = "1.1.1.1" },

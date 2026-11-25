@@ -66,3 +66,20 @@ func NewMultiProbeIntent(profileID, namespace, identPin string) (Intent, error) 
 
 	return intent, nil
 }
+
+// NewGenerationProbeIntent binds the V1 policy and its ident.me pin to exactly one tunnel generation.
+func NewGenerationProbeIntent(profileID, namespace, identPin, generation string) (Intent, error) {
+	intent := Intent{
+		Operation:        OpPermitMultiProbeV2,
+		ProfileID:        profileID,
+		Namespace:        namespace,
+		ProbeIPv4:        identPin,
+		TunnelGeneration: generation,
+	}
+
+	if err := validateIntent(intent); err != nil {
+		return Intent{}, err
+	}
+
+	return intent, nil
+}

@@ -32,7 +32,8 @@ func validStageIntent(in *helperauth.Intent) bool {
 		helperauth.ValidProfileID(in.ProfileID) &&
 		in.Namespace == "" &&
 		in.StageID == "" &&
-		in.ProbeIPv4 == ""
+		in.ProbeIPv4 == "" &&
+		in.TunnelGeneration == ""
 }
 
 func validStageInfo(info *StageInfo, profileID string) bool {

@@ -30,6 +30,9 @@ const (
 	// A change of sources, endpoints or semantics needs a new operation, not a new meaning for this one.
 	OpPermitMultiProbe = "PermitMultiProbeV1"
 
+	// OpPermitMultiProbeV2 is the V1 policy bound to one tunnel generation as well.
+	OpPermitMultiProbeV2 = "PermitMultiProbeV2"
+
 	// The helper picks the namespace, so a CreateLab intent signs "namespace":"".
 	OpCreateLab = "CreateLab"
 
@@ -49,6 +52,8 @@ var (
 	stagePattern   = regexp.MustCompile(`^wgstage_[0-9a-f]{32}$`)
 	helperPattern  = regexp.MustCompile(`^helper_[0-9a-f]{32}$`)
 	noncePattern   = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+	tunnelGenerationPattern = regexp.MustCompile(`^tunnelgen_[0-9a-f]{32}$`)
 )
 
 // Intent describes exactly what is authorized. The helper compares it with the intent supplied
@@ -59,6 +64,9 @@ type Intent struct {
 	Namespace string `json:"namespace"`
 	StageID   string `json:"stage_id,omitempty"`
 	ProbeIPv4 string `json:"probe_ipv4,omitempty"`
+
+	// Last and omitted when empty, so every earlier intent signs exactly the same bytes as before.
+	TunnelGeneration string `json:"tunnel_generation,omitempty"`
 }
 
 type Claims struct {
@@ -87,8 +95,21 @@ func ValidStageID(id string) bool {
 	return stagePattern.MatchString(id)
 }
 
+func ValidTunnelGeneration(id string) bool {
+	return tunnelGenerationPattern.MatchString(id)
+}
+
+func ValidCapabilityNonce(nonce string) bool {
+	return noncePattern.MatchString(nonce)
+}
+
 func validateIntent(in Intent) error {
 	if !ValidProfileID(in.ProfileID) {
+		return ErrInvalidCapability
+	}
+
+	// Only V2 may carry a tunnel generation.
+	if in.Operation != OpPermitMultiProbeV2 && in.TunnelGeneration != "" {
 		return ErrInvalidCapability
 	}
 
@@ -122,6 +143,11 @@ func validateIntent(in Intent) error {
 
 	case OpPermitMultiProbe:
 		if in.StageID != "" || !ValidMultiProbePin(in.ProbeIPv4) {
+			return ErrInvalidCapability
+		}
+
+	case OpPermitMultiProbeV2:
+		if in.StageID != "" || !ValidMultiProbePin(in.ProbeIPv4) || !ValidTunnelGeneration(in.TunnelGeneration) {
 			return ErrInvalidCapability
 		}
 

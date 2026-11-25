@@ -130,6 +130,9 @@ type LabLifecycle struct {
 	probes        ProbeTunnelBackend      // nil unless the single-source probe is enabled
 	multiProbes   MultiProbeTunnelBackend // nil unless the multi-source probe is enabled
 	tunnelProfile string                  // owner of the one tunnel or unfinished attempt
+
+	generationProbes GenerationProbeTunnelBackend // nil unless the generation-bound (V2) probe is enabled
+	verifiedEvidence *verifiedMultiProbeEvidence  // the last checked V2 attempt, if still valid
 }
 
 func NewLabLifecycle(backend LabBackend) *LabLifecycle {
@@ -149,7 +152,8 @@ func validLifecycleIntent(op string, in *helperauth.Intent) bool {
 	if in == nil ||
 		in.Operation != op ||
 		!helperauth.ValidProfileID(in.ProfileID) ||
-		in.ProbeIPv4 != "" {
+		in.ProbeIPv4 != "" ||
+		in.TunnelGeneration != "" {
 		return false
 	}
 
@@ -352,6 +356,7 @@ func (l *LabLifecycle) Close() error {
 	defer l.mu.Unlock()
 
 	l.closed = true
+	l.verifiedEvidence = nil
 
 	var errs []error
 

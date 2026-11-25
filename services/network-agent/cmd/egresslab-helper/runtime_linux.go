@@ -98,8 +98,9 @@ type tunnelBackend struct{ *agent.ManagedTunnelBackend }
 
 // MultiProbePolicyPin is promoted from the embedded backend.
 var (
-	_ helperipc.ProbeTunnelBackend      = tunnelBackend{}
-	_ helperipc.MultiProbeTunnelBackend = tunnelBackend{}
+	_ helperipc.ProbeTunnelBackend           = tunnelBackend{}
+	_ helperipc.MultiProbeTunnelBackend      = tunnelBackend{}
+	_ helperipc.GenerationProbeTunnelBackend = tunnelBackend{}
 )
 
 // ProbeConfigured adapts the backend's observation, so helperipc does not depend on the agent package.
@@ -121,7 +122,8 @@ func (b tunnelBackend) ProbeConfigured(ctx context.Context, namespace string) (h
 	}, nil
 }
 
-// ProbeConfiguredMulti adapts the backend's multi-source observation the same way.
+// ProbeConfiguredMulti adapts the backend's multi-source observation the same way, without the
+// tunnel generation (V1 evidence carries none).
 func (b tunnelBackend) ProbeConfiguredMulti(
 	ctx context.Context,
 	namespace string,
@@ -131,6 +133,27 @@ func (b tunnelBackend) ProbeConfiguredMulti(
 		return helperipc.MultiProbeObservation{}, err
 	}
 
+	return adaptMultiProbeObservation(result, false)
+}
+
+// ProbeConfiguredMultiForGeneration reports the generation the agent actually probed, never the
+// one the request named.
+func (b tunnelBackend) ProbeConfiguredMultiForGeneration(
+	ctx context.Context,
+	namespace, generation string,
+) (helperipc.MultiProbeObservation, error) {
+	result, err := b.ManagedTunnelBackend.ProbeConfiguredMultiForGeneration(ctx, namespace, generation)
+	if err != nil {
+		return helperipc.MultiProbeObservation{}, err
+	}
+
+	return adaptMultiProbeObservation(result, true)
+}
+
+func adaptMultiProbeObservation(
+	result agent.ManagedMultiProbeObservation,
+	withGeneration bool,
+) (helperipc.MultiProbeObservation, error) {
 	if result.NetworkReady {
 		return helperipc.MultiProbeObservation{}, errors.New("diagnostic probe cannot activate networking")
 	}
@@ -145,14 +168,20 @@ func (b tunnelBackend) ProbeConfiguredMulti(
 		})
 	}
 
-	return helperipc.MultiProbeObservation{
+	observation := helperipc.MultiProbeObservation{
 		IPv4:        result.IPv4,
 		StartedAt:   result.StartedAt,
 		FinishedAt:  result.FinishedAt,
 		ObservedAt:  result.ObservedAt,
 		HandshakeAt: result.HandshakeAt,
 		Sources:     sources,
-	}, nil
+	}
+
+	if withGeneration {
+		observation.TunnelGeneration = result.TunnelGeneration
+	}
+
+	return observation, nil
 }
 
 func (b tunnelBackend) ConnectStage(ctx context.Context, profileID, namespace, stageID string) error {
