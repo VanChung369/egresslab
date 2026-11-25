@@ -360,6 +360,32 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 		resp.OK = true
 		resp.Candidate = &candidate
 
+	case helperauth.OpPrepareEgressLease:
+		if labs == nil || labs.generationProbes == nil || v == nil {
+			return refuse(CodeOperationDisabled, "operation not enabled")
+		}
+
+		if ctx.Err() != nil {
+			return refuse(CodeRuntimeUnavailable, "helper is shutting down")
+		}
+
+		prepareCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lifecycleTimeout)
+		lease, err := labs.prepareEgressLease(prepareCtx, req, v, opts.RuntimeID)
+		cancel()
+
+		if err != nil {
+			code := labCode(err)
+			if code != CodeAuthorizationDenied && code != CodeEvidenceUnavailable {
+				log.Printf("egress lease preparation: %s: %v", code, err)
+			}
+
+			return refuse(code, labMessages[code])
+		}
+
+		// network_ready stays false: a prepared lease opens nothing.
+		resp.OK = true
+		resp.PreparedLease = &lease
+
 	case helperauth.OpPermitProbe:
 		if labs == nil || labs.probes == nil || labs.multiProbes != nil {
 			return refuse(CodeOperationDisabled, "operation not enabled")

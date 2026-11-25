@@ -183,7 +183,7 @@ func olderHelperDisabled(req Request, resp Response) bool {
 		resp.Operation == "" && resp.Code == CodeOperationDisabled &&
 		len(resp.Items) == 0 && resp.Info == nil && resp.Lab == nil && len(resp.Labs) == 0 &&
 		resp.Stage == nil && resp.Probe == nil && resp.MultiProbe == nil && resp.MultiProbePolicy == nil &&
-		resp.MultiProbeTarget == nil && resp.Candidate == nil
+		resp.MultiProbeTarget == nil && resp.Candidate == nil && resp.PreparedLease == nil
 }
 
 func validMultiProbeResponse(req Request, resp Response) bool {
@@ -230,6 +230,11 @@ func (l *LabLifecycle) executeMultiProbe(
 
 	if l.blockCreation {
 		return MultiProbeInfo{}, errLabUncertain
+	}
+
+	// A prepared lease leaves through its own lifecycle, not by a new observation, even expired.
+	if l.preparedLease != nil {
+		return MultiProbeInfo{}, errLabBusy
 	}
 
 	requested := *req.Intent

@@ -61,6 +61,7 @@ func validProbeIntent(in *helperauth.Intent) bool {
 		in.StageID == "" &&
 		in.TunnelGeneration == "" &&
 		in.EvidenceNonce == "" &&
+		!in.HasLeaseFields() &&
 		in.ProbeIPv4 == ProbeDestinationIPv4
 }
 
@@ -97,8 +98,9 @@ func operationResponseTimeout(operation string) time.Duration {
 		return probeResponseTimeout
 	}
 
-	// A reservation may run a full tunnel verification and its cleanup.
-	if isLifecycleOp(operation) || operation == helperauth.OpReserveEgressCandidate {
+	// A reservation or preparation may run a full tunnel verification and its cleanup.
+	if isLifecycleOp(operation) || operation == helperauth.OpReserveEgressCandidate ||
+		operation == helperauth.OpPrepareEgressLease {
 		return lifecycleResponseTimeout
 	}
 

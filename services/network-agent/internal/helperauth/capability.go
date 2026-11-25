@@ -37,6 +37,10 @@ const (
 	// names that attempt, never an address: the address comes from the helper's own evidence.
 	OpReserveEgressCandidate = "ReserveEgressCandidateV1"
 
+	// OpPrepareEgressLease binds a local candidate to the controller's durable reservation. It
+	// authorizes no application traffic.
+	OpPrepareEgressLease = "PrepareEgressLeaseV1"
+
 	// The helper picks the namespace, so a CreateLab intent signs "namespace":"".
 	OpCreateLab = "CreateLab"
 
@@ -69,9 +73,17 @@ type Intent struct {
 	StageID   string `json:"stage_id,omitempty"`
 	ProbeIPv4 string `json:"probe_ipv4,omitempty"`
 
-	// Last and omitted when empty, so every earlier intent signs exactly the same bytes as before.
+	// Appended in this order and omitted when empty, so every earlier intent signs exactly the same
+	// bytes as before. The controller's LabIntent must mirror the order.
 	TunnelGeneration string `json:"tunnel_generation,omitempty"`
 	EvidenceNonce    string `json:"evidence_nonce,omitempty"` // the consumed V2 attempt's nonce
+
+	// PrepareEgressLeaseV1 only.
+	ReservationNonce string `json:"reservation_nonce,omitempty"` // the ReserveEgressCandidateV1 attempt's nonce
+	RuntimeID        string `json:"runtime_id,omitempty"`
+	AuthorityID      string `json:"authority_id,omitempty"`
+	ReservationID    string `json:"reservation_id,omitempty"`
+	EgressIPv4       string `json:"egress_ipv4,omitempty"` // the reserved address, not the probe pin
 }
 
 type Claims struct {
@@ -113,13 +125,22 @@ func validateIntent(in Intent) error {
 		return ErrInvalidCapability
 	}
 
-	// Only V2 and the reservation that consumes it may carry a tunnel generation, and only the
-	// reservation an evidence reference.
-	if in.Operation != OpPermitMultiProbeV2 && in.Operation != OpReserveEgressCandidate && in.TunnelGeneration != "" {
+	// Only V2, the reservation that consumes it and the preparation that consumes the reservation
+	// may carry a tunnel generation; only the last two an evidence reference, and only the
+	// preparation the lease fields.
+	switch in.Operation {
+	case OpPermitMultiProbeV2, OpReserveEgressCandidate, OpPrepareEgressLease:
+	default:
+		if in.TunnelGeneration != "" {
+			return ErrInvalidCapability
+		}
+	}
+
+	if in.Operation != OpReserveEgressCandidate && in.Operation != OpPrepareEgressLease && in.EvidenceNonce != "" {
 		return ErrInvalidCapability
 	}
 
-	if in.Operation != OpReserveEgressCandidate && in.EvidenceNonce != "" {
+	if in.Operation != OpPrepareEgressLease && in.HasLeaseFields() {
 		return ErrInvalidCapability
 	}
 
@@ -164,6 +185,11 @@ func validateIntent(in Intent) error {
 	case OpReserveEgressCandidate:
 		if in.StageID != "" || !ValidMultiProbePin(in.ProbeIPv4) || !ValidTunnelGeneration(in.TunnelGeneration) ||
 			!ValidCapabilityNonce(in.EvidenceNonce) {
+			return ErrInvalidCapability
+		}
+
+	case OpPrepareEgressLease:
+		if !validPrepareLeaseFields(in) {
 			return ErrInvalidCapability
 		}
 

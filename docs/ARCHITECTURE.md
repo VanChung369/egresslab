@@ -57,7 +57,7 @@ The unique-IP invariant needs one authority across runtimes: two Linux runtimes,
 - Four indexes (owner, public IPv4, profile and reservation ID) change together; validation, the collision checks and publication run under one mutex, so requests through one registry instance never hold the same address twice, and an existing hold is never overwritten or evicted.
 - Expiry ends eligibility for activation, not the hold: an address is released only once a later lifecycle confirms its owner can no longer use it, and no release exists yet.
 
-The registry alone is in memory and coordinates one process; Step 31C puts it behind a durable journal shared by controller processes. The signed reservation workflow (Step 31D.1) and the provisioned authority with its CLI commands (Step 31D.2) build on it; the HTTP API does not reach it. Lease activation and release (Step 31D.3) and collision and recovery tests (Step 31E) come later; no application traffic is allowed.
+The registry alone is in memory and coordinates one process; Step 31C puts it behind a durable journal shared by controller processes. The signed reservation workflow (Step 31D.1) and the provisioned authority with its CLI commands (Step 31D.2) build on it; the HTTP API does not reach it. Lease preparation (Steps 31D.3a and 31D.3b), revocation and release (Steps 31D.3c and 31D.3d) and collision and recovery tests (Step 31E) come later; no application traffic is allowed.
 
 ### Durable reservation authority (Step 31C)
 
@@ -70,7 +70,7 @@ The controller keeps exclusive IPv4 ownership in an append-only journal, `egress
 - A reservation is returned only after its record and, on Linux and macOS, the journal's directory entry are flushed. If eligibility ends during the flush, the hold stays and no grant is returned. A failure after the write began is uncertain: the caller must inspect durable state, not retry with a new capability. Every transaction, inspection included, flushes the journal before reading it, so a complete record left by a writer that died before its own flush is made durable instead of being reported from the cache.
 - Holds survive the process: an exit releases the lock, not the ownership. A record read back is a recovered hold; its timestamps lost the monotonic reading, so it keeps its address but is never eligible for activation. Expiry does not release an address either.
 
-The checksum chain detects corruption, not deliberate rewriting or a rollback to an earlier complete prefix. The authority does not coordinate separate data directories or hosts, and Windows has no directory flush. Locking and recovery are tested with real child processes on Windows and Linux; macOS runs the same tests in CI. Safe release and the lease lifecycle (Step 31D.3) remain pending; no application traffic is allowed.
+The checksum chain detects corruption, not deliberate rewriting or a rollback to an earlier complete prefix. The authority does not coordinate separate data directories or hosts, and Windows has no directory flush. Locking and recovery are tested with real child processes on Windows and Linux; macOS runs the same tests in CI. Safe release and the lease lifecycle (Steps 31D.3b to 31D.3d) remain pending; no application traffic is allowed.
 
 ### Signed reservation orchestration (Step 31D.1)
 
@@ -93,7 +93,16 @@ The reservation authority lives in a fixed per-user configuration directory, `os
 - `init-reservations` and `list-reservations` are local and never reach a runtime. `-approve reserve-egress PROFILE_ID NAMESPACE` opens the authority first, then checks the trusted runtime, the profile's binding and the helper's configured lab, and runs one signed verification, candidate consumption and durable commit (Step 31D.1); it takes no address, path or override arguments. Errors map to stable controller codes (`RESERVATION_AUTHORITY_UNAVAILABLE`, `RESERVATION_BUSY`, `EGRESS_IP_COLLISION`, `EGRESS_RESERVATION_HELD` and others); an uncertain or committed-expired outcome, or a receipt that could not be written after the commit, stays `STATE_UNCERTAIN`.
 - A reservation does not activate a lease, a proxy endpoint or application networking, and changes no profile, endpoint or binding; its output says `activation_allowed: false` and `network_ready: false`.
 
-The authority covers cooperating controller processes of one OS user that share the configuration root on a supported local filesystem; the deletion or rollback of all authority files is outside the guarantee boundary. No hold is released yet: a real `reserve-egress` keeps its address for good until Step 31D.3 adds safe release. Key rotation and authority migration remain pending.
+The authority covers cooperating controller processes of one OS user that share the configuration root on a supported local filesystem; the deletion or rollback of all authority files is outside the guarantee boundary. No hold is released yet: a real `reserve-egress` keeps its address for good until Step 31D.3d adds safe release. Key rotation and authority migration remain pending.
+
+### Prepared egress leases (Step 31D.3a)
+
+A durable reservation is exclusive address ownership at the controller. A prepared lease is a helper-owned authorization record that binds that reservation to one verified tunnel generation: `PrepareEgressLeaseV1` names the authority and reservation IDs, and the helper requires everything else (profile, runtime, namespace, generation, pin, address, evidence and candidate nonces) to equal its own candidate, which it consumes once.
+
+- Neither state authorizes application networking. An active lease also needs continuous monitoring, the kill-switch and data-plane enforcement (later steps).
+- The prepared lease is single-use and keeps the original evidence deadline; it never refreshes itself, changes the address or moves to another generation.
+- The helper cannot read the controller's journal, so the controller must sign a preparation only after its durable commit (Step 31D.3b), within the same approved operation; a reservation read back from disk is not fresh evidence.
+- The controller must never release durable ownership because a prepared lease expired or disappeared from helper memory. A future revocation (Step 31D.3c) must stop stale signed operations from recreating authorization after the address is released (Step 31D.3d).
 
 ### Windows / macOS / Linux
 

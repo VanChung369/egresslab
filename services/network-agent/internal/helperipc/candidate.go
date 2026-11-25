@@ -130,6 +130,10 @@ func (l *LabLifecycle) reserveEgressCandidate(
 		return CandidateInfo{}, errLabUncertain
 	}
 
+	if l.preparedLease != nil {
+		return CandidateInfo{}, errLabBusy
+	}
+
 	requested := *req.Intent
 
 	lab, exists := l.labs[requested.ProfileID]

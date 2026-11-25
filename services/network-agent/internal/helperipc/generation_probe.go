@@ -246,8 +246,9 @@ func (e *verifiedMultiProbeEvidence) fresh(now time.Time) bool {
 	return age >= 0 && age < verifiedProbeEvidenceTTL
 }
 
-// invalidateEvidenceLocked drops the unconsumed evidence and the local candidate of profileID.
-// The caller must hold l.mu.
+// invalidateEvidenceLocked drops the local authorization state of profileID: unconsumed evidence,
+// the local candidate and the prepared lease. It is not durable IP ownership, and dropping it proves
+// no kernel cleanup. The caller must hold l.mu.
 func (l *LabLifecycle) invalidateEvidenceLocked(profileID string) {
 	if l.verifiedEvidence != nil && l.verifiedEvidence.intent.ProfileID == profileID {
 		l.verifiedEvidence = nil
@@ -255,6 +256,10 @@ func (l *LabLifecycle) invalidateEvidenceLocked(profileID string) {
 
 	if l.localCandidate != nil && l.localCandidate.info.ProfileID == profileID {
 		l.localCandidate = nil
+	}
+
+	if l.preparedLease != nil && l.preparedLease.info.ProfileID == profileID {
+		l.preparedLease = nil
 	}
 }
 

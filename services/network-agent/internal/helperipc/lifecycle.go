@@ -137,6 +137,7 @@ type LabLifecycle struct {
 	generationProbes GenerationProbeTunnelBackend // nil unless the generation-bound (V2) probe is enabled
 	verifiedEvidence *verifiedMultiProbeEvidence  // the last checked V2 attempt, if still valid
 	localCandidate   *localEgressCandidate        // the evidence one reservation consumed; not a lease
+	preparedLease    *preparedEgressLease         // that candidate bound to a durable reservation; not active
 }
 
 func NewLabLifecycle(backend LabBackend) *LabLifecycle {
@@ -158,7 +159,8 @@ func validLifecycleIntent(op string, in *helperauth.Intent) bool {
 		!helperauth.ValidProfileID(in.ProfileID) ||
 		in.ProbeIPv4 != "" ||
 		in.TunnelGeneration != "" ||
-		in.EvidenceNonce != "" {
+		in.EvidenceNonce != "" ||
+		in.HasLeaseFields() {
 		return false
 	}
 
@@ -363,6 +365,7 @@ func (l *LabLifecycle) Close() error {
 	l.closed = true
 	l.verifiedEvidence = nil
 	l.localCandidate = nil
+	l.preparedLease = nil
 
 	var errs []error
 

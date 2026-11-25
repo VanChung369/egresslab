@@ -34,7 +34,8 @@ func validStageIntent(in *helperauth.Intent) bool {
 		in.StageID == "" &&
 		in.ProbeIPv4 == "" &&
 		in.TunnelGeneration == "" &&
-		in.EvidenceNonce == ""
+		in.EvidenceNonce == "" &&
+		!in.HasLeaseFields()
 }
 
 func validStageInfo(info *StageInfo, profileID string) bool {
