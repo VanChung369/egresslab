@@ -225,6 +225,8 @@ func TestSealDeniesIPv6AndDNSExplicitly(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(sealLabRules), "\n")
 
 	position := func(rule string) int {
+		t.Helper()
+
 		for i, line := range lines {
 			if line == "add rule inet egresslab_lab "+rule {
 				return i
@@ -232,23 +234,29 @@ func TestSealDeniesIPv6AndDNSExplicitly(t *testing.T) {
 		}
 
 		t.Fatalf("seal is missing %q", rule)
+
 		return -1
 	}
 
 	loIn, loOut := position(`input iifname "lo" accept`), position(`output oifname "lo" accept`)
 
+	if position("input meta nfproto ipv6 drop") >= loIn {
+		t.Fatal("IPv6 input drop must precede loopback")
+	}
+
 	for _, rule := range []string{
-		"input meta nfproto ipv6 drop",
 		"output meta nfproto ipv6 drop",
 		"output udp dport 53 drop",
 		"output tcp dport 53 drop",
+		"output tcp dport 853 drop",
+		"output udp dport 853 drop",
 	} {
-		if p := position(rule); p < loIn || p < loOut {
-			t.Fatalf("%q must follow the loopback accepts", rule)
+		if position(rule) >= loOut {
+			t.Fatalf("%q must precede the loopback accept", rule)
 		}
 	}
 
-	// Every permit is appended after the seal, so these drops always win over later accepts.
+	// Every permit is appended after the seal, so these drops win over later accepts too.
 	if !strings.HasPrefix(lines[0], "create table") {
 		t.Fatal("seal must create the table first")
 	}

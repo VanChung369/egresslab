@@ -24,14 +24,67 @@ func TestIntendedSealedPolicyRejectsExtraAllowRule(t *testing.T) {
 }
 
 func TestIntendedSealedPolicyRejectsMissingRule(t *testing.T) {
+	items := objects(sealedRulesetFixture(t))
+	removed := 0
+
+	for i, item := range items {
+		if _, ok := item.(map[string]any)["rule"]; !ok {
+			continue
+		}
+
+		kept := append(append([]any{}, items[:i]...), items[i+1:]...)
+		removed++
+
+		err := verifySealedPolicy(encodeRuleset(t, map[string]any{"nftables": kept}))
+		if !errors.Is(err, ErrFirewallDrift) {
+			t.Fatalf("missing rule %d accepted: %v", i, err)
+		}
+	}
+
+	if removed != 8 {
+		t.Fatalf("expected 8 rules in the fixture, removed %d", removed)
+	}
+}
+
+func TestIntendedSealedPolicyRejectsEarlyLoopback(t *testing.T) {
 	doc := sealedRulesetFixture(t)
-
-	// Drop the last object before the forward chain: the "tcp dport 53 drop" rule.
 	items := objects(doc)
-	kept := append(append([]any{}, items[:len(items)-2]...), items[len(items)-1])
 
-	if err := verifySealedPolicy(encodeRuleset(t, map[string]any{"nftables": kept})); !errors.Is(err, ErrFirewallDrift) {
-		t.Fatalf("missing DNS drop accepted: %v", err)
+	var output []int
+
+	for i, item := range items {
+		if rule, ok := item.(map[string]any)["rule"].(map[string]any); ok && rule["chain"] == "output" {
+			output = append(output, i)
+		}
+	}
+
+	if len(output) != 6 {
+		t.Fatal("invalid output fixture")
+	}
+
+	// The loopback accept ahead of the deny rules.
+	first, last := output[0], output[len(output)-1]
+	items[first], items[last] = items[last], items[first]
+
+	if err := verifySealedPolicy(encodeRuleset(t, doc)); !errors.Is(err, ErrFirewallDrift) {
+		t.Fatalf("unsafe rule order accepted: %v", err)
+	}
+}
+
+// A structurally valid ruleset is not necessarily the intended one: the earlier seal (a real
+// capture) put the loopback accepts first and had no port 853 drops.
+func TestIntendedSealedPolicyRejectsLegacyRuleset(t *testing.T) {
+	data, err := os.ReadFile("testdata/nft-lab-sealed.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := labRulesetFingerprint(data); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := verifySealedPolicy(data); !errors.Is(err, ErrFirewallDrift) {
+		t.Fatalf("legacy policy accepted: %v", err)
 	}
 }
 

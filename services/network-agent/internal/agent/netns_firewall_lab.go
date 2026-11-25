@@ -34,16 +34,20 @@ var sealLabRules = fmt.Sprintf(`create table inet %[1]s
 add chain inet %[1]s input { type filter hook input priority 0; policy drop; }
 add chain inet %[1]s output { type filter hook output priority 0; policy drop; }
 add chain inet %[1]s forward { type filter hook forward priority 0; policy drop; }
-add rule inet %[1]s input iifname "lo" accept
-add rule inet %[1]s output oifname "lo" accept
 add rule inet %[1]s input meta nfproto ipv6 drop
+add rule inet %[1]s input iifname "lo" accept
 add rule inet %[1]s output meta nfproto ipv6 drop
 add rule inet %[1]s output udp dport 53 drop
 add rule inet %[1]s output tcp dport 53 drop
+add rule inet %[1]s output tcp dport 853 drop
+add rule inet %[1]s output udp dport 853 drop
+add rule inet %[1]s output oifname "lo" accept
 `, labNFTTable)
 
-// The explicit IPv6 and DNS drops sit before every later "add rule", so no permit added afterwards
-// can open IPv6 or plain DNS from a lab namespace, even one written without an "ip" qualifier.
+// The IPv6 and DNS transport drops precede the loopback accepts and every permit appended later, so
+// nothing can open IPv6, plain DNS (53), DNS over TLS or DNS over QUIC (853) from a lab namespace,
+// loopback included. They cover the standard ports only: HTTPS (and so DNS over HTTPS) stays closed
+// by the drop policy and must be controlled wherever it is permitted.
 
 func NewLabFirewall(manager *NetNSLabManager) (*LabFirewall, error) {
 	if runtime.GOOS != "linux" {

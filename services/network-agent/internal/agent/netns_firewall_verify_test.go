@@ -9,16 +9,17 @@ import (
 	"testing"
 )
 
-// testdata/nft-lab-sealed.json is a REAL capture (nft 1.0.2, Ubuntu 22.04 on WSL2) of a lab
-// namespace right after Seal, taken during an egresslab-firewall-lab run with:
+// testdata/nft-lab-sealed-v2.json is a REAL capture (nft 1.0.9, Linux 6.8, Ubuntu 24.04 on Lima) of
+// the Step 28B seal rules applied to a fresh namespace, taken with:
 //
-//	sudo ip netns exec <egresslab-lab-...> nft -j list ruleset
+//	sudo ip netns exec <namespace> nft -j list ruleset
 //
-// Only the structure matters to these tests; the runtime baseline is always read from the kernel.
+// testdata/nft-lab-sealed.json is the earlier seal (nft 1.0.2, WSL2), kept as a real capture that
+// the intended policy now refuses. The runtime baseline is always read from the kernel.
 func sealedRulesetFixture(t *testing.T) map[string]any {
 	t.Helper()
 
-	data, err := os.ReadFile("testdata/nft-lab-sealed.json")
+	data, err := os.ReadFile("testdata/nft-lab-sealed-v2.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,8 +69,8 @@ func TestLabRulesetFingerprintAcceptsSealedLab(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if strings.Count(first, "\n") != 5 {
-		t.Fatalf("expected 6 rules in the fingerprint, got:\n%s", first)
+	if strings.Count(first, "\n") != 7 {
+		t.Fatalf("expected 8 rules in the fingerprint, got:\n%s", first)
 	}
 
 	// Handles change on every reconcile; they must not affect the fingerprint.

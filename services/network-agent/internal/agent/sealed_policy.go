@@ -9,19 +9,21 @@ import (
 )
 
 // intendedSealedRules is the rule set sealLabRules is meant to produce, written out instead of
-// learned from the kernel, in the canonical form labRulesetFingerprint returns. It follows the
-// real capture in testdata/nft-lab-sealed.json (nft 1.0.2). Another nft version that prints an
-// equivalent rule differently is refused: fail closed, not a parser for every nft release.
+// learned from the kernel, in the canonical form labRulesetFingerprint returns, and in order. It
+// follows the real capture in testdata/nft-lab-sealed-v2.json (nft 1.0.9). Another nft version that
+// prints an equivalent rule differently is refused: fail closed, not a parser for every nft release.
 var intendedSealedRules = map[string][]string{
 	"input": {
-		`[{"match":{"left":{"meta":{"key":"iifname"}},"op":"==","right":"lo"}},{"accept":null}]`,
 		`[{"match":{"left":{"meta":{"key":"nfproto"}},"op":"==","right":"ipv6"}},{"drop":null}]`,
+		`[{"match":{"left":{"meta":{"key":"iifname"}},"op":"==","right":"lo"}},{"accept":null}]`,
 	},
 	"output": {
-		`[{"match":{"left":{"meta":{"key":"oifname"}},"op":"==","right":"lo"}},{"accept":null}]`,
 		`[{"match":{"left":{"meta":{"key":"nfproto"}},"op":"==","right":"ipv6"}},{"drop":null}]`,
 		`[{"match":{"left":{"payload":{"field":"dport","protocol":"udp"}},"op":"==","right":53}},{"drop":null}]`,
 		`[{"match":{"left":{"payload":{"field":"dport","protocol":"tcp"}},"op":"==","right":53}},{"drop":null}]`,
+		`[{"match":{"left":{"payload":{"field":"dport","protocol":"tcp"}},"op":"==","right":853}},{"drop":null}]`,
+		`[{"match":{"left":{"payload":{"field":"dport","protocol":"udp"}},"op":"==","right":853}},{"drop":null}]`,
+		`[{"match":{"left":{"meta":{"key":"oifname"}},"op":"==","right":"lo"}},{"accept":null}]`,
 	},
 	"forward": {},
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -209,9 +210,20 @@ func FetchEgressTrace(ctx context.Context, rawURL string) ([]byte, error) {
 		return nil, err
 	}
 
+	dialer := &net.Dialer{Timeout: egressProbeTimeout}
+
+	// No proxy from the environment, no redirect, no connection reuse, and a dialer that reaches
+	// only the pinned address: nothing in this client can resolve a name.
+	transport := &http.Transport{
+		Proxy:             nil,
+		DialContext:       pinnedProbeDial(target.IP, dialer.DialContext),
+		DisableKeepAlives: true,
+	}
+	defer transport.CloseIdleConnections()
+
 	client := &http.Client{
 		Timeout:   egressProbeTimeout,
-		Transport: &http.Transport{Proxy: nil},
+		Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

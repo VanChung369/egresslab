@@ -202,7 +202,7 @@ Privileged networking exists as **lab CLIs** that you run by hand with `sudo` on
 |---|---|
 | `egresslab-netns-lab` | Create and delete an owned lab namespace |
 | `egresslab-veth-lab` | Veth pair between two lab namespaces |
-| `egresslab-firewall-lab` | Sealed nftables table (policy drop, explicit IPv6/DNS drop) with kernel readback |
+| `egresslab-firewall-lab` | Sealed nftables table (policy drop; IPv6, DNS and DoT/DoQ drops ahead of loopback) with kernel readback |
 | `egresslab-wireguard-lab` | WireGuard between two lab namespaces |
 | `egresslab-vpn-lab -file vpn.conf` | Real VPN egress through a sealed namespace (details below) |
 | `egresslab-wg-inspect`, `egresslab-wg-vault-lab` | Config import summary; in-memory or opt-in encrypted staging (never against the helper's managed vault) |
@@ -221,7 +221,7 @@ Privileged networking exists as **lab CLIs** that you run by hand with `sudo` on
 Still not implemented:
 
 - Tunnels and probes through the privileged helper. The helper can already create, verify and delete sealed, loopback-only lab namespaces when started with `-enable-lab-lifecycle`, and `egresslab-controller-lab` drives them from the host. The design is in `docs/PRIVILEGED-HELPER.md`.
-- DNS through the tunnel. DNS (port 53) and IPv6 are explicitly dropped inside lab namespaces; the helper's labs also disable IPv6 on every interface (`sysctl`, Step 28A).
+- DNS through the tunnel. DNS (ports 53 and 853, TCP and UDP) and IPv6 are explicitly dropped inside lab namespaces, ahead of loopback (Step 28B); the helper's labs also disable IPv6 on every interface (`sysctl`, Step 28A).
 - Multi-peer configs, and hostname endpoints in the legacy VPN lab (`egresslab-vpn-lab`). The importer reports `vpn_lab_compatible=false` for these; the managed tunnel accepts hostnames (`managed_vpn_compatible`, Step 27C.3).
 - SOCKS5 runtime activation.
 
@@ -242,7 +242,7 @@ sudo ~/.local/bin/egresslab-lab-recover                                         
 
 On WSL, avoid `/tmp` for these binaries: WSL empties it at every distro boot, and it stops the distro when idle. Keep `vpn.conf` on the Linux filesystem, not under `/mnt/<drive>`: files there always show mode 777, so the config is rejected.
 
-The firewall readback tests use real `nft -j` captures from nft 1.0.2 (Ubuntu 22.04 on WSL2). These are `testdata/nft-lab-sealed.json`, taken right after Seal, and `testdata/nft-lab-probe-permitted.json`, taken after PermitEgressProbe. To refresh them for another nft version, run this from a second terminal while a lab is sealed:
+The firewall readback tests use real `nft -j` captures. `testdata/nft-lab-sealed-v2.json` is the current seal (Step 28B) from nft 1.0.9 (Ubuntu 24.04 on Lima). `testdata/nft-lab-sealed.json`, taken right after the earlier seal, and `testdata/nft-lab-probe-permitted.json`, taken after PermitEgressProbe, come from nft 1.0.2 (Ubuntu 22.04 on WSL2); the intended policy now refuses the former. To refresh them for another nft version, run this from a second terminal while a lab is sealed:
 
 ```bash
 sudo ip netns exec <egresslab-lab-...> nft -j list ruleset
@@ -354,4 +354,4 @@ Add `-enable-tunnel` as well (it needs `-enable-vault`). On a sealed lab, `egres
 
 ## Next Milestone
 
-DNS leak protection and control of application resolvers in the lab (Step 28B), then handshake and public egress IP verification (Step 29). See `docs/PRIVILEGED-HELPER.md`.
+Handshake and public egress IP verification for the managed tunnel (Step 29). See `docs/PRIVILEGED-HELPER.md`.

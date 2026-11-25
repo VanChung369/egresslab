@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/netip"
-	"os"
 	"testing"
 )
 
@@ -35,11 +34,8 @@ func newProbeGuardTestLab(t *testing.T) (*VPNEgressLab, *vpnLabRecorder) {
 		return originalWG(ctx, namespace, stdin, args...)
 	}
 
-	// Namespace firewall readback from the existing (synthetic) sealed-lab fixture.
-	fixture, err := os.ReadFile("testdata/nft-lab-sealed.json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Namespace firewall readback from the sealed-lab capture.
+	fixture := encodeRuleset(t, sealedRulesetFixture(t))
 
 	fingerprint, err := labRulesetFingerprint(fixture)
 	if err != nil {

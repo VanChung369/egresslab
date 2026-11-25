@@ -1,9 +1,9 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 28A — namespace IPv6 isolation.** A controller CLI signs `CreateLab` and
-`ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in the Linux runtime; the
-helper holds the encrypted WireGuard configs, disables IPv6 inside its labs, resolves a hostname
-endpoint once and pins it, checks the peer state and the IPv4 addresses, MTU, rules and routes the
+Status: **Step 28B — DNS deny policy and resolver boundaries.** A controller CLI signs
+`CreateLab` and `ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in the
+Linux runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS
+transports inside its labs, resolves a hostname endpoint once and pins it, checks the peer state and the IPv4 addresses, MTU, rules and routes the
 kernel reports against the staged config, and stays the source of truth for lab and tunnel state.
 Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to end. Probes and proxy
 traffic are still not implemented; the sections from "Typed operations only" on are partly
@@ -77,8 +77,9 @@ design.
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
 - Open from earlier steps: egress-IP leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
-- DNS for traffic inside the lab, DNS refresh or endpoint failover for a running tunnel, and
-  IPv6 endpoints. The HTTP controller and the desktop know nothing of labs or tunnels; only the
+- DNS for applications in the lab (a session resolver, with filesystem and resolver IPC
+  isolation, belongs to the worker runtime), DNS refresh or endpoint failover for a running
+  tunnel, and IPv6 endpoints. The HTTP controller and the desktop know nothing of labs or tunnels; only the
   lab CLI drives them.
 - A controller approval workflow for individual operations.
 - Live key rotation and automatic key distribution.
@@ -304,6 +305,42 @@ yet run on WSL2. Verified on Lima (Linux
 `ff00::/8` route on `wg0` is gone), the handshake still completed, the VM's own switches stayed
 `0`, and re-enabling IPv6 on `lo` (sealed lab) or `wg0` (tunnel) faulted the lab without being
 repaired.
+
+**DNS deny policy (Step 28B).** The seal puts every drop ahead of the loopback accepts, and every
+permit added later (by the lab CLIs) comes after all of them:
+
+| Chain | Rules, in order (policy `drop`) |
+|---|---|
+| `input` | `meta nfproto ipv6 drop`, `iifname "lo" accept` |
+| `output` | `meta nfproto ipv6 drop`, `udp dport 53 drop`, `tcp dport 53 drop`, `tcp dport 853 drop`, `udp dport 853 drop`, `oifname "lo" accept` |
+| `forward` | none |
+
+Before this step the loopback accepts came first, so a query to a resolver on `127.0.0.1` would
+have passed once loopback was up. Reproduced on Linux 6.8 with `lo` up in a scratch namespace:
+with the earlier order, UDP and TCP to `127.0.0.1` on 53 and 853 were delivered; with this order
+all four are dropped, while other loopback ports still pass. The intended policy
+(`sealed_policy.go`) pins the exact rules and their order, so a missing drop, a loopback accept
+moved forward, an extra rule or an accept policy is `FIREWALL_DRIFT`; the earlier seal (the real
+capture `testdata/nft-lab-sealed.json`) is now refused too. The drops match standard ports only:
+DNS over HTTPS (443) and DNS on other ports stay closed by the drop policy alone, so a later
+permit for 443 (Step 29) must name its destination. No DNS rule is added in the VM namespace,
+where bootstrap DNS (see "Endpoint resolution") and the underlay must keep working.
+
+The diagnostic probe client (`FetchEgressTrace`, used by `egresslab-vpn-lab`) dials through
+`pinnedProbeDial`: only the pinned IPv4 address, TCP port 443, as `tcp4`; any other host, port,
+network or address family is refused before a dial, and no hostname ever reaches a resolver. It
+takes no proxy from the environment, follows no redirect and keeps no connection; TLS
+verification is unchanged. Traced on Lima with `strace`: one `connect` to `1.1.1.1:443`, no
+`resolv.conf`, `nsswitch.conf` or `/etc/hosts` opened, and a hostname URL made no connection.
+
+Resolver boundaries: no `/etc/netns/<lab>/resolv.conf` is written. A namespace-specific
+`resolv.conf` does not stop an NSS backend from handing a lookup to a resolver daemon over IPC, so
+filesystem, process and socket isolation belong to the future worker launcher, as does the
+session resolver: it will run in the VPN namespace, only once the tunnel is verified, and never
+fall back to the bootstrap resolver. Verified on Lima with the real tunnel up: the chains read as
+above, `VerifyLab` stayed `tunnel_configured`, and UDP/TCP 53 and 853 to `1.1.1.1` from inside
+the lab were all blocked; the cycle through `Disconnect`, `VerifyLab` and `DeleteLab` passed.
+Not yet run on WSL2.
 
 **Recovery gate.** Before consuming a capability, `CreateLab` scans with the helper's own namespace
 manager. Any lab resource this helper does not own refuses creation with `RECOVERY_REQUIRED`: a
@@ -618,7 +655,7 @@ controller reports only `LAB_FAULTED`; the helper log names the readback that dr
 is resolved once, during `ConnectTunnel`, and the result is pinned; DNS is never consulted again
 for that tunnel. This is bootstrap DNS to find the VPN server, in the VM namespace with the
 runtime's own resolver (`/etc/hosts`, then the servers in `/etc/resolv.conf`; none is
-hardcoded). It opens nothing inside the lab, where port 53 stays dropped.
+hardcoded). It opens nothing inside the lab, where ports 53 and 853 stay dropped.
 
 | Case | Behaviour |
 |---|---|
