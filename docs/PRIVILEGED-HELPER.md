@@ -315,18 +315,18 @@ each switch is set and read on its own, always inside the lab (`ip netns exec <l
 | Before the peer, after the connect, and at every `VerifyLab` with a tunnel | nothing | `default`, `lo`, `wg0` |
 | `VerifyLab` without a tunnel | nothing | `default`, `lo` |
 
-A failed write, a failed or unexpected readback, or any value other than `1` refuses: a seal
-fails (the helper deletes the namespace), a connect is rolled back before any peer exists, and a
-`VerifyLab` faults the lab and removes its tunnel. Drift is never repaired, and `DeleteLab` does
-not depend on this check. Only lab namespaces are touched: the VM namespace and the host keep
-their own settings. On Linux 6.8 a link moved into a lab already inherits `disable_ipv6=1` from
-`default`; the explicit write and readback do not rely on that. A kernel booted without IPv6
-(`ipv6.disable=1`) has none of these switches, so sealing should fail there (not tested). Not
-yet run on WSL2. Verified on Lima (Linux
-6.8, procps-ng 4.0.4): the lab showed no IPv6 address or route with `lo` and `wg0` up (the
-`ff00::/8` route on `wg0` is gone), the handshake still completed, the VM's own switches stayed
-`0`, and re-enabling IPv6 on `lo` (sealed lab) or `wg0` (tunnel) faulted the lab without being
-repaired.
+A failed write, a failed or unexpected readback, or any value other than `1` refuses: a seal fails
+(the helper deletes the namespace), a connect is rolled back before any peer exists, and a
+`VerifyLab` faults the lab and removes its tunnel. Drift is never repaired, and `DeleteLab` does not
+depend on this check. Only lab namespaces are touched: the VM namespace and the host keep their own
+settings. On Linux 6.8 a link moved into a lab already inherits `disable_ipv6=1` from `default`; the
+explicit write and readback do not rely on that. A kernel booted without IPv6 (`ipv6.disable=1`) has
+none of these switches, so sealing should fail there (not tested). Verified on Lima (Linux 6.8,
+procps-ng 4.0.4): the lab showed no IPv6 address or route with `lo` and `wg0` up (the `ff00::/8`
+route on `wg0` is gone), the handshake still completed, the VM's own switches stayed `0`, and
+re-enabling IPv6 on `lo` (sealed lab) or `wg0` (tunnel) faulted the lab without being repaired. On
+WSL2 (Linux 6.6), every seal, connect and `VerifyLab` of the Step 30B.2 run passed the write and
+readback; the drift cases ran on Lima only.
 
 **DNS deny policy (Step 28B).** The seal puts every drop ahead of the loopback accepts, and every
 permit added later (by the lab CLIs) comes after all of them:
@@ -362,7 +362,8 @@ session resolver: it will run in the VPN namespace, only once the tunnel is veri
 fall back to the bootstrap resolver. Verified on Lima with the real tunnel up: the chains read as
 above, `VerifyLab` stayed `tunnel_configured`, and UDP/TCP 53 and 853 to `1.1.1.1` from inside
 the lab were all blocked; the cycle through `Disconnect`, `VerifyLab` and `DeleteLab` passed.
-Not yet run on WSL2.
+On WSL2 (nft 1.0.2), the seal and its readback against the intended policy passed in the Step
+30B.2 run; blocking from inside the lab was not exercised there.
 
 **Probe window (Step 29A).** `PermitEgressProbe` of the legacy VPN lab adds permanent accepts: a
 crash after it leaves them in place. The managed tunnel will instead open a window whose lifetime
@@ -399,8 +400,10 @@ The JSON is pinned to real captures (nft 1.0.9, Linux 6.8): `testdata/nft-lab-pr
 Lima in two scratch namespaces joined by a veth named `wg0`, with `1.1.1.1` held by the peer (no
 Internet traffic): with the seal alone nothing passed; with the window open only `1.1.1.1:443`
 passed (not port 8443, not another address); after 30 s everything was blocked, including a
-connection opened inside the window; the close by handle left exactly the sealed ruleset. Not yet
-run on WSL2.
+connection opened inside the window; the close by handle left exactly the sealed ruleset. On
+WSL2 (nft 1.0.2), the real probes of the Step 30B.2 run opened and closed the window without a
+readback failure, and the ruleset was back to the seal afterwards; the negative cases ran on Lima
+only.
 
 **Diagnostic probe (Step 29B.1).** `ManagedTunnelBackend.ProbeConfigured` makes one observation of
 the tunnel's public IPv4 address. It runs only on a backend built with
@@ -446,7 +449,9 @@ the runner discards its stderr. 37 later probes in that session succeeded (two w
 production runner, the others with a temporary build that also reported the worker's error), and
 the results of 8 more were not captured. It recurred in Step 29B.2b: the first signed probe through
 the controller failed the same way (see "Probes from the controller"). Under the current policy a
-transient failure costs a full reconnect. Not yet run on WSL2.
+transient failure costs a full reconnect. On WSL2 (2026-11-25, Step 30B.2 build), the first
+probe of the session failed the same way and the next ones succeeded (see "Probes from the
+controller").
 
 **Signed probe (Step 29B.2a).** `PermitProbe{profile_id, namespace, probe_ipv4}` runs one whole
 probe; the controller cannot ask the helper to keep the firewall open. It needs `-enable-probe`
@@ -482,7 +487,9 @@ combination before creating its socket, logged `signed sealed lab, managed tunne
 probe enabled; proxy disabled`, still answered `HelperInfo` and `ListLabs`, and routed
 `PermitProbe` to the lifecycle (`LAB_NOT_FOUND` for a missing lab) while a helper without the
 flag answered `OPERATION_DISABLED`. The first real probes over IPC, signed by the controller, ran
-in Step 29B.2b (see "Probes from the controller"). Not yet run on WSL2.
+in Step 29B.2b (see "Probes from the controller"). On WSL2, the helper started with
+`-enable-probe` and logged the same mode (Step 30B.2 run); the invalid flag combinations ran on
+Lima only.
 
 **Recovery gate.** Before consuming a capability, `CreateLab` scans with the helper's own namespace
 manager. Any lab resource this helper does not own refuses creation with `RECOVERY_REQUIRED`: a
@@ -610,7 +617,15 @@ helper need not restart. The next 8 probes all succeeded in about a second each,
 5 idle minutes, returning the provider's exit IPv4 with a handshake 1 s old; afterwards the lab's
 ruleset held no probe set or permit, no worker process remained, `verify-lab` still answered
 `tunnel_configured`, and a second probe on the same lab succeeded. Both observed failures were
-the first probe of a session; their cause is unknown. Not yet run on WSL2.
+the first probe of a session; their cause is unknown.
+
+Verified on WSL2 (Ubuntu 22.04, Linux 6.6, nft 1.0.2, iproute2 5.15) on 2026-11-25, with the Step
+30B.2 helper, helperctl and worker, the Windows controller signing with its DPAPI key through
+`wsl.exe`, and the same real tunnel. A sealed lab was refused before signing (`LAB_FAULTED`). The
+first signed probe of the session answered `LAB_FAULTED` again; the helper log said only `probe
+failed: managed egress probe failed`, and the cleanup left only `lo`. On a fresh lab the next two
+probes succeeded with the same exit address as on Lima and a handshake 1 and 3 s old; afterwards the
+lab had no process and no probe set or permit, and `verify-lab` answered `tunnel_configured`.
 
 ### Trusted runtimes and profile bindings
 
@@ -725,7 +740,8 @@ Tested on WSL2 (Ubuntu 22.04, kernel 6.6) with a synthetic config whose endpoint
 documentation address, so no handshake: connect, verify, list, the busy refusals, disconnect,
 replay, a stale stage, a failed verify (an extra rule in the lab firewall), reconnect, and
 `SIGTERM` with the tunnel up, which left no namespace, table or link. A failed connect, a failed
-cleanup and a crash ran against fakes only. Not yet run with a real VPN provider.
+cleanup and a crash ran against fakes only. It has since run with a real VPN provider (from
+Step 27B.3 on).
 
 ## Managed tunnel backend
 
@@ -824,9 +840,10 @@ traffic. The check is IPv4 only and sees one moment, like the peer check. Both c
 flags of the import summary also require the planned addresses to be distinct unicast IPv4
 prefixes, so the controller refuses such a stage before signing. The formats come from real
 captures (iproute2 6.1, Linux 6.8, Ubuntu 24.04), kept in `managed_tunnel_network_test.go`. This
-check has run end to end on Lima only, not yet on WSL2 (Ubuntu 22.04, an older iproute2): since
-the readbacks are decoded strictly, a format difference there would fault every tunnel. The
-controller reports only `LAB_FAULTED`; the helper log names the readback that drifted.
+check has also run end to end on WSL2 (Ubuntu 22.04, iproute2 5.15, Linux 6.6): every
+`connect-tunnel` and `verify-lab` of the Step 30B.2 run decoded its readbacks and verified. The
+readbacks are decoded strictly, so an iproute2 that prints differently would fault every
+tunnel. The controller reports only `LAB_FAULTED`; the helper log names the readback that drifted.
 
 **Endpoint resolution (Step 27C.3).** The managed tunnel accepts `Endpoint = name:port`. The name
 is resolved once, during `ConnectTunnel`, and the result is pinned; DNS is never consulted again
@@ -1214,7 +1231,8 @@ observation, and `network_ready: false`. After a successful attempt the lab veri
 `tunnel_configured`, the namespace had no process, the handshake was 16 s old, no
 `egresslab_probe4` set or permit remained, and the output chain was back to the sealed rules
 (`policy drop`; IPv6, DNS and DoT drops; `lo` accept). `disconnect` returned the lab to `sealed`
-and `delete-lab` removed it. Not run on WSL2 or native Linux.
+and `delete-lab` removed it. This V1 form was not run on WSL2; the V2 path ran there (see
+"Generation-bound controller integration"). Not run on native Linux.
 
 ## Sticky IP
 
@@ -1376,4 +1394,20 @@ generation `multi-probe-target` had reported, the same address from both sources
 attempt on it returned that generation, the same address and a new nonce. The lab then verified as
 `tunnel_configured` with no namespace process, no `egresslab_probe4` set or permit and the sealed
 output chain, and `disconnect` and `delete-lab` cleaned up. The stale-generation refusal is covered
-by tests only (no capability was minted by hand), and the path was not run on WSL2 or native Linux.
+by tests only (no capability was minted by hand), and the path was not run on native Linux.
+
+Verified on WSL2 (Ubuntu 22.04, Linux 6.6, nft 1.0.2, iproute2 5.15) on 2026-11-25, with the helper,
+helperctl and worker built from this step, the Windows controller (DPAPI key) through `wsl.exe`, the
+same real tunnel, and an ident.me pin provisioned on WSL2 as in `docs/DEV-LINUX-VM.md` (AS24940,
+pinned HTTPS with a valid certificate), VM and host clocks within the same second. The helper logged
+`PermitMultiProbeV2` and the pin, and `multi-probe-policy` returned them with the epoch, runtime ID
+and fingerprint of `helper-info`. On a sealed lab `multi-probe-target` answered `INVALID_REQUEST`;
+on the connected tunnel the single-source `probe-egress` answered `OPERATION_DISABLED`. The first
+attempt succeeded this time; the helper had just been restarted after a single-source session whose
+first probe failed (see "Probes from the controller"). Three attempts (2.9 to 3.1 s each) returned
+the same address from both sources, the same exit address as on Lima, and `network_ready: false`:
+two on one tunnel, with the generation `multi-probe-target` had reported and different nonces, and,
+after `disconnect` (`multi-probe-target` then answered `INVALID_REQUEST`) and a reconnect, one with
+the new generation and a new nonce. Afterwards the lab had no process and no `egresslab_probe4` set
+or permit, the sealed ruleset remained, and `verify-lab` answered `tunnel_configured`; `disconnect`,
+`delete-lab` and the helper's stop left no namespace, underlay table or worker process.

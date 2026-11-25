@@ -242,7 +242,7 @@ sudo ~/.local/bin/egresslab-lab-recover                                         
 
 On WSL, avoid `/tmp` for these binaries: WSL empties it at every distro boot, and it stops the distro when idle. Keep `vpn.conf` on the Linux filesystem, not under `/mnt/<drive>`: files there always show mode 777, so the config is rejected.
 
-The firewall readback tests use real `nft -j` captures. `testdata/nft-lab-sealed-v2.json` is the current seal (Step 28B) from nft 1.0.9 (Ubuntu 24.04 on Lima). `testdata/nft-lab-sealed.json`, taken right after the earlier seal, and `testdata/nft-lab-probe-permitted.json`, taken after PermitEgressProbe, come from nft 1.0.2 (Ubuntu 22.04 on WSL2); the intended policy now refuses the former. To refresh them for another nft version, run this from a second terminal while a lab is sealed:
+The firewall readback tests use real `nft -j` captures. `testdata/nft-lab-sealed-v2.json` is the current seal (Step 28B) from nft 1.0.9 (Ubuntu 24.04 on Lima). `testdata/nft-lab-sealed.json`, taken right after the earlier seal, and `testdata/nft-lab-probe-permitted.json`, taken after PermitEgressProbe, come from nft 1.0.2 (Ubuntu 22.04 on WSL2); the intended policy now refuses the former. nft 1.0.2 prints the current seal the same way as 1.0.9: the Step 30B.2 run on WSL2 passed on it. To refresh them for another nft version, run this from a second terminal while a lab is sealed:
 
 ```bash
 sudo ip netns exec <egresslab-lab-...> nft -j list ruleset
@@ -362,6 +362,8 @@ id egresslab-probe >/dev/null 2>&1 || sudo useradd --system --user-group --no-cr
 sudo /usr/local/bin/egresslab-probe   # must print: probe must not run as root
 ```
 
+On Windows, build it with `GOOS=linux GOARCH=amd64` (or `arm64`, as `uname -m` in the distribution says) and install it from its `/mnt/c/...` path the same way.
+
 Do not reuse the agent's UID: the worker needs neither the helper socket nor the vault. To enable the signed probe (Step 29B.2a), add to the helper started with `-enable-tunnel`:
 
 ```bash
@@ -468,8 +470,10 @@ curl -q --noproxy '*' --ipv4 --proto '=https' --connect-timeout 5 --max-time 10 
   --resolve "4.ident.me:443:<candidate IPv4>" -H 'Accept-Encoding: identity' -fsS https://4.ident.me/
 ```
 
+Ubuntu 22.04 (the WSL2 distribution) has no `whois` by default; Team Cymru serves the same data over DNS: `dig +short TXT <reversed IPv4>.origin.asn.cymru.com`, whose first field is the ASN.
+
 If DNS returns several addresses, do not take the first one blindly. The provider does not promise a stable address. DNS at probe time, automatic replacement of the address and skipping certificate verification (`curl -k`) are not allowed. A host-side check reveals the host's own public IP to the provider; it is not a managed observation and never activates an egress lease. The helper reads the approved pin from `/etc/egresslab/multi-probe-pin` at startup (Step 29C.4b, see "Multi-source helper").
 
 ## Next Milestone
 
-Step 31: a candidate reservation that consumes the helper's trusted evidence record within its deadline, on top of the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover of helper, helperctl and controller (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2; in the last three it was the first probe of the session, and a fresh lab then succeeded); a coded worker failure reason in the helper log would explain it. WSL2 and native Linux have not run the multi-source path. See `docs/PRIVILEGED-HELPER.md`.
+Step 31: a candidate reservation that consumes the helper's trusted evidence record within its deadline, on top of the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover of helper, helperctl and controller (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded); a coded worker failure reason in the helper log would explain it. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.
