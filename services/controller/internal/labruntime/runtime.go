@@ -53,6 +53,7 @@ type HelperTransport interface {
 	StageInfo(ctx context.Context, profileID string) (control.LabStageInfo, error)
 	ConnectTunnel(ctx context.Context, profileID, namespace, stageID string, capability control.LabCapability) (control.LabInfo, error)
 	Disconnect(ctx context.Context, profileID, namespace string) (control.LabInfo, error)
+	ProbeEgress(ctx context.Context, profileID, namespace string, capability control.LabCapability) (control.LabProbeInfo, error)
 }
 
 type Options struct {

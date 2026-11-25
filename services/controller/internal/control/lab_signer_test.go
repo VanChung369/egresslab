@@ -40,8 +40,9 @@ func goldenClaims(intent LabIntent) LabClaims {
 	}
 }
 
-// Same vectors as the network agent's TestSigningMessageGolden and
-// TestCreateLabSigningMessageGolden, so the controller's JSON matches the helper's byte for byte.
+// Same vectors as the network agent's TestSigningMessageGolden, TestCreateLabSigningMessageGolden
+// and TestPermitProbeSigningMessageGolden, so the controller's JSON matches the helper's byte for
+// byte.
 func TestLabSignerGolden(t *testing.T) {
 	tests := map[string]struct {
 		intent LabIntent
@@ -55,6 +56,11 @@ func TestLabSignerGolden(t *testing.T) {
 		"CreateLab": {
 			LabIntent{Operation: "CreateLab", ProfileID: "profile_0123456789abcdef"},
 			"jYuiWZqwyviLOxTYGLcz_UXkxmrO-Gk_Q2kEc0-hKtSTm4r59a1u-a0QFI44sYJPe6XL8EuKbS0_5kjA_o-NDw",
+		},
+		"PermitProbe": {
+			LabIntent{Operation: "PermitProbe", ProfileID: "profile_0123456789abcdef",
+				Namespace: "egresslab-lab-0123456789abcdef", ProbeIPv4: LabProbeIPv4},
+			"Jd8xQ1dVXMy2Ahpa80HfrJbmLs54zKuV4NCcUBBVCR2Xz-XFHdWc_0AAv1BVYhi7G3taO1pQBWozslB-9StIBQ",
 		},
 	}
 

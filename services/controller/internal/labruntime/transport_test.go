@@ -115,6 +115,36 @@ func TestFakeHelperctl(t *testing.T) {
 			respond("ConnectTunnel", lab(control.LabTunnelConfigured)+fmt.Sprintf(",\n  \"stage\": {\"profile_id\": %q, \"stage_id\": %q, \"vpn_lab_compatible\": true}", testProfile, testStageID))
 		}
 		respond("ConnectTunnel", lab(control.LabTunnelConfigured))
+	case "probe-egress":
+		var capability control.LabCapability
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil || len(args) != 3 || json.Unmarshal(data, &capability) != nil ||
+			capability.Claims.Intent != (control.LabIntent{Operation: "PermitProbe", ProfileID: args[1], Namespace: args[2],
+				ProbeIPv4: control.LabProbeIPv4}) {
+			fail("invalid probe capability")
+		}
+
+		switch mode {
+		case "probe-disabled":
+			failWith(CodeOperationDisabled, "operation not enabled")
+		case "probe-no-result":
+			respond("PermitProbe", "")
+		}
+
+		profile, ip, extra := testProfile, "8.8.4.4", ""
+		switch mode {
+		case "probe-mismatch":
+			profile = "profile_ffffffffffffffff"
+		case "probe-private":
+			ip = "10.0.0.1"
+		case "probe-with-lab":
+			extra = lab(control.LabTunnelConfigured)
+		}
+
+		respond("PermitProbe", extra+fmt.Sprintf(",\n  \"probe\": {\"profile_id\": %q, \"namespace\": %q, \"ipv4\": %q, "+
+			"\"observed_at\": \"2026-11-25T06:00:00Z\", \"handshake_at\": \"2026-11-25T05:59:59Z\", "+
+			"\"source\": \"cloudflare_trace\"}", profile, testNamespace, ip))
+
 	case "disconnect":
 		if mode == "faulted" {
 			respond("Disconnect", lab(control.LabFaulted))
@@ -436,5 +466,57 @@ func TestTunnelTransport(t *testing.T) {
 
 	if _, err := newCommandProvider(&fakeLauncher{mode: "stage-on-connect"}).Transport().ConnectTunnel(ctx, testProfile, testNamespace, testStageID, capability); err == nil {
 		t.Error("stage metadata accepted on ConnectTunnel")
+	}
+}
+
+func TestProbeTransport(t *testing.T) {
+	ctx := context.Background()
+
+	capability := control.LabCapability{Claims: control.LabClaims{Version: 1, Intent: control.LabIntent{
+		Operation: "PermitProbe", ProfileID: testProfile, Namespace: testNamespace, ProbeIPv4: control.LabProbeIPv4,
+	}}}
+
+	fake := &fakeLauncher{mode: "ok"}
+	tr := newCommandProvider(fake).Transport()
+
+	for name, intent := range map[string]control.LabIntent{
+		"another destination": {Operation: "PermitProbe", ProfileID: testProfile, Namespace: testNamespace,
+			ProbeIPv4: "8.8.8.8"},
+		"another namespace": {Operation: "PermitProbe", ProfileID: testProfile, Namespace: "egresslab-lab-ffffffffffffffff",
+			ProbeIPv4: control.LabProbeIPv4},
+		"another operation": {Operation: "ConnectTunnel", ProfileID: testProfile, Namespace: testNamespace,
+			ProbeIPv4: control.LabProbeIPv4},
+	} {
+		bad := capability
+		bad.Claims.Intent = intent
+
+		_, err := tr.ProbeEgress(ctx, testProfile, testNamespace, bad)
+		if ErrorCode(err) != CodeInvalidRequest || len(fake.calls) != 0 {
+			t.Fatalf("%s reached the launcher: %v", name, err)
+		}
+	}
+
+	result, err := tr.ProbeEgress(ctx, testProfile, testNamespace, capability)
+	if err != nil || result.IPv4.String() != "8.8.4.4" || result.Source != control.LabProbeSource || len(fake.calls) != 1 {
+		t.Fatalf("probe: %+v %v", result, err)
+	}
+
+	want := []string{"probe-egress", testProfile, testNamespace}
+	if args := fake.calls[0]; strings.Join(args, " ") != strings.Join(want, " ") {
+		t.Fatalf("unexpected helperctl arguments: %q", args)
+	}
+
+	modes := []string{"probe-disabled", "probe-no-result", "probe-mismatch", "probe-private", "probe-with-lab"}
+	for _, mode := range modes {
+		f := &fakeLauncher{mode: mode}
+
+		_, err := newCommandProvider(f).Transport().ProbeEgress(ctx, testProfile, testNamespace, capability)
+		if err == nil || len(f.calls) != 1 {
+			t.Fatalf("%s: invalid response accepted or retried: %v", mode, err)
+		}
+
+		if mode == "probe-disabled" && ErrorCode(err) != CodeOperationDisabled {
+			t.Fatalf("operation disabled code lost: %v", err)
+		}
 	}
 }

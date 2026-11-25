@@ -271,6 +271,45 @@ func TestCreateLabSigningMessageGolden(t *testing.T) {
 	}
 }
 
+func TestPermitProbeSigningMessageGolden(t *testing.T) {
+	private := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, ed25519.SeedSize))
+
+	claims := Claims{
+		Version:  Version,
+		Intent:   probeIntent(),
+		HelperID: testHelper,
+		Nonce:    "00112233445566778899aabbccddeeff",
+		IssuedAt: 1795500000,
+		NotAfter: 1795500030,
+	}
+
+	wantMessage := "egresslab/helper-capability/v1\x00" +
+		`{"version":1,"intent":{"operation":"PermitProbe","profile_id":"profile_0123456789abcdef",` +
+		`"namespace":"egresslab-lab-0123456789abcdef","probe_ipv4":"1.1.1.1"},` +
+		`"helper_id":"helper_0123456789abcdef0123456789abcdef","nonce":"00112233445566778899aabbccddeeff",` +
+		`"issued_at":1795500000,"not_after":1795500030}`
+
+	msg, err := signingMessage(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if string(msg) != wantMessage {
+		t.Fatalf("signing message changed:\n got %q\nwant %q", msg, wantMessage)
+	}
+
+	token, err := Mint(private, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Cross-checked with OpenSSL 3 (openssl pkeyutl -sign -rawin) using the same seed.
+	const wantSignature = "Jd8xQ1dVXMy2Ahpa80HfrJbmLs54zKuV4NCcUBBVCR2Xz-XFHdWc_0AAv1BVYhi7G3taO1pQBWozslB-9StIBQ"
+	if token.Signature != wantSignature {
+		t.Fatalf("signature changed: %s", token.Signature)
+	}
+}
+
 // TestSigningMessageGolden pins the exact signed bytes. Another implementation (for example the
 // controller, which is a separate Go module) must produce the same message and signature.
 func TestSigningMessageGolden(t *testing.T) {

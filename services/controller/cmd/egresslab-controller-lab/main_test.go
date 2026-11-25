@@ -66,6 +66,10 @@ type fakeRuntime struct {
 	tunnelProfile string
 	tunnelCalls   []control.LabCapability
 	tunnelErr     error
+
+	probeCalls []control.LabCapability
+	probeErr   error
+	probeStale bool
 }
 
 func (f *fakeRuntime) HelperInfo(context.Context) (control.LabHelperInfo, error) {

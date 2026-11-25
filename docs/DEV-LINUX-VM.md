@@ -310,6 +310,7 @@ egresslab-controller-lab -approve delete-lab <profile ID> <namespace>
 egresslab-controller-lab stage-info <profile ID>                              # needs -enable-vault
 egresslab-controller-lab -approve connect-tunnel <profile ID> <namespace> <stage ID>   # needs -enable-tunnel
 egresslab-controller-lab -approve disconnect <profile ID> <namespace>
+egresslab-controller-lab -approve probe-egress <profile ID> <namespace>                # needs -enable-probe
 ```
 
 `-runtime auto` uses WSL on Windows (`-wsl-distro`; trust and lab commands need it named), Lima on macOS (`-lima-instance`, default `egresslab`) and the host itself on Linux. A profile stays bound to the runtime it was first used on (`unbind-profile` and `untrust-runtime` release it). Every failure carries a code such as `RECOVERY_REQUIRED` or `RUNTIME_UNTRUSTED`. Install `egresslab-helper` and `egresslab-helperctl` in `/usr/local/bin` inside the runtime (see above). On macOS, the Lima and Keychain paths are verified end to end (macOS 15.3.2, Lima 2.3.0, Ubuntu 24.04 guest with nft 1.0.9); copy the public key into the VM as shown below. If `create-lab` reports an uncertain result, run `list-labs` before retrying.
@@ -364,7 +365,7 @@ Do not reuse the agent's UID: the worker needs neither the helper socket nor the
 -enable-probe -probe-uid "$(id -u egresslab-probe)" -probe-gid "$(id -g egresslab-probe)"
 ```
 
-The log then reads `signed sealed lab, managed tunnel and diagnostic probe enabled; proxy disabled`. `egresslab-helperctl probe-egress PROFILE_ID NAMESPACE < capability.json` runs one probe of the lab's tunnel; the controller signs the capability from Step 29B.2b.
+The log then reads `signed sealed lab, managed tunnel and diagnostic probe enabled; proxy disabled`. `egresslab-helperctl probe-egress PROFILE_ID NAMESPACE < capability.json` runs one probe of the lab's tunnel; `egresslab-controller-lab -approve probe-egress PROFILE_ID NAMESPACE` signs the capability and prints the observation (Step 29B.2b).
 
 ## Security Notes
 
@@ -377,4 +378,4 @@ The log then reads `signed sealed lab, managed tunnel and diagnostic probe enabl
 
 ## Next Milestone
 
-Controller signing and transport for `PermitProbe`, with a smoke test through a real VPN (Step 29B.2b), then multi-source public IP verification (Step 29C). See `docs/PRIVILEGED-HELPER.md`.
+Multi-source public IP verification (Step 29C). See `docs/PRIVILEGED-HELPER.md`.

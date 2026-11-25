@@ -36,6 +36,7 @@ type helperResponse struct {
 	Lab          *control.LabInfo       `json:"lab,omitempty"`
 	Labs         []control.LabInfo      `json:"labs,omitempty"`
 	Stage        *control.LabStageInfo  `json:"stage,omitempty"`
+	Probe        *control.LabProbeInfo  `json:"probe,omitempty"`
 }
 
 type limitedBuffer struct {
@@ -129,7 +130,7 @@ func decodeStrict(data []byte) (helperResponse, error) {
 func decodeFailure(data []byte) (error, bool) {
 	resp, err := decodeStrict(data)
 	if err != nil || resp.Version != 1 || resp.OK || resp.NetworkReady || resp.Error == "" ||
-		resp.Info != nil || resp.Lab != nil || resp.Labs != nil || resp.Stage != nil {
+		resp.Info != nil || resp.Lab != nil || resp.Labs != nil || resp.Stage != nil || resp.Probe != nil {
 		return nil, false
 	}
 
@@ -164,8 +165,12 @@ func decodeResponse(data []byte, expected string) (helperResponse, error) {
 		return helperResponse{}, errors.New("unexpected WireGuard stage metadata")
 	}
 
+	if (expected == "PermitProbe") != (resp.Probe != nil) || (resp.Probe != nil && !resp.Probe.Valid()) {
+		return helperResponse{}, errors.New("unexpected managed probe metadata")
+	}
+
 	switch expected {
-	case "HelperInfo", "Ping", "StageInfo":
+	case "HelperInfo", "Ping", "StageInfo", "PermitProbe":
 		if resp.Lab != nil || resp.Labs != nil {
 			return helperResponse{}, errors.New("unexpected lab metadata")
 		}

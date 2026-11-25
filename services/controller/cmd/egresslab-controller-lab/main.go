@@ -1,6 +1,6 @@
-// Command egresslab-controller-lab signs CreateLab and ConnectTunnel capabilities with the controller
-// key and drives the helper's sealed lab and tunnel lifecycle through the host's Linux runtime (WSL2,
-// Lima or native Linux). The helper stays the source of truth for lab and tunnel state. It is a lab
+// Command egresslab-controller-lab signs CreateLab, ConnectTunnel and PermitProbe capabilities with
+// the controller key and drives the helper's sealed lab, tunnel and diagnostic probe through the
+// host's Linux runtime (WSL2, Lima or native Linux). The helper stays the source of truth for lab and tunnel state. It is a lab
 // tool: -approve is an operator confirmation, not user authentication.
 package main
 
@@ -30,7 +30,7 @@ type deps struct {
 
 var approvalRequired = map[string]bool{
 	"create-lab": true, "delete-lab": true, "trust-runtime": true, "untrust-runtime": true, "unbind-profile": true,
-	"connect-tunnel": true, "disconnect": true,
+	"connect-tunnel": true, "disconnect": true, "probe-egress": true,
 }
 
 func main() {
@@ -132,6 +132,13 @@ func run(argv []string, d deps) error {
 		result, err = s.connectTunnel(args[1], args[2], args[3])
 	case "unbind-profile":
 		result, err = s.unbindProfile(args[1])
+	case "probe-egress":
+		var observation control.LabProbeInfo
+		observation, err = s.probeEgress(args[1], args[2])
+		result = struct {
+			control.LabProbeInfo
+			NetworkReady bool `json:"network_ready"`
+		}{LabProbeInfo: observation}
 	}
 
 	if err != nil {
@@ -155,7 +162,7 @@ func checkArgs(args []string) error {
 		if len(args) == 2 && control.ValidRuntimeID(args[1]) {
 			return nil
 		}
-	case "verify-lab", "delete-lab", "disconnect":
+	case "verify-lab", "delete-lab", "disconnect", "probe-egress":
 		if len(args) == 3 && control.ValidProfileID(args[1]) && control.ValidLabNamespace(args[2]) {
 			return nil
 		}
@@ -538,5 +545,6 @@ func usageError() error {
 		"  init-key | public-key | runtimes | runtime-status | helper-info | list-labs\n" +
 		"  trust-runtime | untrust-runtime RUNTIME_ID | unbind-profile PROFILE_ID\n" +
 		"  create-lab PROFILE_ID | verify-lab PROFILE_ID NAMESPACE | delete-lab PROFILE_ID NAMESPACE\n" +
-		"  stage-info PROFILE_ID | connect-tunnel PROFILE_ID NAMESPACE STAGE_ID | disconnect PROFILE_ID NAMESPACE")
+		"  stage-info PROFILE_ID | connect-tunnel PROFILE_ID NAMESPACE STAGE_ID | disconnect PROFILE_ID NAMESPACE\n" +
+		"  probe-egress PROFILE_ID NAMESPACE")
 }

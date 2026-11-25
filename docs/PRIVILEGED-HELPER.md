@@ -1,14 +1,14 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 29B.2a — signed managed probe IPC.** A controller CLI signs `CreateLab` and
-`ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in the Linux runtime; the
-helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports inside its
-labs, resolves a hostname endpoint once and pins it, checks the peer state and the IPv4 addresses,
-MTU, rules and routes the kernel reports against the staged config, and stays the source of truth
-for lab and tunnel state. With `-enable-probe` it answers a signed `PermitProbe` with one
-diagnostic observation of the tunnel's public IPv4 address; the controller does not sign it yet
-(Step 29B.2b). Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to end. No proxy
-traffic exists; the sections from "Typed operations only" on are partly design.
+Status: **Step 29B.2b — controller probe integration.** A controller CLI signs `CreateLab`,
+`ConnectTunnel` and `PermitProbe` and drives the helper's sealed lab, tunnel and diagnostic probe
+in the Linux runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS
+transports inside its labs, resolves a hostname endpoint once and pins it, checks the peer state
+and the IPv4 addresses, MTU, rules and routes the kernel reports against the staged config, and
+stays the source of truth for lab and tunnel state. A probe yields one observation of the tunnel's
+public IPv4 address, printed only. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified
+end to end. No lease or proxy traffic exists; the sections from "Typed operations only" on are
+partly design.
 
 ## Implemented
 
@@ -59,9 +59,10 @@ traffic exists; the sections from "Typed operations only" on are partly design.
   observation through a kernel-timed firewall window and an unprivileged worker (see "Signed
   probe").
 - Controller side (see "Controller and runtimes"):
-  - an Ed25519 signer for `CreateLab` and `ConnectTunnel`, checked against both golden vectors;
-    `ConnectTunnel` is signed only for the profile's own lab in the current helper process and
-    the vault's current, compatible stage (see "Controller and runtimes");
+  - an Ed25519 signer for `CreateLab`, `ConnectTunnel` and `PermitProbe`, checked against the
+    three golden vectors the helper also pins; `ConnectTunnel` is signed only for the profile's
+    own lab in the current helper process and the vault's current, compatible stage, and
+    `PermitProbe` only for that lab once its tunnel is configured (see "Controller and runtimes");
   - signing-key storage per platform;
   - runtime providers that reach the helper from each host OS;
   - `egresslab-controller-lab`, which needs `-approve` for every mutation, including
@@ -88,7 +89,8 @@ traffic exists; the sections from "Typed operations only" on are partly design.
   lab CLI drives them.
 - A controller approval workflow for individual operations.
 - Live key rotation and automatic key distribution.
-- `RecoverClean` through IPC, and a controller that signs `PermitProbe` (Step 29B.2b).
+- `RecoverClean` through IPC.
+- Storing probe observations, egress-IP leases from them, and multi-source verification (Step 29C).
 - Persistent lab ownership inside the helper. The controller keeps profile-to-runtime bindings;
   other processes that manage lab namespaces are not coordinated, only refused by the recovery
   gate.
@@ -426,10 +428,11 @@ argument; the `setpriv` command left all capability sets empty with `NoNewPrivs:
 old, the window gone and the tunnel still verifying afterwards. A process left in the lab refused
 the probe and removed the tunnel. The first call with the production runner failed and, as
 designed, removed the tunnel; its cause is unknown, because the worker collapses its errors and
-the runner discards its stderr. It did not recur: 37 later probes succeeded (two with the
+the runner discards its stderr. 37 later probes in that session succeeded (two with the
 production runner, the others with a temporary build that also reported the worker's error), and
-the results of 8 more were not captured. Under the current policy a transient failure costs a
-full reconnect. Not yet run on WSL2.
+the results of 8 more were not captured. It recurred in Step 29B.2b: the first signed probe through
+the controller failed the same way (see "Probes from the controller"). Under the current policy a
+transient failure costs a full reconnect. Not yet run on WSL2.
 
 **Signed probe (Step 29B.2a).** `PermitProbe{profile_id, namespace, probe_ipv4}` runs one whole
 probe; the controller cannot ask the helper to keep the firewall open. It needs `-enable-probe`
@@ -464,8 +467,8 @@ no destination, URL or port. Verified on Lima: the real helper refused every inv
 combination before creating its socket, logged `signed sealed lab, managed tunnel and diagnostic
 probe enabled; proxy disabled`, still answered `HelperInfo` and `ListLabs`, and routed
 `PermitProbe` to the lifecycle (`LAB_NOT_FOUND` for a missing lab) while a helper without the
-flag answered `OPERATION_DISABLED`. No real probe ran over IPC yet: the controller cannot sign
-one until Step 29B.2b. Not yet run on WSL2.
+flag answered `OPERATION_DISABLED`. The first real probes over IPC, signed by the controller, ran
+in Step 29B.2b (see "Probes from the controller"). Not yet run on WSL2.
 
 **Recovery gate.** Before consuming a capability, `CreateLab` scans with the helper's own namespace
 manager. Any lab resource this helper does not own refuses creation with `RECOVERY_REQUIRED`: a
@@ -560,6 +563,40 @@ The capability then binds profile, namespace, stage and helper epoch, for 30 sec
 `LAB_BUSY` is not retried either. `disconnect`, `verify-lab` and `delete-lab` need no signing
 key, so a broken key store cannot strand a tunnel. `runtimes.json` keeps ownership only: the
 tunnel state is read from the helper, and `RoutingProfile.Status` stays `unconfigured`.
+
+### Probes from the controller
+
+`egresslab-controller-lab -approve probe-egress PROFILE_ID NAMESPACE` runs one signed probe (Step
+29B.2b); it takes no URL or destination. Before signing, the controller requires, in this order:
+
+1. the profile in `state.json`, still `unconfigured` with its unique-IP and kill-switch policies;
+2. a trusted runtime whose helper reports the pinned runtime ID and public-key fingerprint;
+3. the profile's binding to that runtime, naming this namespace and the current helper epoch
+   (`OWNERSHIP_MISMATCH` otherwise, also after a helper restart);
+4. `ListLabs` showing the profile's lab in that namespace as `tunnel_configured` (`LAB_NOT_FOUND`,
+   `OWNERSHIP_MISMATCH` or `LAB_FAULTED` otherwise).
+
+The capability binds profile, namespace, helper epoch and `probe_ipv4` `1.1.1.1`, for 30 seconds;
+the signed JSON is pinned by a golden vector in both modules (cross-checked with OpenSSL 3). The
+helper's answer must be a successful `PermitProbe` carrying exactly one `probe` object and no lab
+metadata, for that profile and namespace, with a public IPv4 address (the network agent's
+candidate policy), the fixed source and a handshake at most 180 s before the observation. The
+controller then requires the observation to be at most 90 s old when it arrives, not before the
+capability was issued, and its timestamps within 5 s of the host clock; the capability only had to
+be valid when the helper accepted it. A lost or unreadable answer, or a rejected observation, is
+`STATE_UNCERTAIN` (inspect `list-labs`); a helper refusal keeps its code. Nothing is retried, the
+binding is not changed, and the observation is printed with `network_ready: false`, neither stored
+nor turned into a lease.
+
+Verified on Lima with the real Proton tunnel, signing with the Keychain key: a sealed lab was
+refused before signing. The first signed probe answered `LAB_FAULTED`: the worker failed for an
+unknown reason (its error is not reported) and the cleanup worked, leaving a lab with only `lo` and
+no underlay table. Recovery is `delete-lab`, `create-lab`, `connect-tunnel` and a new probe; the
+helper need not restart. The next 8 probes all succeeded in about a second each, two of them after
+5 idle minutes, returning the provider's exit IPv4 with a handshake 1 s old; afterwards the lab's
+ruleset held no probe set or permit, no worker process remained, `verify-lab` still answered
+`tunnel_configured`, and a second probe on the same lab succeeded. Both observed failures were
+the first probe of a session; their cause is unknown. Not yet run on WSL2.
 
 ### Trusted runtimes and profile bindings
 
