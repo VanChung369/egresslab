@@ -27,13 +27,17 @@ type managedTestKernel struct {
 	peerCalls     int
 	tableCreates  int
 	tableRemovals int
+
+	peerInstalled bool
+	wgReadError   string            // a "wg show" property that fails to read
+	wgOverrides   map[string]string // "wg show" property -> value the kernel reports instead
 }
 
 func newManagedTunnelFixture(t *testing.T) (*ManagedTunnelBackend, *managedTestKernel) {
 	t.Helper()
 
 	vpn, _ := testVPNLab(true)
-	kernel := &managedTestKernel{}
+	kernel := &managedTestKernel{wgOverrides: make(map[string]string)}
 
 	sealed := &SealedLabBackend{manager: vpn.manager, firewall: vpn.firewall}
 	backend := &ManagedTunnelBackend{sealed: sealed, vpn: vpn}
@@ -76,17 +80,55 @@ func newManagedTunnelFixture(t *testing.T) (*ManagedTunnelBackend, *managedTestK
 		return nil
 	}
 
-	vpn.runWG = func(_ context.Context, _ string, _ []byte, args ...string) (string, error) {
-		if args[0] == "show" && args[len(args)-1] == "fwmark" {
-			if kernel.wrongMark {
-				return "off", nil
+	// demoConfig: private key demoKey(1), peer demoKey(2), keepalive 25. demoKey(3) stands for the
+	// public key wg derives from demoKey(1).
+	vpn.runWG = func(_ context.Context, namespace string, stdin []byte, args ...string) (string, error) {
+		if len(args) == 1 && args[0] == "pubkey" {
+			if namespace != "" || string(stdin) != demoKey(1) {
+				return "", errors.New("invalid public key derivation")
 			}
 
-			return "0xabcd", nil
+			return demoKey(3), nil
+		}
+
+		if len(args) == 3 && args[0] == "show" && args[1] == labWGInterface {
+			property := args[2]
+
+			if property == kernel.wgReadError {
+				return "", errors.New("kernel readback failed")
+			}
+
+			if value, exists := kernel.wgOverrides[property]; exists {
+				return value, nil
+			}
+
+			switch property {
+			case "fwmark":
+				if kernel.wrongMark {
+					return "off", nil
+				}
+				return "0xabcd", nil
+			case "public-key":
+				return demoKey(3), nil
+			case "peers":
+				if !kernel.peerInstalled {
+					return "", nil
+				}
+				return demoKey(2), nil
+			case "endpoints":
+				return demoKey(2) + "\t198.51.100.7:51820", nil
+			case "allowed-ips":
+				return demoKey(2) + "\t0.0.0.0/0", nil
+			case "persistent-keepalive":
+				return demoKey(2) + "\t25", nil
+			default:
+				return "", errors.New("unexpected WireGuard readback property")
+			}
 		}
 
 		if len(args) >= 3 && args[0] == "set" && args[2] == "peer" {
 			kernel.peerCalls++
+			kernel.peerInstalled = true
 		}
 
 		return "", nil
@@ -153,6 +195,7 @@ func (k *managedTestKernel) runIP(_ context.Context, args ...string) ([]byte, er
 		}
 
 		k.name, k.alias, k.namespace = "", "", ""
+		k.peerInstalled = false
 	}
 
 	return nil, nil

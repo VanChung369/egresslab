@@ -1,0 +1,14 @@
+{
+  "interface_public_key": "KJU90voQ/KrWjP+xD3z5SH8phX7u74EpTA6F0HRwx10=",
+  "peer_public_key": "CDSDolALoJ0H51qigo3lEmdTQKW8ev9wcjkSt5ckpE4=",
+  "endpoint": "198.51.100.7:51820",
+  "outputs": {
+    "allowed-ips": "CDSDolALoJ0H51qigo3lEmdTQKW8ev9wcjkSt5ckpE4=\t0.0.0.0/0\n",
+    "endpoints": "CDSDolALoJ0H51qigo3lEmdTQKW8ev9wcjkSt5ckpE4=\t198.51.100.7:51820\n",
+    "peers": "CDSDolALoJ0H51qigo3lEmdTQKW8ev9wcjkSt5ckpE4=\n",
+    "peers-empty": "",
+    "persistent-keepalive": "CDSDolALoJ0H51qigo3lEmdTQKW8ev9wcjkSt5ckpE4=\t25\n",
+    "persistent-keepalive-off": "CDSDolALoJ0H51qigo3lEmdTQKW8ev9wcjkSt5ckpE4=\toff\n",
+    "public-key": "KJU90voQ/KrWjP+xD3z5SH8phX7u74EpTA6F0HRwx10=\n"
+  }
+}

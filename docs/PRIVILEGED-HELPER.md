@@ -1,9 +1,10 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 27B.3 — cross-platform controller tunnel integration.** A controller CLI signs
-`CreateLab` and `ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in the
-Linux runtime; the helper holds the encrypted WireGuard configs and stays the source of truth for
-lab and tunnel state. Windows (WSL2) and Linux are verified end to end; macOS (Lima, Keychain) is
+Status: **Step 27C.1 — WireGuard peer verification and endpoint pinning.** A controller CLI
+signs `CreateLab` and `ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in
+the Linux runtime; the helper holds the encrypted WireGuard configs, checks the peer state the
+kernel reports against the staged config, and stays the source of truth for lab and tunnel
+state. Windows (WSL2) and Linux are verified end to end; macOS (Lima, Keychain) is
 implemented but has not been run. Probes and proxy traffic are still not implemented; the
 sections from "Typed operations only" on are partly design.
 
@@ -78,8 +79,9 @@ sections from "Typed operations only" on are partly design.
   after sealing (only the managed tunnel backend also checks the intended policy); egress-IP
   leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
-- Hostname endpoints and IP pinning (Step 27C). The HTTP controller and the desktop know nothing
-  of labs or tunnels; only the lab CLI drives them.
+- Interface address, MTU, routing table and policy routing verification (Step 27C.2); hostname
+  endpoints, DNS policy and endpoint selection (Step 27C.3). The HTTP controller and the desktop
+  know nothing of labs or tunnels; only the lab CLI drives them.
 - A controller approval workflow for individual operations.
 - Live key rotation and automatic key distribution.
 - `PermitProbe` and `RecoverClean` through IPC.
@@ -441,7 +443,7 @@ a public key, plus a runtime ID) adds two operations on an existing lab:
 | `ConnectTunnel{profile_id, namespace, stage_id}` | a capability signed for exactly that profile, namespace and stage | `tunnel_configured` |
 | `Disconnect{profile_id, namespace}` | agent UID and lab ownership | `sealed`, or `faulted` after a failed attempt; the namespace stays |
 
-`VerifyLab` on a connected lab re-checks the tunnel (link, firewall, underlay) instead of the
+`VerifyLab` on a connected lab re-checks the tunnel (link, firewall, underlay, peer) instead of the
 sealed topology, and `DeleteLab` removes the tunnel before the namespace. In helperctl:
 `connect-tunnel PROFILE_ID NAMESPACE STAGE_ID < capability.json` and
 `disconnect PROFILE_ID NAMESPACE`; in the controller lab CLI: `stage-info`, `connect-tunnel` and
@@ -496,13 +498,17 @@ itself, so it must never be wired to the HTTP agent.
    lab drifted. An nft version that prints the same rules differently is refused as well, and so
    is a table with any flags (a `dormant` table still lists its rules but enforces none).
 6. No `egwg*` link and no managed alias exists in the VM namespace.
-7. The root underlay table is installed. Then the link is created with an alias
+7. The expected peer state is written down from the vault config alone: the interface public key
+   (`wg pubkey`, the private key on stdin), the peer key, the pinned IPv4 endpoint and port, and
+   the keepalive. A key that cannot be derived, or equals the peer's, stops here.
+8. The root underlay table is installed. Then the link is created with an alias
    `egresslab-managed:<namespace>:<link>`, moved into the lab and renamed `wg0`. Its name, alias
    and kind (`wireguard`) are read back.
-8. After the fwmark and private key are set, and before any peer exists, the lab firewall, the
-   underlay table and the fwmark are read back again.
-9. The peer, addresses, MTU and default route are configured, and the link, firewall and
-   underlay are checked once more.
+9. After the fwmark and private key are set, and before any peer exists, the lab firewall, the
+   underlay table and the fwmark are read back again, and the kernel must report the expected
+   interface public key and no peer.
+10. The peer, addresses, MTU and default route are configured. The link, firewall and underlay
+    are checked once more, and so is the peer (see "Peer verification").
 
 What the backend guarantees:
 
@@ -517,7 +523,30 @@ What the backend guarantees:
   failed, the underlay install failed), the table is kept and the tunnel stays tracked as faulted.
   New tunnels are then refused until `Disconnect` succeeds or the helper restarts and recovery is
   done by hand.
-- `VerifyConfigured` re-reads the link, firewall and underlay; a failure faults the tunnel.
+- `VerifyConfigured` re-reads the link, firewall, underlay and peer; a failure faults the
+  tunnel, and a later correct readback does not clear the fault.
+
+**Peer verification.** Each property is read on its own with `wg show wg0 <property>`, never with
+`showconf` or `dump`, which print the private and preshared keys, and compared exactly with the
+expected state; nothing is learned from the kernel. A value read is never put in an error.
+
+| Property | Must be |
+|---|---|
+| `public-key` | the key derived from the vault's private key |
+| `peers` | exactly one: the staged peer key |
+| `endpoints` | the staged IPv4 address and UDP port |
+| `allowed-ips` | exactly `0.0.0.0/0` |
+| `persistent-keepalive` | the staged value, or `off` when it is 0 |
+| `fwmark` | the tunnel's mark (as before) |
+
+WireGuard follows a peer that answers from another address (roaming). EgressLab does not accept
+that: the underlay table keeps the tunnel's packets to the pinned endpoint, and a verification
+that finds another endpoint faults the tunnel. A server that answers from another address
+therefore faults the lab at the next `VerifyLab`, or fails the connect. Each check sees the state
+of that moment only: a change that reverts before it (for example, roaming back to the pinned
+endpoint) is not seen. Moving to another endpoint will need a controlled transition. The
+preshared key is never read back, so it is not verified; a wrong one only breaks the handshake.
+The formats are pinned by a real capture (`testdata/wg-show-peer.json`).
 
 Known gaps:
 
@@ -529,8 +558,9 @@ Known gaps:
 - If `ip link del` removes the link but reports an error (a timeout), or the inventory after it
   fails, later `Disconnect` calls find no link and stay uncertain: the table is kept until the
   operator recovers by hand.
-- Peers and routes are not read back, hostname endpoints are not supported, and nothing monitors
-  the tunnel continuously.
+- Addresses, MTU and routes are not read back (Step 27C.2), hostname endpoints are not
+  supported (Step 27C.3), and nothing monitors the tunnel continuously; drift is found only by
+  `VerifyLab`.
 
 ## Invariants the helper keeps
 

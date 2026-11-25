@@ -341,4 +341,4 @@ Add `-enable-tunnel` as well (it needs `-enable-vault`). On a sealed lab, `egres
 
 ## Next Milestone
 
-Run the Lima and macOS Keychain paths on a Mac, then move tunnel operations behind the helper: the controller now signs `ConnectTunnel` (Step 27B.3, see `docs/PRIVILEGED-HELPER.md`); next come a smoke test with a real VPN provider, then hostname endpoints and IP pinning (Step 27C).
+Run the Lima and macOS Keychain paths on a Mac, then move tunnel operations behind the helper: the controller signs `ConnectTunnel` (Step 27B.3) and the helper checks the WireGuard peer state and the pinned endpoint (Step 27C.1, see `docs/PRIVILEGED-HELPER.md`); next come address, MTU and route verification (Step 27C.2), then hostname endpoints and DNS policy (Step 27C.3).

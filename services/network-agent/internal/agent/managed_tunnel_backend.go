@@ -125,10 +125,17 @@ func (b *ManagedTunnelBackend) connectConfig(ctx context.Context, namespace stri
 		return err
 	}
 
+	// Before anything is created: the expected peer state, from the vault config alone.
+	peer, err := b.newPeerPolicyLocked(ctx, cfg, plan)
+	if err != nil {
+		return err
+	}
+
 	tunnel := &managedTunnel{
 		namespace: namespace,
 		rootName:  link,
 		alias:     managedTunnelAliasPrefix + namespace + ":" + link,
+		peer:      peer,
 	}
 
 	// Tracked before the first kernel change, so a failure can never forget what was created.
@@ -182,14 +189,18 @@ func (b *ManagedTunnelBackend) connectKernelLocked(
 		return err
 	}
 
-	// The peer, and with it the first handshake, comes only after the lab firewall and the root
-	// underlay policy (table and fwmark) are read back.
+	// The peer, and with it the first handshake, comes only after the lab firewall, the root
+	// underlay policy (table and fwmark), the interface key and an empty peer list are read back.
 	beforePeer := func(ctx context.Context) error {
 		if err := b.sealed.firewall.requireSealedPolicyLocked(ctx, ns); err != nil {
 			return err
 		}
 
-		return l.verifyUnderlayLocked(ctx, ns)
+		if err := l.verifyUnderlayLocked(ctx, ns); err != nil {
+			return err
+		}
+
+		return b.verifyBeforePeerLocked(ctx, t)
 	}
 
 	if err := l.configureVPNLinkLocked(ctx, ns, cfg, plan, mark, beforePeer); err != nil {
@@ -224,11 +235,16 @@ func (b *ManagedTunnelBackend) verifyConfiguredLocked(ctx context.Context, t *ma
 		return err
 	}
 
-	return b.vpn.verifyUnderlayLocked(ctx, t.namespace)
+	if err := b.vpn.verifyUnderlayLocked(ctx, t.namespace); err != nil {
+		return err
+	}
+
+	return b.verifyPeerLocked(ctx, t)
 }
 
-// VerifyConfigured re-checks the link, the lab firewall and the underlay policy. It proves neither
-// a handshake nor the egress address. A failure faults the tunnel until Disconnect.
+// VerifyConfigured re-checks the link, the lab firewall, the underlay policy and the WireGuard peer
+// state against what was staged. It proves neither a handshake nor the egress address. A failure
+// faults the tunnel until Disconnect.
 func (b *ManagedTunnelBackend) VerifyConfigured(ctx context.Context, namespace string) error {
 	b.sealed.manager.mu.Lock()
 	defer b.sealed.manager.mu.Unlock()
