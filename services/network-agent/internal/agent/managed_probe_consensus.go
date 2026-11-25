@@ -25,8 +25,8 @@ var (
 )
 
 // managedProbeSourceSpec is trusted local policy; an untrusted caller must never supply it. A
-// distinct operator name is a declaration, not proof of independence: Step 29C.2 checks who runs
-// each source.
+// distinct operator name is a declaration, not proof of independence: no code checks who runs a
+// source, which is reviewed by hand when a destination is provisioned (docs/DEV-LINUX-VM.md).
 type managedProbeSourceSpec struct {
 	id          string
 	operator    string

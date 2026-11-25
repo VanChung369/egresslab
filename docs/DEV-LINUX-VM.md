@@ -376,6 +376,19 @@ The log then reads `signed sealed lab, managed tunnel and diagnostic probe enabl
 - Do not expose the Agent's HTTP API publicly.
 - Authenticated communication between the macOS Controller and the Linux VM must be secured before privileged networking operations are introduced.
 
+## Multi-source HTTPS endpoint provisioning
+
+The ident.me destination (Step 29C.2) is provisioned through trusted configuration, outside the lab namespace. Check a candidate address over HTTPS with explicit address pinning and normal certificate verification, and look up who announces it:
+
+```bash
+dig +short A 4.ident.me
+whois -h whois.cymru.com " -v <candidate IPv4>"      # must not be Cloudflare (AS13335)
+curl -q --noproxy '*' --ipv4 --proto '=https' --connect-timeout 5 --max-time 10 \
+  --resolve "4.ident.me:443:<candidate IPv4>" -H 'Accept-Encoding: identity' -fsS https://4.ident.me/
+```
+
+If DNS returns several addresses, do not take the first one blindly. The provider does not promise a stable address. DNS at probe time, automatic replacement of the address and skipping certificate verification (`curl -k`) are not allowed. A host-side check reveals the host's own public IP to the provider; it is not a managed observation and never activates an egress lease. No helper configuration takes the pin yet (Step 29C.3).
+
 ## Next Milestone
 
-Multi-source public IP verification: pinned HTTPS sources and their timed firewall (Step 29C.2), then the managed multi-source probe lifecycle (Step 29C.3) and its signed IPC and controller integration (Step 29C.4). The consensus engine exists since Step 29C.1. See `docs/PRIVILEGED-HELPER.md`.
+Multi-source public IP verification: the managed multi-source probe lifecycle (Step 29C.3), then its signed IPC and controller integration (Step 29C.4). The consensus engine (Step 29C.1) and the pinned HTTPS sources with destination-aware windows (Step 29C.2) exist but are not wired in. See `docs/PRIVILEGED-HELPER.md`.

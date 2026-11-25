@@ -64,3 +64,62 @@ func TestPinnedProbeDial(t *testing.T) {
 		t.Fatal("an unusable dialer reached the network")
 	}
 }
+
+// The dialer below is a fake: no connection is made. 192.0.2.0/24 is a documentation range.
+func TestPinnedProbeHostDial(t *testing.T) {
+	ctx := context.Background()
+	target := netip.MustParseAddr("192.0.2.42")
+	dialErr := errors.New("fake dial result")
+	calls := 0
+
+	fake := func(_ context.Context, network, address string) (net.Conn, error) {
+		calls++
+
+		if network != "tcp4" || address != "192.0.2.42:443" {
+			t.Fatal("unexpected dial destination")
+		}
+
+		return nil, dialErr
+	}
+
+	dial := pinnedProbeHostDial("4.ident.me", target, fake)
+
+	for _, tt := range []struct{ network, address string }{
+		{"tcp", "example.com:443"},
+		{"tcp", "4.ident.me:80"},
+		{"tcp", "4.ident.me:853"},
+		{"tcp", "4.ident.me"},
+		{"tcp", "4.IDENT.ME:443"},
+		{"tcp", "192.0.2.42:443"},
+		{"tcp", "4.ident.me.evil.example:443"},
+		{"tcp6", "4.ident.me:443"},
+		{"udp", "4.ident.me:443"},
+		{"unix", "/run/resolver.sock"},
+	} {
+		if _, err := dial(ctx, tt.network, tt.address); !errors.Is(err, ErrProbeDestination) {
+			t.Fatalf("unexpected destination accepted: %s %s", tt.network, tt.address)
+		}
+	}
+
+	if calls != 0 {
+		t.Fatal("unauthorized request reached the dialer")
+	}
+
+	if _, err := dial(ctx, "tcp", "4.ident.me:443"); !errors.Is(err, dialErr) || calls != 1 {
+		t.Fatalf("authorized request not passed: %v", err)
+	}
+
+	for name, unusable := range map[string]probeDialFunc{
+		"no host":     pinnedProbeHostDial("", target, fake),
+		"IPv6 target": pinnedProbeHostDial("4.ident.me", netip.MustParseAddr("2001:db8::1"), fake),
+		"no dialer":   pinnedProbeHostDial("4.ident.me", target, nil),
+	} {
+		if _, err := unusable(ctx, "tcp", "4.ident.me:443"); !errors.Is(err, ErrProbeDestination) {
+			t.Errorf("%s accepted", name)
+		}
+	}
+
+	if calls != 1 {
+		t.Fatal("an unusable dialer reached the network")
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -216,6 +217,8 @@ type probeWindowKernel struct {
 	closed  []string
 	failAdd bool
 	failDel bool
+
+	expectedScript string // the window script to accept; the 1.1.1.1 window when empty
 }
 
 func (k *probeWindowKernel) list(context.Context, string) ([]byte, error) {
@@ -229,7 +232,12 @@ func (k *probeWindowKernel) list(context.Context, string) ([]byte, error) {
 func (k *probeWindowKernel) run(_ context.Context, _ string, script string, checkOnly bool) error {
 	switch {
 	case strings.HasPrefix(script, "add set"):
-		if script != managedProbeRules() {
+		expected := k.expectedScript
+		if expected == "" {
+			expected = managedProbeRules()
+		}
+
+		if script != expected {
 			k.t.Fatal("unexpected window script")
 		}
 
@@ -396,4 +404,197 @@ func TestManagedProbeWindowRefusals(t *testing.T) {
 			t.Fatal("invalid window request accepted")
 		}
 	})
+}
+
+// probeCaptureForDestination is the real window capture with its one element changed, by
+// structure, to destination. It is derived, not a capture of a second window.
+func probeCaptureForDestination(t *testing.T, destination netip.Addr) []byte {
+	t.Helper()
+
+	var doc map[string]any
+	if err := json.Unmarshal(probeCapture(t, "nft-lab-probe-window.json"), &doc); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, item := range objects(doc) {
+		set, ok := item.(map[string]any)["set"].(map[string]any)
+		if !ok || set["name"] != managedProbeSet {
+			continue
+		}
+
+		elements := set["elem"].([]any)
+		if len(elements) != 1 {
+			t.Fatal("unexpected probe set size")
+		}
+
+		element := elements[0].(map[string]any)["elem"].(map[string]any)
+		if element["val"] != managedProbeIP {
+			t.Fatal("unexpected original destination")
+		}
+
+		element["val"] = destination.String()
+
+		return encodeRuleset(t, doc)
+	}
+
+	t.Fatal("managed probe set missing")
+
+	return nil
+}
+
+func TestManagedProbePolicyPinnedDestination(t *testing.T) {
+	target := netip.MustParseAddr("9.9.9.9")
+	data := probeCaptureForDestination(t, target)
+
+	handles, err := verifyManagedProbePolicyFor(data, true, target)
+	if err != nil || handles.input != 17 || handles.output != 16 {
+		t.Fatalf("valid destination rejected: %+v %v", handles, err)
+	}
+
+	if _, err := verifyManagedProbePolicy(data, true); !errors.Is(err, ErrProbePolicyDrift) {
+		t.Fatal("the 1.1.1.1 window accepted another destination")
+	}
+
+	for _, other := range []netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("1.1.1.1")} {
+		if _, err := verifyManagedProbePolicyFor(data, false, other); !errors.Is(err, ErrProbePolicyDrift) {
+			t.Fatalf("cleanup for %s accepted the window of %s", other, target)
+		}
+	}
+
+	for _, invalid := range []netip.Addr{{}, netip.MustParseAddr("10.0.0.1")} {
+		if _, err := verifyManagedProbePolicyFor(data, false, invalid); !errors.Is(err, ErrProbePolicyDrift) {
+			t.Fatalf("invalid destination %v accepted", invalid)
+		}
+	}
+
+	expired := probeCapture(t, "nft-lab-probe-expired.json")
+
+	if _, err := verifyManagedProbePolicyFor(expired, true, target); !errors.Is(err, ErrProbePolicyDrift) {
+		t.Fatal("expired window accepted as active")
+	}
+
+	if _, err := verifyManagedProbePolicyFor(expired, false, target); err != nil {
+		t.Fatalf("expired window cleanup rejected: %v", err)
+	}
+}
+
+func TestManagedProbeRulesInvalidDestination(t *testing.T) {
+	for _, target := range []netip.Addr{
+		{},
+		netip.MustParseAddr("10.0.0.1"),
+		netip.MustParseAddr("127.0.0.1"),
+		netip.MustParseAddr("100.64.0.1"),
+		netip.MustParseAddr("::ffff:9.9.9.9"),
+		netip.MustParseAddr("2001:db8::1"),
+	} {
+		if script, err := managedProbeRulesFor(target); !errors.Is(err, ErrProbeDestination) || script != "" {
+			t.Fatalf("invalid destination accepted: %v", target)
+		}
+	}
+
+	script, err := managedProbeRulesFor(netip.MustParseAddr("9.9.9.9"))
+	if err != nil || !strings.Contains(script, "{ 9.9.9.9 timeout 30s }") ||
+		strings.Count(script, "\n") != strings.Count(managedProbeRules(), "\n") {
+		t.Fatalf("unexpected window script: %q %v", script, err)
+	}
+
+	if strings.Replace(script, "9.9.9.9", managedProbeIP, 1) != managedProbeRules() {
+		t.Fatal("windows differ in more than their destination")
+	}
+}
+
+func TestManagedProbeWindowPinnedDestination(t *testing.T) {
+	target := netip.MustParseAddr("9.9.9.9")
+
+	for _, mode := range []string{
+		"success", "wrong destination", "expired", "worker failure", "cleanup failure", "invalid destination",
+	} {
+		t.Run(mode, func(t *testing.T) {
+			f, kernel := probeWindowFirewall(t)
+			destination := target
+
+			script, err := managedProbeRulesFor(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			kernel.expectedScript = script
+			kernel.window = probeCaptureForDestination(t, target)
+
+			switch mode {
+			case "wrong destination":
+				kernel.window = probeCapture(t, "nft-lab-probe-window.json")
+			case "invalid destination":
+				destination = netip.MustParseAddr("10.0.0.1")
+			case "cleanup failure":
+				kernel.failDel = true
+			}
+
+			baseline := f.baseline[firewallTestName]
+			calls := 0
+			workerErr := errors.New("worker failed")
+
+			f.manager.mu.Lock()
+			err = f.withManagedProbeWindowForLocked(context.Background(), firewallTestName, destination,
+				func(ctx context.Context) error {
+					calls++
+
+					if !kernel.open {
+						t.Error("worker ran without a firewall window")
+						return workerErr
+					}
+
+					if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > probeExecutionTimeout {
+						t.Error("unbounded probe")
+					}
+
+					switch mode {
+					case "expired":
+						kernel.window = probeCapture(t, "nft-lab-probe-expired.json")
+					case "worker failure":
+						return workerErr
+					}
+
+					return nil
+				})
+			f.manager.mu.Unlock()
+
+			switch mode {
+			case "success":
+				if err != nil || calls != 1 || kernel.open || len(kernel.closed) != 1 || f.drifted[firewallTestName] {
+					t.Fatalf("unexpected successful lifecycle: %v", err)
+				}
+
+			case "wrong destination":
+				if !errors.Is(err, ErrProbePolicyDrift) || !errors.Is(err, ErrProbeCleanup) || calls != 0 ||
+					!f.drifted[firewallTestName] {
+					t.Fatalf("foreign window accepted: %v", err)
+				}
+
+			case "expired":
+				if !errors.Is(err, ErrProbePolicyDrift) || errors.Is(err, ErrProbeCleanup) || kernel.open {
+					t.Fatalf("expired window accepted: %v", err)
+				}
+
+			case "worker failure":
+				if !errors.Is(err, workerErr) || kernel.open || len(kernel.closed) != 1 {
+					t.Fatalf("worker failure not cleaned up: %v", err)
+				}
+
+			case "cleanup failure":
+				if !errors.Is(err, ErrProbeCleanup) || !f.drifted[firewallTestName] {
+					t.Fatalf("cleanup failure ignored: %v", err)
+				}
+
+			case "invalid destination":
+				if !errors.Is(err, ErrProbeDestination) || kernel.opened != 0 || calls != 0 {
+					t.Fatalf("invalid destination reached the firewall: %v", err)
+				}
+			}
+
+			if f.baseline[firewallTestName] != baseline || len(f.applied[firewallTestName]) != 1 {
+				t.Fatal("temporary window became permanent")
+			}
+		})
+	}
 }

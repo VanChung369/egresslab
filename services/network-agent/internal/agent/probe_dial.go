@@ -32,3 +32,20 @@ func pinnedProbeDial(target netip.Addr, dial probeDialFunc) probeDialFunc {
 		return dial(ctx, "tcp4", expected)
 	}
 }
+
+// pinnedProbeHostDial accepts exactly the expected HTTPS authority (host:443), then connects to its
+// numeric pin through pinnedProbeDial. The underlying dialer never receives a hostname, so no
+// resolver is consulted; TLS still verifies the certificate for host.
+func pinnedProbeHostDial(host string, target netip.Addr, dial probeDialFunc) probeDialFunc {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		if host == "" || !target.Is4() || dial == nil {
+			return nil, ErrProbeDestination
+		}
+
+		if address != net.JoinHostPort(host, "443") {
+			return nil, ErrProbeDestination
+		}
+
+		return pinnedProbeDial(target, dial)(ctx, network, netip.AddrPortFrom(target, 443).String())
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"time"
 )
 
@@ -26,10 +27,15 @@ func (f *LabFirewall) readProbeRulesetLocked(ctx context.Context, namespace stri
 	return f.list(commandCtx, namespace)
 }
 
-// closeProbeWindowLocked removes only the verified permits and the reserved set, in one
-// transaction, and requires the sealed policy afterwards. The firewall is never rebuilt around a
-// live tunnel. The caller must hold manager.mu.
-func (f *LabFirewall) closeProbeWindowLocked(ctx context.Context, namespace string) error {
+// closeProbeWindowForLocked removes only the verified permits and the reserved set of destination's
+// window, in one transaction, and requires the sealed policy afterwards. A window for another
+// address is not removed. The firewall is never rebuilt around a live tunnel. The caller must hold
+// manager.mu.
+func (f *LabFirewall) closeProbeWindowForLocked(ctx context.Context, namespace string, destination netip.Addr) error {
+	if _, err := parseCandidateIPv4(destination.String()); err != nil {
+		return ErrProbePolicyDrift
+	}
+
 	data, err := f.readProbeRulesetLocked(ctx, namespace)
 	if err != nil {
 		return err
@@ -40,7 +46,7 @@ func (f *LabFirewall) closeProbeWindowLocked(ctx context.Context, namespace stri
 		return f.requireSealedPolicyLocked(ctx, namespace)
 	}
 
-	handles, err := verifyManagedProbePolicy(data, false)
+	handles, err := verifyManagedProbePolicyFor(data, false, destination)
 	if err != nil {
 		return err
 	}
@@ -57,20 +63,36 @@ func (f *LabFirewall) closeProbeWindowLocked(ctx context.Context, namespace stri
 	return f.requireSealedPolicyLocked(ctx, namespace)
 }
 
-// withManagedProbeWindowLocked opens a kernel-timed window for 1.1.1.1:443 over wg0, runs probe
-// with a bounded context, and always closes the window with its own context. The window is never
-// recorded as a session script or baseline, so a Reconcile cannot bring it back. An unconfirmed
-// close marks the namespace drifted; the caller must then fault the tunnel and discard the result.
-//
-// The caller must hold manager.mu and must have verified the managed tunnel itself; probe must
-// not take manager.mu.
+// withManagedProbeWindowLocked is the single-source window of the 29B probe, for 1.1.1.1.
 func (f *LabFirewall) withManagedProbeWindowLocked(
 	ctx context.Context,
 	namespace string,
 	probe func(context.Context) error,
+) error {
+	return f.withManagedProbeWindowForLocked(ctx, namespace, netip.MustParseAddr(managedProbeIP), probe)
+}
+
+// withManagedProbeWindowForLocked opens a kernel-timed window for destination:443 over wg0, runs
+// probe with a bounded context, and always closes the window with its own context. The window is
+// never recorded as a session script or baseline, so a Reconcile cannot bring it back. An
+// unconfirmed close marks the namespace drifted; the caller must then fault the tunnel, discard the
+// result and open no further window.
+//
+// The caller must hold manager.mu, must have verified the managed tunnel itself and must take
+// destination only from trusted, authorized source policy; probe must not take manager.mu.
+func (f *LabFirewall) withManagedProbeWindowForLocked(
+	ctx context.Context,
+	namespace string,
+	destination netip.Addr,
+	probe func(context.Context) error,
 ) (resultErr error) {
 	if !labNamePattern.MatchString(namespace) || probe == nil {
 		return ErrProbePolicyDrift
+	}
+
+	script, err := managedProbeRulesFor(destination)
+	if err != nil {
+		return err
 	}
 
 	if err := f.requireSealedPolicyLocked(ctx, namespace); err != nil {
@@ -86,14 +108,14 @@ func (f *LabFirewall) withManagedProbeWindowLocked(
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), probeCleanupTimeout)
 		defer cancel()
 
-		if err := f.closeProbeWindowLocked(cleanupCtx, namespace); err != nil {
+		if err := f.closeProbeWindowForLocked(cleanupCtx, namespace, destination); err != nil {
 			f.drifted[namespace] = true
 			resultErr = errors.Join(resultErr, ErrProbeCleanup, err)
 		}
 	}()
 
 	// Not applyVerifiedLocked: that would record the permits as permanent session state.
-	if err := f.apply(ctx, namespace, managedProbeRules()); err != nil {
+	if err := f.apply(ctx, namespace, script); err != nil {
 		return err
 	}
 
@@ -102,7 +124,7 @@ func (f *LabFirewall) withManagedProbeWindowLocked(
 		return err
 	}
 
-	if _, err := verifyManagedProbePolicy(before, true); err != nil {
+	if _, err := verifyManagedProbePolicyFor(before, true, destination); err != nil {
 		return err
 	}
 
@@ -120,7 +142,7 @@ func (f *LabFirewall) withManagedProbeWindowLocked(
 		return errors.Join(probeErr, err)
 	}
 
-	_, verifyErr := verifyManagedProbePolicy(after, true)
+	_, verifyErr := verifyManagedProbePolicyFor(after, true, destination)
 
 	return errors.Join(probeErr, verifyErr)
 }

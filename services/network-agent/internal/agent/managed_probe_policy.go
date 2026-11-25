@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 )
 
 const (
@@ -15,16 +16,31 @@ const (
 
 var ErrProbePolicyDrift = errors.New("managed probe firewall policy not verified")
 
-// managedProbeRules opens a probe window as one nft transaction: a one-element set whose element
-// the kernel expires on its own, and two permits that both match through that set, so neither
-// direction outlives the element even if the helper dies. No general "ct state established" rule
-// is added.
+// managedProbeRules is the single-source window of the 29B probe, for 1.1.1.1.
 func managedProbeRules() string {
+	script, err := managedProbeRulesFor(netip.MustParseAddr(managedProbeIP))
+	if err != nil {
+		panic("invalid built-in managed probe destination")
+	}
+
+	return script
+}
+
+// managedProbeRulesFor opens a probe window for exactly one public IPv4 destination as one nft
+// transaction: a one-element set whose element the kernel expires on its own, and two permits that
+// both match through that set, so neither direction outlives the element even if the helper dies.
+// No general "ct state established" rule is added. The permits are the same for every destination;
+// only the element differs.
+func managedProbeRulesFor(destination netip.Addr) (string, error) {
+	if _, err := parseCandidateIPv4(destination.String()); err != nil {
+		return "", ErrProbeDestination
+	}
+
 	return fmt.Sprintf(`add set inet %[1]s %[2]s { type ipv4_addr; flags timeout; size 1; }
 add element inet %[1]s %[2]s { %[3]s timeout %[4]ds }
 add rule inet %[1]s output oifname "wg0" ip daddr @%[2]s tcp dport 443 accept
 add rule inet %[1]s input iifname "wg0" ip saddr @%[2]s tcp sport 443 ct state established accept
-`, labNFTTable, managedProbeSet, managedProbeIP, probeTTLSeconds)
+`, labNFTTable, managedProbeSet, destination.String(), probeTTLSeconds), nil
 }
 
 // expectedProbeRules is the canonical form of the two permits as nft 1.0.9 prints them (real
@@ -73,10 +89,14 @@ type managedProbeElement struct {
 	} `json:"elem"`
 }
 
-// verifyManagedProbeSet requires the reserved set exactly as the window creates it. An active
-// window holds the one element with time left; once it expired the kernel lists no "elem" at all,
-// which only cleanup accepts.
-func verifyManagedProbeSet(raw []byte, requireActive bool) error {
+// verifyManagedProbeSetFor requires the reserved set exactly as the window for destination creates
+// it. An active window holds that one element with time left, never another address, public or
+// not; once it expired the kernel lists no "elem" at all, which only cleanup accepts.
+func verifyManagedProbeSetFor(raw []byte, requireActive bool, destination netip.Addr) error {
+	if _, err := parseCandidateIPv4(destination.String()); err != nil {
+		return ErrProbePolicyDrift
+	}
+
 	var set managedProbeSetInfo
 
 	if err := decodeProbeJSON(raw, &set); err != nil {
@@ -103,7 +123,7 @@ func verifyManagedProbeSet(raw []byte, requireActive bool) error {
 
 	elem := elements[0].Elem
 
-	if elem.Val != managedProbeIP || elem.Timeout == nil || *elem.Timeout != probeTTLSeconds ||
+	if elem.Val != destination.String() || elem.Timeout == nil || *elem.Timeout != probeTTLSeconds ||
 		elem.Expires == nil || *elem.Expires < 0 || *elem.Expires > probeTTLSeconds {
 		return ErrProbePolicyDrift
 	}
@@ -120,10 +140,18 @@ type probeRuleHandles struct {
 	output uint64
 }
 
-// verifyManagedProbePolicy takes exactly the window's three objects (the set and the two permits,
-// each permit last in its chain) out of a readback, and requires everything left to be the sealed
-// policy. It returns the permits' handles for a targeted removal.
 func verifyManagedProbePolicy(data []byte, requireActive bool) (probeRuleHandles, error) {
+	return verifyManagedProbePolicyFor(data, requireActive, netip.MustParseAddr(managedProbeIP))
+}
+
+// verifyManagedProbePolicyFor takes exactly the window's three objects (the set for destination
+// and the two permits, each permit last in its chain) out of a readback, and requires everything
+// left to be the sealed policy. It returns the permits' handles for a targeted removal.
+func verifyManagedProbePolicyFor(data []byte, requireActive bool, destination netip.Addr) (probeRuleHandles, error) {
+	if _, err := parseCandidateIPv4(destination.String()); err != nil {
+		return probeRuleHandles{}, ErrProbePolicyDrift
+	}
+
 	var doc struct {
 		Nftables []map[string]json.RawMessage `json:"nftables"`
 	}
@@ -144,7 +172,7 @@ func verifyManagedProbePolicy(data []byte, requireActive bool) (probeRuleHandles
 		}
 
 		if raw, exists := object["set"]; exists {
-			if setSeen || verifyManagedProbeSet(raw, requireActive) != nil {
+			if setSeen || verifyManagedProbeSetFor(raw, requireActive, destination) != nil {
 				return handles, ErrProbePolicyDrift
 			}
 

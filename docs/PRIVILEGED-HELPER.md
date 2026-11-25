@@ -1,14 +1,14 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 29C.1 — multi-source consensus engine (not wired in yet).** A controller CLI signs
-`CreateLab`, `ConnectTunnel` and `PermitProbe` and drives the helper's sealed lab, tunnel and
-diagnostic probe in the Linux runtime; the helper holds the encrypted WireGuard configs, disables
-IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once and pins it, checks
-the peer state and the IPv4 addresses, MTU, rules and routes the kernel reports against the staged
-config, and stays the source of truth for lab and tunnel state. A probe yields one observation of
-the tunnel's public IPv4 address, printed only. Windows (WSL2), Linux and macOS (Lima, Keychain) are
-verified end to end. No lease or proxy traffic exists; the sections from "Typed operations only" on
-are partly design.
+Status: **Step 29C.2 — pinned HTTPS sources and timed firewall (not wired in yet).** A controller
+CLI signs `CreateLab`, `ConnectTunnel` and `PermitProbe` and drives the helper's sealed lab, tunnel
+and diagnostic probe in the Linux runtime; the helper holds the encrypted WireGuard configs,
+disables IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once and pins
+it, checks the peer state and the IPv4 addresses, MTU, rules and routes the kernel reports against
+the staged config, and stays the source of truth for lab and tunnel state. A probe yields one
+observation of the tunnel's public IPv4 address, printed only. Windows (WSL2), Linux and macOS
+(Lima, Keychain) are verified end to end. No lease or proxy traffic exists; the sections from "Typed
+operations only" on are partly design.
 
 ## Implemented
 
@@ -891,8 +891,9 @@ on one operator. Step 29C requires several independent sources that must all agr
 verification attempt against a source policy. The policy is trusted local configuration; an
 untrusted caller never supplies it. It holds 2 to 8 sources, each with its own source ID and
 operator name (`^[a-z][a-z0-9_]{0,31}$`) and its own public IPv4 destination (the network agent's
-candidate policy). A distinct operator name is a declaration, not proof of independence: Step
-29C.2 checks who runs each source.
+candidate policy). A distinct operator name is a declaration, not proof of independence: no code
+checks who runs a source; that is reviewed by hand when a destination is provisioned (see "Pinned
+HTTPS sources and timed firewall").
 
 The evidence is accepted only when every required source returned exactly one observation, each a
 valid public IPv4 address observed inside the attempt's interval (at most 80 s, the helper's
@@ -916,3 +917,44 @@ be refused in this strict mode.
 At Step 29C.1 the engine is pure Go and unit-tested on its own; it is not wired into the managed
 probe, and no binary behaves differently. HTTPS sources, their kernel firewall policy and signed IPC follow in
 the next steps.
+
+### Pinned HTTPS sources and timed firewall (Step 29C.2)
+
+The source policy (`managed_probe_sources.go`) holds the two mandatory sources:
+
+| Source | Operator | URL | TCP destination | Response | TLS name |
+|---|---|---|---|---|---|
+| `cloudflare_trace` | Cloudflare | `https://1.1.1.1/cdn-cgi/trace` | `1.1.1.1` | trace key-value | IP SAN |
+| `ident_me` | ident.me | `https://4.ident.me/` | a provisioned IPv4 pin | one plain-text IPv4 | `4.ident.me` |
+
+The HTTPS identity and the TCP destination are separate. `pinnedProbeHostDial` accepts exactly the
+source's authority (`host:443`) and dials its numeric pin through `pinnedProbeDial`, so no hostname
+reaches a resolver; TLS still verifies the certificate for that host against the system trust
+store (SNI and `Host` unchanged). The ident.me pin must come from trusted provisioning outside the
+lab: never from an IPC request, an environment variable or a DNS lookup at probe time. The provider
+does not promise a stable address, so a changed address makes the probe fail; nothing switches to
+another address. The transport takes no proxy from the environment, follows no redirect, reuses no
+connection, sends `Accept-Encoding: identity` and refuses any other content encoding in any
+`Content-Encoding` field (not only the first), caps headers
+at 16 KiB and the body at 4096 bytes, and requires HTTP 200. Each body is parsed in its source's
+format: one `ip=` field for the trace; for ident.me exactly one IPv4 address with at most one
+trailing line ending. Every address then passes the network agent's public IPv4 policy.
+
+The probe window now takes its destination: `managedProbeRulesFor(destination)` opens the same set
+and the same two permits (wg0, TCP 443, 30 s kernel timeout) with that one element, and the
+verifying and closing code requires exactly that element. A window holding another address, public
+or not, is refused and is not closed by a request for another destination. An expired window (no
+element listed) is accepted for cleanup only. The rule for Step 29C.3, which will sequence the
+sources: each source gets its own window, closed and verified before the next one opens, and a
+window that cannot be closed stops the attempt. Nothing sequences sources yet. The single-source
+`PermitProbe` still opens only the 1.1.1.1 window, now through the destination-aware functions.
+
+Host preflight on 2026-11-25 (an observation, not the provisioned pin): `4.ident.me` resolved to
+one address, `65.108.151.63` (TTL 3600),
+announced by Hetzner (AS24940), not Cloudflare (AS13335). An HTTPS request pinned to it returned
+HTTP 200 with a verified certificate and a bare IPv4 address of 12 bytes with no line ending, the
+same address the Cloudflare trace reported. The ASN lookup shows two different networks; it does
+not prove the operators independent. This was a host check, not a managed observation: it
+fed no registry and no lease. The new source code is unit-tested only (a local TLS server stands in
+for the sources); no window for a second destination has run on a kernel yet, and the runtime does
+not call any of it until Step 29C.3.
