@@ -65,6 +65,7 @@ type Response struct {
 
 	MultiProbePolicy *MultiProbePolicyInfo `json:"multi_probe_policy,omitempty"`
 	MultiProbeTarget *MultiProbeTargetInfo `json:"multi_probe_target,omitempty"`
+	Candidate        *CandidateInfo        `json:"candidate,omitempty"`
 }
 
 var ErrInvalidFrame = errors.New("invalid helper IPC frame")
@@ -237,6 +238,12 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 
 	if !validMultiProbeTargetResponse(req, resp) {
 		return Response{}, errors.New("invalid multi-source target response")
+	}
+
+	// helperctl runs in the helper's own runtime, so this is the same wall clock; the helper's
+	// monotonic deadline stays authoritative.
+	if !validCandidateResponse(req, resp, receivedAt) {
+		return Response{}, errors.New("invalid or expired egress candidate response")
 	}
 
 	// The attempt must lie between writing this request and reading its answer.

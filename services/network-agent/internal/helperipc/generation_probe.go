@@ -246,10 +246,15 @@ func (e *verifiedMultiProbeEvidence) fresh(now time.Time) bool {
 	return age >= 0 && age < verifiedProbeEvidenceTTL
 }
 
-// invalidateEvidenceLocked drops the evidence of profileID. The caller must hold l.mu.
+// invalidateEvidenceLocked drops the unconsumed evidence and the local candidate of profileID.
+// The caller must hold l.mu.
 func (l *LabLifecycle) invalidateEvidenceLocked(profileID string) {
 	if l.verifiedEvidence != nil && l.verifiedEvidence.intent.ProfileID == profileID {
 		l.verifiedEvidence = nil
+	}
+
+	if l.localCandidate != nil && l.localCandidate.info.ProfileID == profileID {
+		l.localCandidate = nil
 	}
 }
 

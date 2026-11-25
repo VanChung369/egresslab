@@ -334,6 +334,32 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 		resp.OK = true
 		resp.Labs = items
 
+	case helperauth.OpReserveEgressCandidate:
+		// Only the generation-bound (V2) lifecycle has evidence to consume.
+		if labs == nil || labs.generationProbes == nil || v == nil {
+			return refuse(CodeOperationDisabled, "operation not enabled")
+		}
+
+		if ctx.Err() != nil {
+			return refuse(CodeRuntimeUnavailable, "helper is shutting down")
+		}
+
+		candidateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lifecycleTimeout)
+		candidate, err := labs.reserveEgressCandidate(candidateCtx, req, v, opts.RuntimeID)
+		cancel()
+
+		if err != nil {
+			code := labCode(err)
+			if code != CodeAuthorizationDenied && code != CodeEvidenceUnavailable {
+				log.Printf("egress candidate reservation: %s: %v", code, err)
+			}
+
+			return refuse(code, labMessages[code])
+		}
+
+		resp.OK = true
+		resp.Candidate = &candidate
+
 	case helperauth.OpPermitProbe:
 		if labs == nil || labs.probes == nil || labs.multiProbes != nil {
 			return refuse(CodeOperationDisabled, "operation not enabled")

@@ -64,6 +64,8 @@ func labCode(err error) string {
 		return CodeInvalidRequest
 	case errors.Is(err, ErrStageNotFound):
 		return CodeStageNotFound
+	case errors.Is(err, errEvidenceUnavailable):
+		return CodeEvidenceUnavailable
 	case errors.Is(err, errLabUnavailable):
 		return CodeRuntimeUnavailable
 	case errors.Is(err, ErrLabKernelIncompatible):
@@ -84,6 +86,7 @@ var labMessages = map[string]string{
 	CodeLabBusy:             "another lab operation is in progress, or a managed tunnel holds the only tunnel slot",
 	CodeLabNotFound:         "no lab for this profile",
 	CodeStageNotFound:       "WireGuard stage not found; read stage-info and sign again",
+	CodeEvidenceUnavailable: "no matching fresh verified egress evidence",
 	CodeOwnershipMismatch:   "lab ownership mismatch",
 	CodeLabExists:           "profile already owns a lab",
 	CodeLabLimit:            "lab limit reached",
@@ -133,6 +136,7 @@ type LabLifecycle struct {
 
 	generationProbes GenerationProbeTunnelBackend // nil unless the generation-bound (V2) probe is enabled
 	verifiedEvidence *verifiedMultiProbeEvidence  // the last checked V2 attempt, if still valid
+	localCandidate   *localEgressCandidate        // the evidence one reservation consumed; not a lease
 }
 
 func NewLabLifecycle(backend LabBackend) *LabLifecycle {
@@ -153,7 +157,8 @@ func validLifecycleIntent(op string, in *helperauth.Intent) bool {
 		in.Operation != op ||
 		!helperauth.ValidProfileID(in.ProfileID) ||
 		in.ProbeIPv4 != "" ||
-		in.TunnelGeneration != "" {
+		in.TunnelGeneration != "" ||
+		in.EvidenceNonce != "" {
 		return false
 	}
 
@@ -357,6 +362,7 @@ func (l *LabLifecycle) Close() error {
 
 	l.closed = true
 	l.verifiedEvidence = nil
+	l.localCandidate = nil
 
 	var errs []error
 

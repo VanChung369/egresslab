@@ -33,6 +33,10 @@ const (
 	// OpPermitMultiProbeV2 is the V1 policy bound to one tunnel generation as well.
 	OpPermitMultiProbeV2 = "PermitMultiProbeV2"
 
+	// OpReserveEgressCandidate consumes the helper's evidence of one PermitMultiProbeV2 attempt. It
+	// names that attempt, never an address: the address comes from the helper's own evidence.
+	OpReserveEgressCandidate = "ReserveEgressCandidateV1"
+
 	// The helper picks the namespace, so a CreateLab intent signs "namespace":"".
 	OpCreateLab = "CreateLab"
 
@@ -67,6 +71,7 @@ type Intent struct {
 
 	// Last and omitted when empty, so every earlier intent signs exactly the same bytes as before.
 	TunnelGeneration string `json:"tunnel_generation,omitempty"`
+	EvidenceNonce    string `json:"evidence_nonce,omitempty"` // the consumed V2 attempt's nonce
 }
 
 type Claims struct {
@@ -108,8 +113,13 @@ func validateIntent(in Intent) error {
 		return ErrInvalidCapability
 	}
 
-	// Only V2 may carry a tunnel generation.
-	if in.Operation != OpPermitMultiProbeV2 && in.TunnelGeneration != "" {
+	// Only V2 and the reservation that consumes it may carry a tunnel generation, and only the
+	// reservation an evidence reference.
+	if in.Operation != OpPermitMultiProbeV2 && in.Operation != OpReserveEgressCandidate && in.TunnelGeneration != "" {
+		return ErrInvalidCapability
+	}
+
+	if in.Operation != OpReserveEgressCandidate && in.EvidenceNonce != "" {
 		return ErrInvalidCapability
 	}
 
@@ -148,6 +158,12 @@ func validateIntent(in Intent) error {
 
 	case OpPermitMultiProbeV2:
 		if in.StageID != "" || !ValidMultiProbePin(in.ProbeIPv4) || !ValidTunnelGeneration(in.TunnelGeneration) {
+			return ErrInvalidCapability
+		}
+
+	case OpReserveEgressCandidate:
+		if in.StageID != "" || !ValidMultiProbePin(in.ProbeIPv4) || !ValidTunnelGeneration(in.TunnelGeneration) ||
+			!ValidCapabilityNonce(in.EvidenceNonce) {
 			return ErrInvalidCapability
 		}
 

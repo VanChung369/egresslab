@@ -183,7 +183,7 @@ func olderHelperDisabled(req Request, resp Response) bool {
 		resp.Operation == "" && resp.Code == CodeOperationDisabled &&
 		len(resp.Items) == 0 && resp.Info == nil && resp.Lab == nil && len(resp.Labs) == 0 &&
 		resp.Stage == nil && resp.Probe == nil && resp.MultiProbe == nil && resp.MultiProbePolicy == nil &&
-		resp.MultiProbeTarget == nil
+		resp.MultiProbeTarget == nil && resp.Candidate == nil
 }
 
 func validMultiProbeResponse(req Request, resp Response) bool {
@@ -296,8 +296,9 @@ func (l *LabLifecycle) executeMultiProbe(
 	// Monotonic, for the evidence deadline.
 	acceptedAt := time.Now()
 
-	// An accepted attempt drops the previous evidence, even if it then fails.
+	// An accepted attempt drops the previous evidence and candidate, even if it then fails.
 	l.verifiedEvidence = nil
+	l.localCandidate = nil
 
 	// Ownership is kept, as faulted, while the attempt runs.
 	faulted := lab

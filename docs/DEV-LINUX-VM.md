@@ -450,6 +450,18 @@ egresslab-controller-lab -approve probe-egress-multi <profile ID> <namespace>
 
 `multi-probe-target` is read-only and needs a configured tunnel (a sealed lab answers `INVALID_REQUEST`). The verification result adds `tunnel_generation` and `attempt_nonce` to the evidence of Step 29C.4c, still with `network_ready: false`. Two successful attempts without reconnecting report the same generation and address with different nonces; after a confirmed `disconnect` and `connect-tunnel`, `multi-probe-target` reports a different generation, and capabilities or evidence of the old generation are not accepted for the new tunnel (the unit tests cover the stale capability; do not mint one by hand). The generation, the pin and the nonce never appear in helperctl arguments. Never fall back to a legacy operation. The controller also refuses evidence 60 s or older at receipt, by the host clock against the runtime's `observed_at` with no skew allowance, which is one more reason to keep the clocks synchronized. The output is diagnostic evidence only: no egress lease or application networking is enabled.
 
+### Candidate reservation testing (Step 31A)
+
+`ReserveEgressCandidateV1` is tested with the helper's fake managed tunnel backend, real signatures and real Unix sockets; no client sends it yet, and it does not run against a real tunnel. Development stays in the Windows repository; the Linux-only tests run against the same mounted repository through `wsl.exe`, as a normal user (never root). From PowerShell, in `services\network-agent`:
+
+```powershell
+go test -count=1 -run 'TestCandidate' ./internal/helperauth ./internal/helperipc
+go test -count=100 -run '^TestCandidateConcurrentConsumption$' ./internal/helperipc
+wsl -d Ubuntu-22.04 -- bash -lc 'cd /mnt/d/project/egresslab/services/network-agent && go test -race -count=100 -run "^TestCandidateConcurrentConsumption$" ./internal/helperipc && go test -race -count=1 ./...'
+```
+
+`-race` needs cgo and a C compiler, which a plain Windows Go install lacks; run it in WSL. Use `bash -lc` there: `wsl --exec go` does not find a Go installed with snap, because `/snap/bin` is set only by a login shell. Do not hand-craft reservation capabilities or open application networking.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
@@ -476,4 +488,4 @@ If DNS returns several addresses, do not take the first one blindly. The provide
 
 ## Next Milestone
 
-Step 31: a candidate reservation that consumes the helper's trusted evidence record within its deadline, on top of the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover of helper, helperctl and controller (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded); a coded worker failure reason in the helper log would explain it. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.
+Step 31B: a shared atomic IP registry in the controller, on top of the local egress candidate of Step 31A, which consumes the helper's trusted evidence record within its deadline, and of the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover of helper, helperctl and controller (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded); a coded worker failure reason in the helper log would explain it. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.

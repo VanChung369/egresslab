@@ -1,15 +1,17 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 30B.2 — generation-bound multi-source verification, controller to helper.** A
-controller CLI signs `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV2` and drives
-the helper's sealed lab, tunnel and diagnostic probes in the Linux runtime; the helper holds the encrypted WireGuard configs,
-disables IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once and pins
-it, checks the peer state and the IPv4 addresses, MTU, rules and routes the kernel reports against
-the staged config, and stays the source of truth for lab and tunnel state. A single-source probe
-yields one observation of the tunnel's public IPv4 address, and a multi-source probe the unanimous
-evidence of two independent HTTPS sources; both are printed only. Windows (WSL2), Linux and macOS
-(Lima, Keychain) are verified end to end. No lease or proxy traffic exists; the sections from "Typed
-operations only" on are partly design.
+Status: **Step 31A — trusted egress candidate reservation (helper only).** A controller CLI signs
+`CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV2` and drives the helper's sealed
+lab, tunnel and diagnostic probes in the Linux runtime; the helper holds the encrypted WireGuard
+configs, disables IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once
+and pins it, checks the peer state and the IPv4 addresses, MTU, rules and routes the kernel reports
+against the staged config, and stays the source of truth for lab and tunnel state. A single-source
+probe yields one observation of the tunnel's public IPv4 address, and a multi-source probe the
+unanimous evidence of two independent HTTPS sources; both are printed only. The helper can consume
+that evidence once into a local egress candidate (`ReserveEgressCandidateV1`), which no client sends
+yet; a candidate is not a reservation across runtimes and not a lease. Windows (WSL2), Linux and
+macOS (Lima, Keychain) are verified end to end. No lease or proxy traffic exists; the sections from
+"Typed operations only" on are partly design.
 
 ## Implemented
 
@@ -63,6 +65,8 @@ operations only" on are partly design.
   `MultiProbeTarget` behind `-enable-multi-probe`, with the ident.me pin from
   `/etc/egresslab/multi-probe-pin` (see "Trusted multi-source provisioning" and "Sticky IP");
   `PermitMultiProbeV1` (Steps 29C.4a to 30B.1) is disabled in that mode.
+- `ReserveEgressCandidateV1` in the same mode: one verified V2 attempt consumed into a local
+  candidate (see "Egress candidates"). No client sends it yet.
 - Controller side (see "Controller and runtimes"):
   - an Ed25519 signer for `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV2`
     (the `PermitMultiProbeV1` signer stays for compatibility tests), checked against the five golden
@@ -89,6 +93,8 @@ operations only" on are partly design.
 - A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
+- A shared, durable uniqueness authority for egress addresses, reservations, leases and their
+  activation (Steps 31B to 31E); helperctl and the controller do not send `ReserveEgressCandidateV1`.
 - Open from earlier steps: egress-IP leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
 - DNS for applications in the lab (a session resolver, with filesystem and resolver IPC
@@ -148,11 +154,14 @@ operations only" on are partly design.
 - The helper socket accepts only the configured agent UID. It answers `Ping`, `RecoverScan`,
   `HelperInfo`, the `AuthorizeCheck` dry-run and, with the lifecycle flag, `ListLabs`,
   `CreateLab`, `VerifyLab` and `DeleteLab`, plus `StageInfo` with `-enable-vault` and
-  `ConnectTunnel` and `Disconnect` with `-enable-tunnel`, and `PermitProbe` with `-enable-probe`
-  (`TestPeerRejection`, `TestPeerIdentityAndReadOnlyOperations`,
+  `ConnectTunnel` and `Disconnect` with `-enable-tunnel`, `PermitProbe` with `-enable-probe`, and
+  `MultiProbePolicy`, `MultiProbeTarget`, `PermitMultiProbeV2` and `ReserveEgressCandidateV1` with
+  `-enable-multi-probe` (`TestPeerRejection`, `TestPeerIdentityAndReadOnlyOperations`,
   `TestMutationWithValidCapabilityIsRefused`, `TestLabLifecycleIPCRefusals`, `TestListLabsRefusals`,
   `TestStageInfoIPC`, `TestSignedTunnelIPC`, `TestTunnelOperationsDisabledWithoutBackend`,
-  `TestSignedProbeIPC`, `TestProbeDisabledOverIPC`).
+  `TestSignedProbeIPC`, `TestProbeDisabledOverIPC`, `TestMultiProbePolicyIPC`,
+  `TestGenerationProbeIPC`, `TestGenerationProbeDisabledOverIPC`, `TestCandidateReservationIPC`,
+  `TestCandidateReservationDisabledWithoutGenerations`).
 
 Changing any of these needs the helper below first.
 
@@ -189,6 +198,8 @@ The helper exposes a fixed set of operations, never a command line:
 `PermitMultiProbeV1{profile_id, namespace, probe_ipv4}` (the provisioned ident.me pin),
 `PermitMultiProbeV2{profile_id, namespace, probe_ipv4, tunnel_generation}` (V1 bound to one tunnel),
 `MultiProbeTarget{profile_id, namespace}` (read-only),
+`ReserveEgressCandidateV1{profile_id, namespace, probe_ipv4, tunnel_generation, evidence_nonce}`
+(consumes one verified V2 attempt),
 `VerifyLab`, `Disconnect`, `DeleteLab`, `RecoverScan`, `RecoverClean`.
 
 Every argument is validated with the existing patterns: `egresslab-lab-<16 hex>`,
@@ -197,17 +208,18 @@ Every argument is validated with the existing patterns: `egresslab-lab-<16 hex>`
 
 ## Authorization
 
-`CreateLab` and each operation that opens traffic (`ConnectTunnel`, `PermitProbe`,
-`PermitMultiProbeV1`, `PermitMultiProbeV2`) need a
-capability that the controller mints. Implemented format, version 1:
+`CreateLab`, each operation that opens traffic (`ConnectTunnel`, `PermitProbe`,
+`PermitMultiProbeV1`, `PermitMultiProbeV2`) and `ReserveEgressCandidateV1` need a capability that
+the controller mints. Implemented format, version 1:
 
 ```text
 claims = {"version":1,
           "intent":{"operation":..., "profile_id":"profile_<16 hex>",
                     "namespace":"egresslab-lab-<16 hex>",  ("" for CreateLab)
                     "stage_id":"wgstage_<32 hex>"          (ConnectTunnel only)
-                    "probe_ipv4":"<dotted IPv4>",          (PermitProbe, PermitMultiProbeV1, V2)
-                    "tunnel_generation":"tunnelgen_<32 hex>"}, (PermitMultiProbeV2 only)
+                    "probe_ipv4":"<dotted IPv4>",          (PermitProbe, PermitMultiProbeV1, V2, Reserve...)
+                    "tunnel_generation":"tunnelgen_<32 hex>",  (PermitMultiProbeV2, ReserveEgressCandidateV1)
+                    "evidence_nonce":"<32 hex>"},          (ReserveEgressCandidateV1 only)
           "helper_id":"helper_<32 hex>", "nonce":"<32 hex>",
           "issued_at":<unix s>, "not_after":<unix s, at most issued_at + 30>}
 
@@ -525,6 +537,7 @@ Every refusal carries a `code`. Clients act on it; the message is for people. On
 | `KERNEL_INCOMPATIBLE` | new namespaces would get extra devices |
 | `STATE_UNCERTAIN` | a create, tunnel connect or cleanup may have left kernel state behind; delete the lab, or check recovery and restart the helper |
 | `STAGE_NOT_FOUND` | the vault holds no such stage for the profile (`StageInfo`, `ConnectTunnel`); the lab is untouched |
+| `EVIDENCE_UNAVAILABLE` | no fresh, unconsumed V2 evidence matches the reservation (none, expired or already consumed) |
 | `INTERNAL` | anything else; details are in the helper log |
 
 The controller adds `RUNTIME_UNTRUSTED`, and reports a `CreateLab` or `ConnectTunnel` that failed
@@ -1411,3 +1424,69 @@ after `disconnect` (`multi-probe-target` then answered `INVALID_REQUEST`) and a 
 the new generation and a new nonce. Afterwards the lab had no process and no `egresslab_probe4` set
 or permit, the sealed ruleset remained, and `verify-lab` answered `tunnel_configured`; `disconnect`,
 `delete-lab` and the helper's stop left no namespace, underlay table or worker process.
+
+## Egress candidates
+
+| Step | Content |
+|---|---|
+| 31A | Trusted evidence consumption and a local candidate in the helper |
+| 31B | A shared atomic IP registry in the controller |
+| 31C | Durable reservations and inter-process locking |
+| 31D | Signed reservation integration and the lease lifecycle |
+| 31E | Concurrent collision and recovery tests |
+
+The states stay separate; none of them is an `active` flag:
+
+| State | Meaning |
+|---|---|
+| Observation | an address seen by one probe |
+| Verified evidence | a V2 attempt the helper checked (Step 30B.1), for 60 s at most |
+| Local candidate | that evidence, consumed once, bound to its tunnel generation (Step 31A) |
+| Global reservation | an address held exclusively by the shared authority (Steps 31B, 31C) |
+| Active lease | the right to use the address, tied to the runtime lifecycle (Step 31D) |
+| Network ready | application traffic allowed |
+
+`EgressCandidateRegistry` and the lease registry of the earlier lab CLIs are not that authority:
+they take observations from their caller, keep no helper epoch or tunnel generation, and lock one
+process only. Two runtimes, each with its own helper, can see the same exit address.
+
+### Trusted egress candidate reservation (Step 31A)
+
+`ReserveEgressCandidateV1{profile_id, namespace, probe_ipv4, tunnel_generation, evidence_nonce}`
+consumes the helper's verified evidence of one `PermitMultiProbeV2` attempt. `probe_ipv4` is the
+ident.me pin of that attempt's source policy and `evidence_nonce` its capability nonce; no field
+names an address, which comes only from the helper's evidence. The intent is signed like the others
+(the sixth golden vector, cross-checked with OpenSSL 3), and only this operation may carry an
+`evidence_nonce`. Only the generation-bound (V2) lifecycle answers it; a Step 31A helper in any
+other mode answers `OPERATION_DISABLED`. An older helper rejects the request frame itself, because
+its strict decoder does not know `evidence_nonce`, and the client reports that as an invalid
+response, not as `OPERATION_DISABLED`; recognizing older helpers is left to the client of Step
+31D.
+
+Before accepting the capability, under the lifecycle lock, the helper requires a configured tunnel
+(`INVALID_REQUEST` for a sealed lab, `LAB_FAULTED` for a faulted one), fresh evidence
+(`EVIDENCE_UNAVAILABLE` when there is none, it expired or it was consumed), a request equal to the
+one intent that evidence backs, the V2 policy with the evidence's helper epoch and pin, the
+evidence's tunnel generation as the current one, and a reservation nonce other than the evidence's
+(`AUTHORIZATION_DENIED` otherwise, also for a bad or expired signature). These refusals leave the
+evidence untouched.
+
+Accepting the capability consumes the evidence, under the same lock: two requests for one attempt,
+even with different signed nonces, yield at most one candidate (the other gets `LAB_BUSY` or
+`EVIDENCE_UNAVAILABLE`). From then on nothing restores it. The helper verifies the tunnel again
+(link, firewall, underlay, peer, addresses and routes) and checks that the generation did not
+change; any failure faults the lab and removes the tunnel as `VerifyLab` does, and returns no
+candidate. The receipt names the profile, namespace, generation, V2 policy and helper identity, the
+evidence and reservation nonces, the address, `observed_at` and `expires_at`, with
+`network_ready: false`; the client checks it against its request and refuses it once expired.
+
+The candidate keeps the evidence's own deadline: consuming evidence 20 s after it was recorded
+leaves 40 s, not a new 60. `expires_at` is wall-clock metadata; the helper keeps the monotonic
+deadline, and the verification runs under it. If the deadline passes during that verification, the
+lab is faulted like any other failed verification. The helper holds one candidate; a new authorized
+attempt, `Disconnect`, `DeleteLab`, a reconnect, a failed verification or cleanup and helper
+shutdown drop it, and an expired one is no longer fresh. A candidate is not a global reservation,
+an active lease or permission to send traffic: two helpers can produce candidates for the same
+address until the shared authority exists. helperctl and the controller do not send the operation
+yet, and it has not run on a real tunnel; the tests use real Unix sockets and signatures with the
+fake kernel backend.

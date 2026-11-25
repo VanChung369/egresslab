@@ -66,8 +66,9 @@ func (l *LabLifecycle) connectTunnelLocked(
 		return LabInfo{}, fmt.Errorf("%w: %w", errLabAuthorization, err)
 	}
 
-	// A new tunnel inherits no evidence.
+	// A new tunnel inherits no evidence and no candidate.
 	l.verifiedEvidence = nil
+	l.localCandidate = nil
 
 	// Tracked before any kernel change.
 	l.tunnelProfile = lab.ProfileID
