@@ -35,9 +35,15 @@ func testLayout(t *testing.T) vaultLayout {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	}
+
+	// Modes are set explicitly: under umask 002 (Lima, many desktops) the directories are group-writable.
+	for _, dir := range []string{root, filepath.Dir(l.keyDir), filepath.Dir(l.dataDir)} {
+		chmod(t, dir, 0o755)
+	}
+
+	for _, dir := range []string{l.keyDir, l.dataDir} {
+		chmod(t, dir, 0o700)
 	}
 
 	return l

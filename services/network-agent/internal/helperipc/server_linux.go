@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"regexp"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -327,4 +328,32 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 	}
 
 	return resp
+}
+
+func (l *LabLifecycle) snapshot() ([]LabInfo, error) {
+	if l == nil {
+		return nil, errLabUnavailable
+	}
+
+	if !l.mu.TryLock() {
+		return nil, errLabBusy
+	}
+	defer l.mu.Unlock()
+
+	if l.closed {
+		return nil, errLabUnavailable
+	}
+
+	items := make([]LabInfo, 0, len(l.labs))
+	for _, lab := range l.labs {
+		items = append(items, lab)
+	}
+
+	sort.Slice(items, func(i, j int) bool { return items[i].ProfileID < items[j].ProfileID })
+
+	return items, nil
+}
+
+func isTunnelOp(op string) bool {
+	return op == helperauth.OpConnectTunnel || op == OpDisconnect
 }

@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// Unverified: written from the security(1) man page, not yet run on macOS.
+// Verified on macOS 15.3.2 with an unlocked login Keychain; a locked Keychain has not been tested.
 const (
 	backendName     = "macOS login Keychain"
 	keychainService = "dev.egresslab.controller-signing"
@@ -122,12 +122,12 @@ func (s keychainStore) create(seed []byte) error {
 
 	stored, err := s.load()
 	if err != nil {
-		return errors.Join(fmt.Errorf("Keychain did not store the signing key: %w", err), runErr)
+		return errors.Join(fmt.Errorf("the Keychain did not store the signing key: %w", err), runErr)
 	}
 	defer clear(stored)
 
 	if !bytes.Equal(stored, seed) {
-		return errors.New("Keychain holds a different signing key; it was not replaced")
+		return errors.New("the Keychain holds a different signing key; it was not replaced")
 	}
 
 	return nil

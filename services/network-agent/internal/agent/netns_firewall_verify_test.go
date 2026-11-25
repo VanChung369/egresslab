@@ -160,11 +160,10 @@ func mutateChain(doc map[string]any, name, field string, value any) map[string]a
 // fakeKernel models the lab namespace ruleset: applying the seal installs the fixture, applying any
 // other script appends one rule, and tests can tamper with it out of band.
 type fakeKernel struct {
-	t        *testing.T
-	ruleset  map[string]any
-	applied  []string
-	listErr  error
-	tampered bool
+	t       *testing.T
+	ruleset map[string]any
+	applied []string
+	listErr error
 }
 
 func (k *fakeKernel) run(_ context.Context, _ string, script string, check bool) error {

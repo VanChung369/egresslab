@@ -222,17 +222,17 @@ func run(file, probeURL string) (resultErr error) {
 		)
 	}
 
-	status, err := registry.Evaluate(agent.EgressObservation{
+	if _, err := registry.Evaluate(agent.EgressObservation{
 		ProfileID:  profileID,
 		ObservedIP: observed.String(),
 		ObservedAt: time.Now(),
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("egress candidate rejected: %w", err)
 	}
 
 	// Pin the observed IP (in memory for this lab): any later observation must match it.
-	if status, err = registry.Activate(profileID); err != nil {
+	status, err := registry.Activate(profileID)
+	if err != nil {
 		return fmt.Errorf("pin egress IP: %w", err)
 	}
 

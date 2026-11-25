@@ -32,10 +32,6 @@ func NewTunnelLifecycle(backend LabBackend, tunnels TunnelBackend) *LabLifecycle
 // errTunnelSlotBusy is LAB_BUSY that does not clear on its own: Disconnect or DeleteLab frees it.
 var errTunnelSlotBusy = fmt.Errorf("%w: the managed tunnel slot is held", errLabBusy)
 
-func isTunnelOp(op string) bool {
-	return op == helperauth.OpConnectTunnel || op == OpDisconnect
-}
-
 // The caller must hold l.mu.
 func (l *LabLifecycle) connectTunnelLocked(
 	ctx context.Context,

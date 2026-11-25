@@ -311,7 +311,19 @@ egresslab-controller-lab -approve connect-tunnel <profile ID> <namespace> <stage
 egresslab-controller-lab -approve disconnect <profile ID> <namespace>
 ```
 
-`-runtime auto` uses WSL on Windows (`-wsl-distro`; trust and lab commands need it named), Lima on macOS (`-lima-instance`, default `egresslab`) and the host itself on Linux. A profile stays bound to the runtime it was first used on (`unbind-profile` and `untrust-runtime` release it). Every failure carries a code such as `RECOVERY_REQUIRED` or `RUNTIME_UNTRUSTED`. Install `egresslab-helper` and `egresslab-helperctl` in `/usr/local/bin` inside the runtime (see above). The Lima and Keychain paths are written from the docs but have not been run on a Mac; see `docs/PRIVILEGED-HELPER.md`. If `create-lab` reports an uncertain result, run `list-labs` before retrying.
+`-runtime auto` uses WSL on Windows (`-wsl-distro`; trust and lab commands need it named), Lima on macOS (`-lima-instance`, default `egresslab`) and the host itself on Linux. A profile stays bound to the runtime it was first used on (`unbind-profile` and `untrust-runtime` release it). Every failure carries a code such as `RECOVERY_REQUIRED` or `RUNTIME_UNTRUSTED`. Install `egresslab-helper` and `egresslab-helperctl` in `/usr/local/bin` inside the runtime (see above). On macOS, the Lima and Keychain paths are verified end to end (macOS 15.3.2, Lima 2.3.0, Ubuntu 24.04 guest with nft 1.0.9); copy the public key into the VM as shown below. If `create-lab` reports an uncertain result, run `list-labs` before retrying.
+
+On macOS, the key lives in the login Keychain. Copy the public key (not secret) into the Lima VM, then install it inside the VM:
+
+```bash
+# macOS
+egresslab-controller-lab public-key > /tmp/helper-auth.pub
+limactl copy /tmp/helper-auth.pub egresslab:/tmp/helper-auth.pub
+
+# Inside the VM
+sudo install -d -o root -g root -m 0755 /etc/egresslab
+sudo install -o root -g root -m 0644 /tmp/helper-auth.pub /etc/egresslab/helper-auth.pub
+```
 
 ### Managed WireGuard vault (Step 27A)
 
@@ -341,4 +353,4 @@ Add `-enable-tunnel` as well (it needs `-enable-vault`). On a sealed lab, `egres
 
 ## Next Milestone
 
-Run the Lima and macOS Keychain paths on a Mac, then move tunnel operations behind the helper: the controller signs `ConnectTunnel` (Step 27B.3) and the helper checks the WireGuard peer state and the pinned endpoint (Step 27C.1, see `docs/PRIVILEGED-HELPER.md`); next come address, MTU and route verification (Step 27C.2), then hostname endpoints and DNS policy (Step 27C.3).
+Address, MTU and route verification for the managed tunnel (Step 27C.2, see `docs/PRIVILEGED-HELPER.md`), then hostname endpoints and DNS policy (Step 27C.3).

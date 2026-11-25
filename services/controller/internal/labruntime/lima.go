@@ -12,9 +12,11 @@ const defaultLimaInstance = "egresslab"
 // WSL distribution and Lima instance names.
 var instancePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
-// limaLauncher is unverified: written from the limactl docs, not yet run on macOS. The docs do not
-// say whether stdin reaches the command (create-lab needs it) or whether a guest shell re-parses
-// the arguments; transport arguments are restricted to plain tokens for that reason.
+var errLimaMissing = errors.New("limactl not found in PATH: install Lima")
+
+// limaLauncher: "limactl shell" forwards stdin to the command (verified with Lima 2.3.0 on macOS
+// 15.3.2; create-lab and connect-tunnel need it). The command line reaches the guest through ssh,
+// so transport arguments stay restricted to plain tokens.
 type limaLauncher struct{ instance string }
 
 func newLima(instance string) (launcher, error) {
@@ -35,7 +37,7 @@ func (l limaLauncher) name() string   { return "lima:" + l.instance }
 
 func (l limaLauncher) detect() error {
 	if _, err := exec.LookPath("limactl"); err != nil {
-		return errors.New("Lima is not installed (limactl not found in PATH)")
+		return errLimaMissing
 	}
 
 	return nil
@@ -48,7 +50,7 @@ func (l limaLauncher) args(args ...string) []string {
 func (l limaLauncher) command(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	limactl, err := exec.LookPath("limactl")
 	if err != nil {
-		return nil, errors.New("Lima is not installed (limactl not found in PATH)")
+		return nil, errLimaMissing
 	}
 
 	return exec.CommandContext(ctx, limactl, l.args(args...)...), nil

@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-var ErrLinuxRequired = errors.New("Linux is required")
+var ErrLinuxRequired = errors.New("operation requires Linux")
 
 type ClassifiedLink struct {
 	Index            int    `json:"index"`

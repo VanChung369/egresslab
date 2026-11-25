@@ -4,9 +4,9 @@ Status: **Step 27C.1 — WireGuard peer verification and endpoint pinning.** A c
 signs `CreateLab` and `ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in
 the Linux runtime; the helper holds the encrypted WireGuard configs, checks the peer state the
 kernel reports against the staged config, and stays the source of truth for lab and tunnel
-state. Windows (WSL2) and Linux are verified end to end; macOS (Lima, Keychain) is
-implemented but has not been run. Probes and proxy traffic are still not implemented; the
-sections from "Typed operations only" on are partly design.
+state. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to end. Probes and
+proxy traffic are still not implemented; the sections from "Typed operations only" on are
+partly design.
 
 ## Implemented
 
@@ -74,7 +74,6 @@ sections from "Typed operations only" on are partly design.
 - A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
-- A macOS run of the Lima and Keychain paths.
 - Open from earlier steps: `VerifyLab` still compares the firewall with the state read right
   after sealing (only the managed tunnel backend also checks the intended policy); egress-IP
   leases across runtimes; a kill-switch independent of the controller; refusing to delete a
@@ -328,7 +327,7 @@ never enters Linux and only the signed capability crosses, on stdin.
 |---|---|---|---|
 | Windows | `wsl` (`wsl.exe --exec`) | DPAPI, current user (`controller-signing.dpapi`) | yes, end to end |
 | Linux | `native` (direct exec) | file, mode 0600 (`controller-signing.key`) | yes, end to end |
-| macOS | `lima` (`limactl shell`) | login Keychain (`security`) | no: written from the docs, not run |
+| macOS | `lima` (`limactl shell`) | login Keychain (`security`) | yes, end to end (macOS 15.3.2, Lima 2.3.0) |
 | any | `remote` | — | not implemented |
 
 `-runtime auto` picks by host OS. The key sits in the controller data directory
@@ -340,8 +339,12 @@ right before each signature.
   programs running as the same user.
 - **The Linux file key** is protected by Unix permissions only. A Secret Service backend is not
   implemented.
-- **Lima (unverified):** its docs do not say whether `limactl shell` forwards stdin, which
-  `create-lab` and `connect-tunnel` need, or whether a guest shell re-parses arguments. The transport therefore
+- **The macOS key** is a generic password in the login Keychain (service
+  `dev.egresslab.controller-signing`, one account per data directory), written through
+  `security -i` on stdin, never in argv. It protects the key against other macOS accounts, not
+  against programs running as the same user. Only an unlocked Keychain has been tested.
+- **Lima:** `limactl shell` forwards stdin, which `create-lab` and `connect-tunnel` need
+  (verified with Lima 2.3.0). The command line reaches the guest through ssh, so the transport
   passes only plain tokens.
 - **Clocks:** the Windows controller mints with the Windows clock, and the helper checks with
   the WSL clock. With no skew allowance, a WSL clock behind Windows across a second boundary
