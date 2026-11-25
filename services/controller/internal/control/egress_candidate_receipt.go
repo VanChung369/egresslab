@@ -143,10 +143,14 @@ func stableReservationClock(from, to time.Time) bool {
 	return elapsed >= 0 && step >= -time.Second && step <= time.Second
 }
 
-// eligibleAt checks the monotonic deadline fixed at admission and, again, the helper's cutoff on
-// the wall clock, so a wall-clock step after admission cannot carry eligibility past the cutoff.
+// eligibleAt checks the monotonic deadline fixed at admission and, on the wall clock, that deadline
+// and the helper's cutoff again, so a wall-clock step after admission can neither carry eligibility
+// past the cutoff nor produce a record whose stored times are out of order.
 func eligibleAt(eligibleUntil, candidateExpiresAt, at time.Time) bool {
-	return at.Before(eligibleUntil) && at.Round(0).Before(candidateExpiresAt.Add(-labProbeClockSkew))
+	wall := at.Round(0)
+
+	return at.Before(eligibleUntil) && wall.Before(eligibleUntil.Round(0)) &&
+		wall.Before(candidateExpiresAt.Add(-labProbeClockSkew))
 }
 
 // validateCandidateAdmission requires every identity and piece of evidence to agree: the trusted

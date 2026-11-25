@@ -1,19 +1,20 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 31B — shared atomic reservation registry (controller core).** A controller CLI signs
-`CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV2` and drives the helper's sealed
-lab, tunnel and diagnostic probes in the Linux runtime; the helper holds the encrypted WireGuard
-configs, disables IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once
-and pins it, checks the peer state and the IPv4 addresses, MTU, rules and routes the kernel reports
-against the staged config, and stays the source of truth for lab and tunnel state. A single-source
-probe yields one observation of the tunnel's public IPv4 address, and a multi-source probe the
-unanimous evidence of two independent HTTPS sources; both are printed only. The helper can consume
-that evidence once into a local egress candidate (`ReserveEgressCandidateV1`), and the controller
-has the in-process core of the shared registry that holds each address for one tunnel owner; neither
-is wired to a client yet, and neither is a lease. Windows (WSL2), Linux and macOS (Lima, Keychain)
-are verified end to end, except that the multi-source probe has run on WSL2 and Lima only, not on
-native Linux. No lease or proxy traffic exists; the sections from "Typed operations only" on are
-partly design.
+Status: **Step 31C — durable reservations and inter-process locking (controller core).** A
+controller CLI signs `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV2` and drives
+the helper's sealed lab, tunnel and diagnostic probes in the Linux runtime; the helper holds the
+encrypted WireGuard configs, disables IPv6 and drops DNS transports inside its labs, resolves a
+hostname endpoint once and pins it, checks the peer state and the IPv4 addresses, MTU, rules and
+routes the kernel reports against the staged config, and stays the source of truth for lab and
+tunnel state. A single-source probe yields one observation of the tunnel's public IPv4 address, and
+a multi-source probe the unanimous evidence of two independent HTTPS sources; both are printed only.
+The helper can consume that evidence once into a local egress candidate
+(`ReserveEgressCandidateV1`), and the controller has the core of the shared authority that holds
+each address for one tunnel owner, durably and across controller processes (an append-only journal
+under an OS file lock); neither is wired to a client yet, and neither is a lease. Windows (WSL2),
+Linux and macOS (Lima, Keychain) are verified end to end, except that the multi-source probe has run
+on WSL2 and Lima only, not on native Linux. No lease or proxy traffic exists; the sections from
+"Typed operations only" on are partly design.
 
 ## Implemented
 
@@ -95,9 +96,10 @@ partly design.
 - A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
-- A uniqueness authority shared between controller processes and durable, safe release, leases
-  and their activation (Steps 31C to 31E); the controller's reservation registry (Step 31B) is an
-  in-process core, and helperctl and the controller do not send `ReserveEgressCandidateV1`.
+- Safe release, leases and their activation, and the production reservation and provisioning
+  commands (Steps 31D and 31E); the controller's durable reservation authority (Steps 31B and 31C)
+  is not wired to a command, and helperctl and the controller do not send
+  `ReserveEgressCandidateV1`.
 - Open from earlier steps: egress-IP leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
 - DNS for applications in the lab (a session resolver, with filesystem and resolver IPC
@@ -1501,11 +1503,27 @@ registry (`internal/control/egress_reservation.go`, see `docs/ARCHITECTURE.md`) 
 only when the helper's receipt agrees with the trusted runtime, the original signed V2 probe and the
 signed reservation request, and the receipt must come from the trusted runtime transport, never from
 user input. Checking the controller's own signatures proves that this controller issued the
-capabilities, not that the helper ran them: the receipt carries no helper signature. Under one
-mutex the registry checks and holds one public IPv4 for one tunnel owner (profile, runtime, helper
-epoch, namespace, tunnel generation), so no two profiles or runtimes using the same registry
-instance hold the same address; a profile holds at most one reservation, and a reconnect or a move
-to another runtime does not get a second one. Expiry never releases a hold. A reservation is not a
-lease: before any later activation the helper must confirm its candidate and local deadline again.
-The registry is not persistent or wired into the lifecycle yet, the sixth golden vector is pinned in
-both modules now, and application traffic stays disabled.
+capabilities, not that the helper ran them: the receipt carries no helper signature. Under one mutex
+the registry checks and holds one public IPv4 for one tunnel owner (profile, runtime, helper epoch,
+namespace, tunnel generation), so no two profiles or runtimes using the same registry instance hold
+the same address; a profile holds at most one reservation, and a reconnect or a move to another
+runtime does not get a second one. Expiry never releases a hold. A reservation is not a lease:
+before any later activation the helper must confirm its candidate and local deadline again. The
+sixth golden vector is pinned in both modules now. Step 31C makes the registry durable and shared
+between processes; it is not wired into the lifecycle yet, and application traffic stays disabled.
+
+### Durable reservations and process coordination (Step 31C)
+
+The shared authority now lives in an append-only journal in a data directory its caller names, under
+an exclusive OS file lock (`LockFileEx` on Windows, `flock` on Linux and macOS; see
+`docs/ARCHITECTURE.md`). Every reservation attempt reloads and validates the whole journal under
+that lock before it checks uniqueness, appends one checksummed record and flushes it, so two
+controller processes using the same journal cannot hold the same address, and a process started
+later still sees it held. A process exit releases the lock, not the ownership. Records read back are
+recovered holds: without the monotonic clock of the process that wrote them they keep their address
+but never authorize an activation, and expired holds keep their address too. An incomplete or
+invalid journal blocks every reservation and inspection; nothing truncates it or replaces it with an
+empty one, and a missing journal is refused, never created implicitly. The helper's candidate and
+its monotonic deadline stay authoritative for any later activation. There is no production
+reservation or provisioning command, no release and no lease activation yet, and application traffic
+stays disabled.

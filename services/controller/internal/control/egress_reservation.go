@@ -55,12 +55,16 @@ type EgressReservation struct {
 	CandidateExpiresAt time.Time `json:"candidate_expires_at"`
 	ReservedAt         time.Time `json:"reserved_at"`
 	EligibleUntil      time.Time `json:"eligible_until"`
+
+	// A hold read back from the journal keeps its address but lost its monotonic clock readings, so
+	// it can never authorize an activation.
+	recovered bool
 }
 
 // FreshAt reports the controller's local eligibility deadline only; it does not establish that the
 // helper still holds the candidate or a healthy tunnel. Expiry ends eligibility, not the hold.
 func (r EgressReservation) FreshAt(now time.Time) bool {
-	return r.ID != "" && stableReservationClock(r.ReservedAt, now) &&
+	return !r.recovered && r.ID != "" && stableReservationClock(r.ReservedAt, now) &&
 		eligibleAt(r.EligibleUntil, r.CandidateExpiresAt, now)
 }
 
