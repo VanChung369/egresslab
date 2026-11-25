@@ -378,4 +378,4 @@ The log then reads `signed sealed lab, managed tunnel and diagnostic probe enabl
 
 ## Next Milestone
 
-Multi-source public IP verification (Step 29C). See `docs/PRIVILEGED-HELPER.md`.
+Multi-source public IP verification: pinned HTTPS sources and their timed firewall (Step 29C.2), then the managed multi-source probe lifecycle (Step 29C.3) and its signed IPC and controller integration (Step 29C.4). The consensus engine exists since Step 29C.1. See `docs/PRIVILEGED-HELPER.md`.

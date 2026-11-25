@@ -1,14 +1,14 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 29B.2b — controller probe integration.** A controller CLI signs `CreateLab`,
-`ConnectTunnel` and `PermitProbe` and drives the helper's sealed lab, tunnel and diagnostic probe
-in the Linux runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS
-transports inside its labs, resolves a hostname endpoint once and pins it, checks the peer state
-and the IPv4 addresses, MTU, rules and routes the kernel reports against the staged config, and
-stays the source of truth for lab and tunnel state. A probe yields one observation of the tunnel's
-public IPv4 address, printed only. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified
-end to end. No lease or proxy traffic exists; the sections from "Typed operations only" on are
-partly design.
+Status: **Step 29C.1 — multi-source consensus engine (not wired in yet).** A controller CLI signs
+`CreateLab`, `ConnectTunnel` and `PermitProbe` and drives the helper's sealed lab, tunnel and
+diagnostic probe in the Linux runtime; the helper holds the encrypted WireGuard configs, disables
+IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once and pins it, checks
+the peer state and the IPv4 addresses, MTU, rules and routes the kernel reports against the staged
+config, and stays the source of truth for lab and tunnel state. A probe yields one observation of
+the tunnel's public IPv4 address, printed only. Windows (WSL2), Linux and macOS (Lima, Keychain) are
+verified end to end. No lease or proxy traffic exists; the sections from "Typed operations only" on
+are partly design.
 
 ## Implemented
 
@@ -872,3 +872,47 @@ Known gaps:
   controller and the agent.
 - Live rotation of the controller signing key (only offline replacement exists, see "Key
   replacement"), and rotation of the vault key.
+
+## Multi-source public IP verification
+
+The probe of Step 29B relies on one source (`https://1.1.1.1/cdn-cgi/trace`), so its answer rests
+on one operator. Step 29C requires several independent sources that must all agree:
+
+| Step | Content |
+|---|---|
+| 29C.1 | Source policy and strict consensus engine |
+| 29C.2 | Pinned HTTPS sources and their timed firewall |
+| 29C.3 | Managed multi-source probe lifecycle |
+| 29C.4 | Signed IPC and controller integration |
+
+### Strict consensus policy (Step 29C.1)
+
+`verifyManagedProbeConsensus` (`managed_probe_consensus.go`) judges the observations of one
+verification attempt against a source policy. The policy is trusted local configuration; an
+untrusted caller never supplies it. It holds 2 to 8 sources, each with its own source ID and
+operator name (`^[a-z][a-z0-9_]{0,31}$`) and its own public IPv4 destination (the network agent's
+candidate policy). A distinct operator name is a declaration, not proof of independence: Step
+29C.2 checks who runs each source.
+
+The evidence is accepted only when every required source returned exactly one observation, each a
+valid public IPv4 address observed inside the attempt's interval (at most 80 s, the helper's
+operation context, to be revisited in Step 29C.3), and all of them the same address. It is
+refused when:
+
+- a required observation is missing, or there are more observations than sources;
+- an observation names an unknown source, or a source twice;
+- the observed addresses disagree;
+- an address is invalid, IPv6 (IPv4-mapped included), private, shared, loopback, documentation
+  or otherwise reserved;
+- an observation falls outside the interval, or the interval itself is invalid.
+
+There is no majority vote (two of three agreeing is refused) and no fallback to fewer sources or
+to one. A refusal returns no evidence. Accepted evidence carries the earliest observation time, so
+its freshness is that of its oldest part. It does not activate a profile, allocate an egress
+lease, authorize application traffic or promise that the address stays the same afterwards. A
+provider whose exit address depends on the destination (destination-dependent NAT) will always
+be refused in this strict mode.
+
+At Step 29C.1 the engine is pure Go and unit-tested on its own; it is not wired into the managed
+probe, and no binary behaves differently. HTTPS sources, their kernel firewall policy and signed IPC follow in
+the next steps.
