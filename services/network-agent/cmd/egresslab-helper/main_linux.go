@@ -6,9 +6,10 @@
 // answers the AuthorizeCheck dry-run, under a random helper ID (epoch) generated at every start.
 // With -enable-lab-lifecycle as well, it creates (signed), verifies and deletes sealed lab
 // namespaces; -enable-vault adds the managed WireGuard vault (StageInfo), and -enable-tunnel the
-// signed ConnectTunnel and Disconnect of a vault stage in a sealed lab (one tunnel per helper). The
-// offline commands vault-init, vault-stage and vault-revoke administer the vault. Probe and proxy
-// operations are not implemented.
+// signed ConnectTunnel and Disconnect of a vault stage in a sealed lab (one tunnel per helper), and
+// -enable-probe (with -probe-uid and -probe-gid) the signed PermitProbe, one diagnostic egress probe
+// run by an unprivileged worker. The offline commands vault-init, vault-stage and vault-revoke
+// administer the vault. Proxy operations are not implemented.
 //
 // In this step it runs as root under sudo; the production design keeps only CAP_NET_ADMIN.
 package main
@@ -48,20 +49,43 @@ func main() {
 		"enable signed sealed lab lifecycle operations (requires -auth-public-key-file)")
 	enableVault := flag.Bool("enable-vault", false, "enable the root-managed WireGuard vault (requires -enable-lab-lifecycle)")
 	enableTunnel := flag.Bool("enable-tunnel", false, "enable the managed WireGuard tunnel lifecycle (requires -enable-vault)")
+	enableProbe := flag.Bool("enable-probe", false, "enable signed managed egress probes (requires -enable-tunnel)")
+	probeUID := flag.Int("probe-uid", -1, "dedicated unprivileged probe UID")
+	probeGID := flag.Int("probe-gid", -1, "dedicated unprivileged probe GID")
 	flag.Parse()
 
 	if os.Geteuid() != 0 || *uid <= 0 || *gid <= 0 || flag.NArg() != 0 {
 		log.Fatal("usage: sudo egresslab-helper -uid <non-root UID> -gid <non-root GID> " +
-			"[-auth-public-key-file <path> [-enable-lab-lifecycle [-enable-vault [-enable-tunnel]]]]\n" +
+			"[-auth-public-key-file <path> [-enable-lab-lifecycle [-enable-vault [-enable-tunnel\n" +
+			"       [-enable-probe -probe-uid <UID> -probe-gid <GID>]]]]]\n" +
 			"       sudo egresslab-helper vault-init | vault-stage PROFILE_ID | vault-revoke PROFILE_ID")
 	}
 
-	if err := run(*uid, *gid, *publicKeyFile, *enableLifecycle, *enableVault, *enableTunnel); err != nil {
+	if err := run(*uid, *gid, *publicKeyFile, *enableLifecycle, *enableVault, *enableTunnel, *enableProbe,
+		*probeUID, *probeGID); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(uid, gid int, publicKeyFile string, enableLifecycle, enableVault, enableTunnel bool) error {
+func run(
+	uid, gid int,
+	publicKeyFile string,
+	enableLifecycle, enableVault, enableTunnel, enableProbe bool,
+	probeUID, probeGID int,
+) error {
+	// The probe worker never shares the agent's identity: it needs neither the socket nor the vault.
+	if enableProbe {
+		if !enableTunnel {
+			return errors.New("managed probe requires managed tunnel")
+		}
+
+		if probeUID <= 0 || probeGID <= 0 || probeUID == uid || probeGID == gid {
+			return errors.New("managed probe requires a separate non-root UID and GID")
+		}
+	} else if probeUID != -1 || probeGID != -1 {
+		return errors.New("probe UID and GID require -enable-probe")
+	}
+
 	if enableTunnel && !enableVault {
 		return errors.New("managed tunnel requires managed vault")
 	}
@@ -111,12 +135,24 @@ func run(uid, gid int, publicKeyFile string, enableLifecycle, enableVault, enabl
 		readStage = vault.readStage
 
 		if enableTunnel {
-			tunnels, err := agent.NewManagedTunnelBackend(backend.SealedLabBackend, vault.WireGuardConfigVault)
+			var tunnels *agent.ManagedTunnelBackend
+
+			if enableProbe {
+				tunnels, err = agent.NewManagedProbeTunnelBackend(backend.SealedLabBackend, vault.WireGuardConfigVault,
+					probeUID, probeGID)
+			} else {
+				tunnels, err = agent.NewManagedTunnelBackend(backend.SealedLabBackend, vault.WireGuardConfigVault)
+			}
+
 			if err != nil {
 				return fmt.Errorf("initialize managed tunnel: %w", err)
 			}
 
-			labs = helperipc.NewTunnelLifecycle(backend, tunnelBackend{tunnels})
+			if enableProbe {
+				labs = helperipc.NewProbeLifecycle(backend, tunnelBackend{tunnels})
+			} else {
+				labs = helperipc.NewTunnelLifecycle(backend, tunnelBackend{tunnels})
+			}
 		}
 	}
 
@@ -151,6 +187,10 @@ func run(uid, gid int, publicKeyFile string, enableLifecycle, enableVault, enabl
 		mode = "signed sealed lab lifecycle enabled; VPN operations disabled"
 		if enableTunnel {
 			mode = "signed sealed lab lifecycle and managed tunnel enabled; probe and proxy disabled"
+		}
+
+		if enableProbe {
+			mode = "signed sealed lab, managed tunnel and diagnostic probe enabled; proxy disabled"
 		}
 
 		if err := backend.Preflight(ctx); err != nil {

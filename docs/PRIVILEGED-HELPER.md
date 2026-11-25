@@ -1,14 +1,14 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 29B.1 — managed diagnostic probe backend.** A controller CLI signs `CreateLab`
-and `ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in the Linux runtime;
-the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports inside its
+Status: **Step 29B.2a — signed managed probe IPC.** A controller CLI signs `CreateLab` and
+`ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in the Linux runtime; the
+helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports inside its
 labs, resolves a hostname endpoint once and pins it, checks the peer state and the IPv4 addresses,
 MTU, rules and routes the kernel reports against the staged config, and stays the source of truth
-for lab and tunnel state. A one-shot diagnostic probe (kernel-timed firewall window, unprivileged
-worker, handshake check) exists in the backend, not yet reachable over IPC. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to
-end. No probe or proxy traffic is reachable over IPC yet; the sections from "Typed operations only"
-on are partly design.
+for lab and tunnel state. With `-enable-probe` it answers a signed `PermitProbe` with one
+diagnostic observation of the tunnel's public IPv4 address; the controller does not sign it yet
+(Step 29B.2b). Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to end. No proxy
+traffic exists; the sections from "Typed operations only" on are partly design.
 
 ## Implemented
 
@@ -49,11 +49,15 @@ on are partly design.
 - The client checks that the production socket is served by root (`SO_PEERCRED`) before it sends
   anything.
 - `egresslab-helperctl` covers every helper operation except `AuthorizeCheck`, including
-  `stage-info`, `connect-tunnel` and `disconnect`. `create-lab` and `connect-tunnel` read the
-  capability from stdin only, never from argv. It refuses to run as root.
+  `stage-info`, `connect-tunnel`, `disconnect` and `probe-egress`. `create-lab`, `connect-tunnel`
+  and `probe-egress` read the capability from stdin only, never from argv. It refuses to run as
+  root.
 - The managed WireGuard vault and `StageInfo` (see "Managed WireGuard vault").
 - Signed `ConnectTunnel` and `Disconnect` behind `-enable-tunnel` (see "Signed tunnel lifecycle"),
   on the managed tunnel kernel backend (see "Managed tunnel backend").
+- Signed `PermitProbe` behind `-enable-probe`, with a dedicated probe UID and GID: one diagnostic
+  observation through a kernel-timed firewall window and an unprivileged worker (see "Signed
+  probe").
 - Controller side (see "Controller and runtimes"):
   - an Ed25519 signer for `CreateLab` and `ConnectTunnel`, checked against both golden vectors;
     `ConnectTunnel` is signed only for the profile's own lab in the current helper process and
@@ -84,7 +88,7 @@ on are partly design.
   lab CLI drives them.
 - A controller approval workflow for individual operations.
 - Live key rotation and automatic key distribution.
-- `PermitProbe` and `RecoverClean` through IPC.
+- `RecoverClean` through IPC, and a controller that signs `PermitProbe` (Step 29B.2b).
 - Persistent lab ownership inside the helper. The controller keeps profile-to-runtime bindings;
   other processes that manage lab namespaces are not coordinated, only refused by the recovery
   gate.
@@ -99,9 +103,9 @@ on are partly design.
 - `AuthorizeCheck` never runs `ip`, `wg`, `nft` or any other network mutation.
 - A successful dry-run consumes its nonce. It does not authorize a later operation with the same
   capability.
-- A request named `PermitProbe` gets `operation not enabled`, even with a valid capability and
-  with every flag set, and the capability stays unused. `ConnectTunnel` and `Disconnect` get the
-  same answer unless the helper runs with `-enable-tunnel`.
+- A request named `PermitProbe` gets `operation not enabled`, even with a valid capability, and
+  the capability stays unused, unless the helper runs with `-enable-probe`. `ConnectTunnel` and
+  `Disconnect` get the same answer unless the helper runs with `-enable-tunnel`.
 - A sealed lab is a namespace with a verified default-deny firewall and only `lo`. It is not a
   connected VPN and not a verified egress IP. A `tunnel_configured` lab adds a configured
   WireGuard link and nothing more: no checked handshake, no egress IP, no permitted traffic.
@@ -129,15 +133,16 @@ on are partly design.
   `network_ready=false`.
 - Privileged changes run from the `egresslab-*-lab` CLIs, which an operator starts with `sudo` in
   a terminal on the VM. The only exceptions are the helper's sealed lab lifecycle, when the helper
-  was started with `-enable-lab-lifecycle` and a public key, and its managed tunnel, with
-  `-enable-tunnel` as well.
+  was started with `-enable-lab-lifecycle` and a public key, its managed tunnel, with
+  `-enable-tunnel` as well, and its diagnostic probe, with `-enable-probe`.
 - The helper socket accepts only the configured agent UID. It answers `Ping`, `RecoverScan`,
   `HelperInfo`, the `AuthorizeCheck` dry-run and, with the lifecycle flag, `ListLabs`,
   `CreateLab`, `VerifyLab` and `DeleteLab`, plus `StageInfo` with `-enable-vault` and
-  `ConnectTunnel` and `Disconnect` with `-enable-tunnel` (`TestPeerRejection`,
-  `TestPeerIdentityAndReadOnlyOperations`, `TestMutationWithValidCapabilityIsRefused`,
-  `TestLabLifecycleIPCRefusals`, `TestListLabsRefusals`, `TestStageInfoIPC`, `TestSignedTunnelIPC`,
-  `TestTunnelOperationsDisabledWithoutBackend`).
+  `ConnectTunnel` and `Disconnect` with `-enable-tunnel`, and `PermitProbe` with `-enable-probe`
+  (`TestPeerRejection`, `TestPeerIdentityAndReadOnlyOperations`,
+  `TestMutationWithValidCapabilityIsRefused`, `TestLabLifecycleIPCRefusals`, `TestListLabsRefusals`,
+  `TestStageInfoIPC`, `TestSignedTunnelIPC`, `TestTunnelOperationsDisabledWithoutBackend`,
+  `TestSignedProbeIPC`, `TestProbeDisabledOverIPC`).
 
 Changing any of these needs the helper below first.
 
@@ -169,7 +174,8 @@ Changing any of these needs the helper below first.
 
 The helper exposes a fixed set of operations, never a command line:
 
-`CreateLab` (creates and seals), `ConnectTunnel{profile_id, namespace, stage_id}`, `PermitProbe{ipv4}`,
+`CreateLab` (creates and seals), `ConnectTunnel{profile_id, namespace, stage_id}`,
+`PermitProbe{profile_id, namespace, probe_ipv4}` (fixed to `1.1.1.1`),
 `VerifyLab`, `Disconnect`, `DeleteLab`, `RecoverScan`, `RecoverClean`.
 
 Every argument is validated with the existing patterns: `egresslab-lab-<16 hex>`,
@@ -425,6 +431,42 @@ production runner, the others with a temporary build that also reported the work
 the results of 8 more were not captured. Under the current policy a transient failure costs a
 full reconnect. Not yet run on WSL2.
 
+**Signed probe (Step 29B.2a).** `PermitProbe{profile_id, namespace, probe_ipv4}` runs one whole
+probe; the controller cannot ask the helper to keep the firewall open. It needs `-enable-probe`
+(on top of `-enable-tunnel`) with `-probe-uid` and `-probe-gid`: a non-root identity that is
+neither the agent's UID nor its GID. Without the flag the operation answers `OPERATION_DISABLED`.
+In order, before the nonce is consumed:
+
+1. The intent names a valid profile and namespace, no stage, and `probe_ipv4` exactly `1.1.1.1`
+   (helperauth accepts any unicast IPv4; the helper only its fixed destination), else
+   `INVALID_REQUEST`.
+2. The lifecycle lock is free (`LAB_BUSY`), the helper is not shutting down and creation is not
+   blocked (`STATE_UNCERTAIN`).
+3. The profile owns a lab (`LAB_NOT_FOUND`) in exactly that namespace (`OWNERSHIP_MISMATCH`), the
+   lab is `tunnel_configured` (`LAB_FAULTED` otherwise) and holds the tunnel slot.
+4. The capability verifies for that exact intent, epoch, lifetime and unused nonce
+   (`AUTHORIZATION_DENIED`).
+
+While the probe runs the lab is recorded as faulted, so ownership is never lost. On success the
+lab is `tunnel_configured` again and the response carries `probe: {profile_id, namespace, ipv4,
+observed_at, handshake_at, source: "cloudflare_trace"}` with `network_ready: false`. Any failure,
+an observation that fails the helper's own checks, or an expired operation context leaves the
+lab `LAB_FAULTED` after the tunnel is cleaned up (only `DeleteLab` clears it); if that cleanup
+cannot be confirmed, the answer is `STATE_UNCERTAIN` and the tunnel slot stays held. An
+unconfirmed rollback now outranks every other code, for every operation. Nothing is retried.
+
+The client accepts a `probe` object only on a successful `PermitProbe`, for the profile and
+namespace it asked about, with a public IPv4 address, the fixed source and a handshake at most
+180 s before the observation. The operation runs under the usual 80 s context, but its cleanups
+have their own deadlines, so the server allows 185 s for the answer, the client 190 s and
+`egresslab-helperctl probe-egress PROFILE_ID NAMESPACE < capability.json` 200 s; helperctl takes
+no destination, URL or port. Verified on Lima: the real helper refused every invalid flag
+combination before creating its socket, logged `signed sealed lab, managed tunnel and diagnostic
+probe enabled; proxy disabled`, still answered `HelperInfo` and `ListLabs`, and routed
+`PermitProbe` to the lifecycle (`LAB_NOT_FOUND` for a missing lab) while a helper without the
+flag answered `OPERATION_DISABLED`. No real probe ran over IPC yet: the controller cannot sign
+one until Step 29B.2b. Not yet run on WSL2.
+
 **Recovery gate.** Before consuming a capability, `CreateLab` scans with the helper's own namespace
 manager. Any lab resource this helper does not own refuses creation with `RECOVERY_REQUIRED`: a
 crashed session's orphans, another live process's labs, unmarked namespaces, stale markers and
@@ -448,7 +490,7 @@ Every refusal carries a `code`. Clients act on it; the message is for people. On
 | Code | Meaning |
 |---|---|
 | `AUTHORIZATION_DENIED` | capability refused; the check that failed is not disclosed |
-| `OPERATION_DISABLED` | not enabled on this helper (no key; no lifecycle, vault or tunnel flag; always for `PermitProbe`) |
+| `OPERATION_DISABLED` | not enabled on this helper (no key; no lifecycle, vault, tunnel or probe flag) |
 | `RUNTIME_UNAVAILABLE` | helper unreachable, shutting down, or not served by root |
 | `INVALID_REQUEST` | malformed frame, version, fields or arguments |
 | `LAB_BUSY` | another lab operation is running, or the managed tunnel slot is held (until `Disconnect` or `DeleteLab`; not worth retrying) |
@@ -581,7 +623,8 @@ The helper can hold one encrypted WireGuard config per profile, inside the Linux
 - Internally, a config is lent only for the exact profile and current stage ID, under the vault's
   read lock, and only if it is compatible. A replaced or revoked stage cannot be selected.
 - A stage is used only by `ConnectTunnel` on a helper with `-enable-tunnel` (see "Signed tunnel
-  lifecycle"). `PermitProbe` stays disabled and `network_ready` stays false.
+  lifecycle"); `PermitProbe` (with `-enable-probe`) probes the tunnel that stage configured.
+  `network_ready` stays false.
 
 Nothing stops the legacy `egresslab-wg-vault-lab` from opening these paths without the lock: do
 not point it at the managed vault. The vault protects configs at rest, not against root in the

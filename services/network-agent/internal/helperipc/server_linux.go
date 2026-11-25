@@ -170,8 +170,8 @@ func handle(ctx context.Context, conn *net.UnixConn, allowedUID uint32, opts Ser
 		return
 	}
 
-	if isLifecycleOp(req.Operation) {
-		if err := conn.SetWriteDeadline(time.Now().Add(lifecycleResponseTimeout)); err != nil {
+	if duration := operationResponseTimeout(req.Operation); duration > 0 {
+		if err := conn.SetWriteDeadline(time.Now().Add(duration)); err != nil {
 			return
 		}
 	}
@@ -295,6 +295,32 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 		resp.OK = true
 		resp.Labs = items
 
+	case helperauth.OpPermitProbe:
+		if labs == nil || labs.probes == nil {
+			return refuse(CodeOperationDisabled, "operation not enabled")
+		}
+
+		if ctx.Err() != nil {
+			return refuse(CodeRuntimeUnavailable, "helper is shutting down")
+		}
+
+		// Like the lifecycle operations, shutdown waits for a running probe and its cleanup.
+		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lifecycleTimeout)
+		info, err := labs.executeProbe(probeCtx, req, v)
+		cancel()
+
+		if err != nil {
+			code := labCode(err)
+			if code != CodeAuthorizationDenied {
+				log.Printf("managed probe: %s: %v", code, err)
+			}
+
+			return refuse(code, labMessages[code])
+		}
+
+		resp.OK = true
+		resp.Probe = &info
+
 	case helperauth.OpCreateLab, OpVerifyLab, OpDeleteLab, helperauth.OpConnectTunnel, OpDisconnect:
 		if labs == nil || (isTunnelOp(req.Operation) && labs.tunnels == nil) {
 			return refuse(CodeOperationDisabled, "operation not enabled")
@@ -323,7 +349,7 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 		resp.Lab = &lab
 
 	default:
-		// PermitProbe and unknown operations stay disabled, with or without a valid capability.
+		// Unknown operations stay disabled, with or without a valid capability.
 		return refuse(CodeOperationDisabled, "operation not enabled")
 	}
 

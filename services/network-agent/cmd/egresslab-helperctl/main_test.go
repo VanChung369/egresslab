@@ -54,6 +54,10 @@ func TestRunRejectsBadArguments(t *testing.T) {
 		{"stage-info"},
 		{"stage-info", "profile_x"},
 		{"stage-info", "profile_0123456789abcdef", "extra"},
+		{"probe-egress", "profile_0123456789abcdef"},
+		{"probe-egress", "profile_0123456789abcdef", "egresslab-lab-x"},
+		{"probe-egress", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef", "1.1.1.1"},
+		{"probe-egress", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef", "https://example.com"},
 	} {
 		var out bytes.Buffer
 		if err := run(args, strings.NewReader(validCapability), &out); err == nil || !strings.Contains(err.Error(), "usage") {
@@ -75,6 +79,12 @@ func TestRunRejectsBadArguments(t *testing.T) {
 		"wgstage_0123456789abcdef0123456789abcdef"}
 	if err := run(connect, strings.NewReader("{}{}"), &bytes.Buffer{}); err == nil || err.Error() != "trailing capability data" {
 		t.Fatalf("bad tunnel capability: %v", err)
+	}
+
+	probe := []string{"probe-egress", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef"}
+	err := run(probe, strings.NewReader("{}{}"), &bytes.Buffer{})
+	if err == nil || err.Error() != "trailing capability data" {
+		t.Fatalf("bad probe capability: %v", err)
 	}
 }
 

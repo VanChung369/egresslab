@@ -60,6 +60,7 @@ type Response struct {
 	Lab          *LabInfo       `json:"lab,omitempty"`
 	Labs         []LabInfo      `json:"labs,omitempty"`
 	Stage        *StageInfo     `json:"stage,omitempty"`
+	Probe        *ProbeInfo     `json:"probe,omitempty"`
 }
 
 var ErrInvalidFrame = errors.New("invalid helper IPC frame")
@@ -159,8 +160,8 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 	}
 
 	timeout := 5 * time.Second
-	if isLifecycleOp(req.Operation) {
-		timeout = lifecycleResponseTimeout + 5*time.Second
+	if duration := operationResponseTimeout(req.Operation); duration > 0 {
+		timeout = duration + 5*time.Second
 	}
 
 	deadline := time.Now().Add(timeout)
@@ -208,6 +209,10 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 
 	if !validStageResponse(req, resp) {
 		return Response{}, errors.New("invalid WireGuard stage response")
+	}
+
+	if !validProbeResponse(req, resp) {
+		return Response{}, errors.New("invalid managed probe response")
 	}
 
 	if !resp.OK {

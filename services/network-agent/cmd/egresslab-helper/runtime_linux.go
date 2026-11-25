@@ -96,6 +96,25 @@ func classifyLabError(err error) error {
 // classified: after a failed connect the lab is faulted whatever the cause.
 type tunnelBackend struct{ *agent.ManagedTunnelBackend }
 
+// ProbeConfigured adapts the backend's observation, so helperipc does not depend on the agent package.
+func (b tunnelBackend) ProbeConfigured(ctx context.Context, namespace string) (helperipc.ProbeObservation, error) {
+	result, err := b.ManagedTunnelBackend.ProbeConfigured(ctx, namespace)
+	if err != nil {
+		return helperipc.ProbeObservation{}, err
+	}
+
+	if result.NetworkReady {
+		return helperipc.ProbeObservation{}, errors.New("diagnostic probe cannot activate networking")
+	}
+
+	return helperipc.ProbeObservation{
+		IPv4:        result.IPv4,
+		ObservedAt:  result.ObservedAt,
+		HandshakeAt: result.HandshakeAt,
+		Source:      result.Source,
+	}, nil
+}
+
 func (b tunnelBackend) ConnectStage(ctx context.Context, profileID, namespace, stageID string) error {
 	err := b.ManagedTunnelBackend.ConnectStage(ctx, profileID, namespace, stageID)
 	if errors.Is(err, agent.ErrWGStageNotFound) {

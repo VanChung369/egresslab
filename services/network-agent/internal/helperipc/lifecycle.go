@@ -45,6 +45,9 @@ var (
 // seal error with an uncertain state, and the uncertain state wins.
 func labCode(err error) string {
 	switch {
+	// An unconfirmed rollback outranks whatever caused it.
+	case errors.Is(err, errLabUncertain):
+		return CodeStateUncertain
 	case errors.Is(err, errLabAuthorization):
 		return CodeAuthorizationDenied
 	case errors.Is(err, errLabBusy):
@@ -67,8 +70,6 @@ func labCode(err error) string {
 		return CodeKernelIncompatible
 	case errors.Is(err, ErrLabRecoveryRequired):
 		return CodeRecoveryRequired
-	case errors.Is(err, errLabUncertain):
-		return CodeStateUncertain
 	case errors.Is(err, ErrLabFirewallDrift):
 		return CodeFirewallDrift
 	case errors.Is(err, errLabFaulted), errors.Is(err, ErrLabTopology):
@@ -125,8 +126,9 @@ type LabLifecycle struct {
 	blockCreation bool // kernel state uncertain; cleared only by a helper restart
 	closed        bool
 
-	tunnels       TunnelBackend // nil unless the managed tunnel is enabled
-	tunnelProfile string        // owner of the one tunnel or unfinished attempt
+	tunnels       TunnelBackend      // nil unless the managed tunnel is enabled
+	probes        ProbeTunnelBackend // nil unless the managed probe is enabled
+	tunnelProfile string             // owner of the one tunnel or unfinished attempt
 }
 
 func NewLabLifecycle(backend LabBackend) *LabLifecycle {

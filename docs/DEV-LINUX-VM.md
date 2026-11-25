@@ -207,7 +207,7 @@ Privileged networking exists as **lab CLIs** that you run by hand with `sudo` on
 | `egresslab-vpn-lab -file vpn.conf` | Real VPN egress through a sealed namespace (details below) |
 | `egresslab-wg-inspect`, `egresslab-wg-vault-lab` | Config import summary; in-memory or opt-in encrypted staging (never against the helper's managed vault) |
 | `egresslab-lab-recover [-delete]` | Report (default) leftovers of a crashed session; `-delete` removes only orphan namespaces holding nothing but `lo`/lab veth (never one with WireGuard) and stale markers. Underlay tables are never removed automatically |
-| `egresslab-helper -uid <UID> -gid <GID>`, `egresslab-helperctl ping\|recover-scan\|helper-info\|list-labs\|stage-info\|create-lab\|verify-lab\|delete-lab\|connect-tunnel\|disconnect` | Helper IPC: Unix socket with `SO_PEERCRED`, read-only `Ping`/`RecoverScan`/`HelperInfo`, optional `AuthorizeCheck` dry-run, sealed lab lifecycle, managed WireGuard vault and signed tunnel lifecycle (details below) |
+| `egresslab-helper -uid <UID> -gid <GID>`, `egresslab-helperctl ping\|recover-scan\|helper-info\|list-labs\|stage-info\|create-lab\|verify-lab\|delete-lab\|connect-tunnel\|disconnect\|probe-egress` | Helper IPC: Unix socket with `SO_PEERCRED`, read-only `Ping`/`RecoverScan`/`HelperInfo`, optional `AuthorizeCheck` dry-run, sealed lab lifecycle, managed WireGuard vault, signed tunnel lifecycle and signed diagnostic probe (details below) |
 
 `egresslab-vpn-lab` runs these steps:
 
@@ -358,7 +358,13 @@ id egresslab-probe >/dev/null 2>&1 || sudo useradd --system --user-group --no-cr
 sudo /usr/local/bin/egresslab-probe   # must print: probe must not run as root
 ```
 
-Do not reuse the agent's UID: the worker needs neither the helper socket nor the vault. No helper flag or IPC operation uses the worker yet (Step 29B.2).
+Do not reuse the agent's UID: the worker needs neither the helper socket nor the vault. To enable the signed probe (Step 29B.2a), add to the helper started with `-enable-tunnel`:
+
+```bash
+-enable-probe -probe-uid "$(id -u egresslab-probe)" -probe-gid "$(id -g egresslab-probe)"
+```
+
+The log then reads `signed sealed lab, managed tunnel and diagnostic probe enabled; proxy disabled`. `egresslab-helperctl probe-egress PROFILE_ID NAMESPACE < capability.json` runs one probe of the lab's tunnel; the controller signs the capability from Step 29B.2b.
 
 ## Security Notes
 
@@ -371,4 +377,4 @@ Do not reuse the agent's UID: the worker needs neither the helper socket nor the
 
 ## Next Milestone
 
-A signed `PermitProbe` IPC operation and controller integration for the managed diagnostic probe (Step 29B.2), then multi-source public IP verification (Step 29C). See `docs/PRIVILEGED-HELPER.md`.
+Controller signing and transport for `PermitProbe`, with a smoke test through a real VPN (Step 29B.2b), then multi-source public IP verification (Step 29C). See `docs/PRIVILEGED-HELPER.md`.

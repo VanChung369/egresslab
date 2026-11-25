@@ -68,7 +68,13 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		return usageError()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 135*time.Second)
+	// A probe's worst case (failed probe plus independent cleanups) is longer than other operations.
+	timeout := 135 * time.Second
+	if args[0] == "probe-egress" {
+		timeout = 200 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	var result helperipc.Response
@@ -106,6 +112,19 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		}
 
 		result, err = helperipc.ConnectTunnel(ctx, helperipc.SocketPath, args[1], args[2], args[3], capability)
+
+	case "probe-egress":
+		// No destination, URL or port argument: the helper probes only its fixed endpoint.
+		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
+			return usageError()
+		}
+
+		capability, readErr := readCapability(stdin)
+		if readErr != nil {
+			return readErr
+		}
+
+		result, err = helperipc.ProbeEgress(ctx, helperipc.SocketPath, args[1], args[2], capability)
 
 	case "disconnect":
 		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
@@ -176,5 +195,6 @@ func usageError() error {
 		"       egresslab-helperctl verify-lab PROFILE_ID NAMESPACE\n" +
 		"       egresslab-helperctl delete-lab PROFILE_ID NAMESPACE\n" +
 		"       egresslab-helperctl connect-tunnel PROFILE_ID NAMESPACE STAGE_ID < capability.json\n" +
-		"       egresslab-helperctl disconnect PROFILE_ID NAMESPACE")
+		"       egresslab-helperctl disconnect PROFILE_ID NAMESPACE\n" +
+		"       egresslab-helperctl probe-egress PROFILE_ID NAMESPACE < capability.json")
 }
