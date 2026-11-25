@@ -54,6 +54,7 @@ type fakeSealedKernel struct {
 	links   map[string]string // namespace -> link listing; loopback only when unset
 	calls   [][]string
 	next    int
+	ipv6    *fakeNamespaceIPv6
 }
 
 func (k *fakeSealedKernel) run(_ context.Context, args ...string) ([]byte, error) {
@@ -108,21 +109,22 @@ func (k *fakeSealedKernel) ran(verb string) int {
 func sealedBackendFixture(t *testing.T) (*SealedLabBackend, *fakeSealedKernel, *fakeKernel) {
 	t.Helper()
 
-	kernel := &fakeSealedKernel{present: map[string]bool{}, links: map[string]string{}}
+	kernel := &fakeSealedKernel{present: map[string]bool{}, links: map[string]string{}, ipv6: &fakeNamespaceIPv6{}}
 	names := func() (string, error) {
 		kernel.next++
 		return fmt.Sprintf("egresslab-lab-%016x", kernel.next), nil
 	}
 
-	manager := newNetNSLabManager(kernel.run, names, func(name string) (bool, error) {
+	manager := newNetNSLabManager(kernel.ipv6.wrap(kernel.run), names, func(name string) (bool, error) {
 		return kernel.present[name], nil
 	})
 
 	nft := &fakeKernel{t: t}
 
 	return &SealedLabBackend{
-		manager:  manager,
-		firewall: newVerifyingLabFirewall(manager, nft.run, nft.list),
+		manager:    manager,
+		firewall:   newVerifyingLabFirewall(manager, nft.run, nft.list),
+		sysctlPath: testSysctlPath,
 	}, kernel, nft
 }
 

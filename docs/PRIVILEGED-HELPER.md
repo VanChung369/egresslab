@@ -1,12 +1,13 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 27C.3 — managed endpoint resolution.** A controller CLI signs `CreateLab` and
+Status: **Step 28A — namespace IPv6 isolation.** A controller CLI signs `CreateLab` and
 `ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in the Linux runtime; the
-helper holds the encrypted WireGuard configs, resolves a hostname endpoint once and pins it,
-checks the peer state and the IPv4 addresses, MTU, rules and routes the kernel reports against
-the staged config, and stays the source of truth for lab and tunnel state. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to end. Probes and
-proxy traffic are still not implemented; the sections from "Typed operations only" on are
-partly design.
+helper holds the encrypted WireGuard configs, disables IPv6 inside its labs, resolves a hostname
+endpoint once and pins it, checks the peer state and the IPv4 addresses, MTU, rules and routes the
+kernel reports against the staged config, and stays the source of truth for lab and tunnel state.
+Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to end. Probes and proxy
+traffic are still not implemented; the sections from "Typed operations only" on are partly
+design.
 
 ## Implemented
 
@@ -74,9 +75,7 @@ partly design.
 - A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
-- Open from earlier steps: `VerifyLab` still compares the firewall with the state read right
-  after sealing (only the managed tunnel backend also checks the intended policy); egress-IP
-  leases across runtimes; a kill-switch independent of the controller; refusing to delete a
+- Open from earlier steps: egress-IP leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
 - DNS for traffic inside the lab, DNS refresh or endpoint failover for a running tunnel, and
   IPv6 endpoints. The HTTP controller and the desktop know nothing of labs or tunnels; only the
@@ -258,7 +257,8 @@ rotation, automatic key distribution and production private-key management are n
 "Signed tunnel lifecycle").
 
 `CreateLab` creates a namespace with a generated name and an ownership marker. It checks that only
-`lo` exists, installs the sealed firewall and reads it back. The capability is consumed just
+`lo` exists, installs the sealed firewall, reads it back against both the session baseline and the
+intended policy, then disables IPv6 in the namespace (see "IPv6 isolation"). The capability is consumed just
 before the kernel work starts. Refusals for a duplicate profile, a full helper (8 labs) or a busy
 helper leave it unused.
 
@@ -266,8 +266,9 @@ helper leave it unused.
   faulted and creation is blocked for the rest of the process.
 - **Create fails:** creation is blocked as well, because the kernel state may be uncertain. Later
   creates get `STATE_UNCERTAIN`; check `egresslab-lab-recover`, then restart the helper.
-- **`VerifyLab`** re-reads the topology and the firewall. Any difference marks the lab faulted.
-  It never repairs, and a faulted lab is never restored; only `DeleteLab` clears it.
+- **`VerifyLab`** re-reads the topology, the firewall (session baseline and intended policy) and
+  the IPv6 switches. Any difference marks the lab faulted. It never repairs, and a faulted lab is
+  never restored; only `DeleteLab` clears it.
 - **`DeleteLab`** refuses a namespace that holds any device besides `lo` or has processes, and
   leaves it for inspection. A namespace removed outside the helper is released.
 - **Normal shutdown** (`SIGINT`, `SIGTERM`, `SIGHUP`) waits for a running operation, then deletes
@@ -276,6 +277,33 @@ helper leave it unused.
 
 Ownership lives in memory only. If a `CreateLab` response is lost, `ListLabs` shows the namespace,
 and `DeleteLab` removes it.
+
+**IPv6 isolation (Step 28A).** The lab firewall already drops IPv6 outside loopback; the kernel's
+per-interface switch adds an independent layer. `disable_ipv6=1` removes an interface's IPv6
+addresses and routes and refuses new ones. `conf/all` says nothing about existing interfaces, so
+each switch is set and read on its own, always inside the lab (`ip netns exec <lab>
+/usr/sbin/sysctl`, the binary from the fixed system directories):
+
+| When | Written | Read back (each must be exactly `1`) |
+|---|---|---|
+| `CreateLab`, after the firewall is sealed and matches the intended policy | `default`, `lo` | `default`, `lo` |
+| `ConnectTunnel`, before the endpoint is resolved | nothing | `default`, `lo` |
+| `ConnectTunnel`, once the link is `wg0` in the lab (still down, no peer) | `wg0` | `default`, `lo`, `wg0` |
+| Before the peer, after the connect, and at every `VerifyLab` with a tunnel | nothing | `default`, `lo`, `wg0` |
+| `VerifyLab` without a tunnel | nothing | `default`, `lo` |
+
+A failed write, a failed or unexpected readback, or any value other than `1` refuses: a seal
+fails (the helper deletes the namespace), a connect is rolled back before any peer exists, and a
+`VerifyLab` faults the lab and removes its tunnel. Drift is never repaired, and `DeleteLab` does
+not depend on this check. Only lab namespaces are touched: the VM namespace and the host keep
+their own settings. On Linux 6.8 a link moved into a lab already inherits `disable_ipv6=1` from
+`default`; the explicit write and readback do not rely on that. A kernel booted without IPv6
+(`ipv6.disable=1`) has none of these switches, so sealing should fail there (not tested). Not
+yet run on WSL2. Verified on Lima (Linux
+6.8, procps-ng 4.0.4): the lab showed no IPv6 address or route with `lo` and `wg0` up (the
+`ff00::/8` route on `wg0` is gone), the handshake still completed, the VM's own switches stayed
+`0`, and re-enabling IPv6 on `lo` (sealed lab) or `wg0` (tunnel) faulted the lab without being
+repaired.
 
 **Recovery gate.** Before consuming a capability, `CreateLab` scans with the helper's own namespace
 manager. Any lab resource this helper does not own refuses creation with `RECOVERY_REQUIRED`: a
@@ -504,7 +532,8 @@ itself, so it must never be wired to the HTTP agent.
 5. The lab firewall matches both the session baseline and the intended sealed policy (the rules
    written out in `sealed_policy.go`, not the state read back after sealing). A mismatch marks the
    lab drifted. An nft version that prints the same rules differently is refused as well, and so
-   is a table with any flags (a `dormant` table still lists its rules but enforces none).
+   is a table with any flags (a `dormant` table still lists its rules but enforces none). The
+   lab's IPv6 switches for `default` and `lo` read `1` (see "IPv6 isolation").
 6. No `egwg*` link and no managed alias exists in the VM namespace.
 7. A DNS name is resolved once and one IPv4 address is pinned (see "Endpoint resolution"). A
    failed or refused lookup stops here, before any kernel change.
@@ -515,13 +544,14 @@ itself, so it must never be wired to the HTTP agent.
    (the config's, or 1420).
 9. The root underlay table is installed. Then the link is created with an alias
    `egresslab-managed:<namespace>:<link>`, moved into the lab and renamed `wg0`. Its name, alias
-   and kind (`wireguard`) are read back.
+   and kind (`wireguard`) are read back, and IPv6 is disabled on it and read back while it is
+   still down.
 10. After the fwmark and private key are set, and before any peer exists, the lab firewall, the
-    underlay table and the fwmark are read back again, and the kernel must report the expected
+    IPv6 switches, the underlay table and the fwmark are read back again, and the kernel must report the expected
     interface public key and no peer.
 11. The peer, addresses, MTU and default route are configured; without an MTU in the config,
-    1420 is set explicitly. The link, firewall and underlay are checked once more, and so are the
-    peer (see "Peer verification") and the network (see "Network verification").
+    1420 is set explicitly. The link, firewall, IPv6 switches and underlay are checked once more,
+    and so are the peer (see "Peer verification") and the network (see "Network verification").
 
 What the backend guarantees:
 
@@ -536,8 +566,8 @@ What the backend guarantees:
   failed, the underlay install failed), the table is kept and the tunnel stays tracked as faulted.
   New tunnels are then refused until `Disconnect` succeeds or the helper restarts and recovery is
   done by hand.
-- `VerifyConfigured` re-reads the link, firewall, underlay, peer and network; a failure faults
-  the tunnel, and a later correct readback does not clear the fault.
+- `VerifyConfigured` re-reads the link, firewall, IPv6 switches, underlay, peer and network; a
+  failure faults the tunnel, and a later correct readback does not clear the fault.
 
 **Peer verification.** Each property is read on its own with `wg show wg0 <property>`, never with
 `showconf` or `dump`, which print the private and preshared keys, and compared exactly with the
@@ -622,8 +652,8 @@ Known gaps:
 - A failed endpoint lookup faults the lab and reads `STATE_UNCERTAIN`, although nothing was
   changed: delete the lab and create a new one (no helper restart is needed). The helper log
   names the cause.
-- IPv6 is neither configured nor verified, and nothing monitors the tunnel continuously; drift is
-  found only by `VerifyLab`.
+- Nothing monitors the tunnel continuously; drift is found only by `VerifyLab`, as of that
+  moment.
 
 ## Invariants the helper keeps
 

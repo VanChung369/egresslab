@@ -34,6 +34,8 @@ type managedTestKernel struct {
 	wgReadError   string            // a "wg show" property that fails to read
 	wgOverrides   map[string]string // "wg show" property -> value the kernel reports instead
 
+	ipv6 *fakeNamespaceIPv6
+
 	mtu              string            // set by "link set wg0 mtu"; empty means the WireGuard default
 	networkReadError string            // an "ip -4 -json" readback that fails
 	networkOverrides map[string]string // "ip -4 -json" readback -> value the kernel reports instead
@@ -43,9 +45,17 @@ func newManagedTunnelFixture(t *testing.T) (*ManagedTunnelBackend, *managedTestK
 	t.Helper()
 
 	vpn, _ := testVPNLab(true)
-	kernel := &managedTestKernel{wgOverrides: make(map[string]string), networkOverrides: make(map[string]string)}
+	kernel := &managedTestKernel{
+		wgOverrides:      make(map[string]string),
+		networkOverrides: make(map[string]string),
+		ipv6:             &fakeNamespaceIPv6{},
+	}
 
-	sealed := &SealedLabBackend{manager: vpn.manager, firewall: vpn.firewall}
+	// The fixture's lab is already sealed: IPv6 is off for default and lo; wg0 is the backend's job.
+	kernel.ipv6.set(vpnTestNS, ipv6DefaultKey, "1")
+	kernel.ipv6.set(vpnTestNS, ipv6LoopbackKey, "1")
+
+	sealed := &SealedLabBackend{manager: vpn.manager, firewall: vpn.firewall, sysctlPath: testSysctlPath}
 	backend := &ManagedTunnelBackend{sealed: sealed, vpn: vpn}
 
 	firewallData := encodeRuleset(t, sealedRulesetFixture(t))
@@ -140,7 +150,7 @@ func newManagedTunnelFixture(t *testing.T) (*ManagedTunnelBackend, *managedTestK
 		return "", nil
 	}
 
-	vpn.manager.run = kernel.runIP
+	vpn.manager.run = kernel.ipv6.wrap(kernel.runIP)
 
 	return backend, kernel
 }

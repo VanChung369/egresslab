@@ -15,6 +15,7 @@ type SealedLabBackend struct {
 	firewall    *LabFirewall
 	recovery    *LabRecovery
 	kernelCheck func() error
+	sysctlPath  string
 }
 
 func NewSealedLabBackend() (*SealedLabBackend, error) {
@@ -34,7 +35,18 @@ func NewSealedLabBackend() (*SealedLabBackend, error) {
 		return nil, err
 	}
 
-	return &SealedLabBackend{manager: manager, firewall: firewall, recovery: recovery, kernelCheck: CheckSealedLabKernel}, nil
+	sysctlPath, err := findSystemBinary("sysctl")
+	if err != nil {
+		return nil, err
+	}
+
+	return &SealedLabBackend{
+		manager:     manager,
+		firewall:    firewall,
+		recovery:    recovery,
+		kernelCheck: CheckSealedLabKernel,
+		sysctlPath:  sysctlPath,
+	}, nil
 }
 
 func (b *SealedLabBackend) Create(ctx context.Context) (string, error) {
@@ -50,15 +62,35 @@ func (b *SealedLabBackend) Seal(ctx context.Context, name string) error {
 		return err
 	}
 
-	return b.Verify(ctx, name)
-}
+	b.manager.mu.Lock()
+	defer b.manager.mu.Unlock()
 
-func (b *SealedLabBackend) Verify(ctx context.Context, name string) error {
-	if err := b.requireOnlyLoopback(ctx, name); err != nil {
+	if err := b.requireOnlyLoopbackLocked(ctx, name); err != nil {
 		return err
 	}
 
-	return b.firewall.Verify(ctx, name)
+	// IPv6 is disabled only once the firewall is sealed and matches the intended policy.
+	if err := b.firewall.requireSealedPolicyLocked(ctx, name); err != nil {
+		return err
+	}
+
+	return b.disableIPv6Locked(ctx, name, false)
+}
+
+// Verify only reads: the topology, the intended sealed firewall and the IPv6 switches.
+func (b *SealedLabBackend) Verify(ctx context.Context, name string) error {
+	b.manager.mu.Lock()
+	defer b.manager.mu.Unlock()
+
+	if err := b.requireOnlyLoopbackLocked(ctx, name); err != nil {
+		return err
+	}
+
+	if err := b.firewall.requireSealedPolicyLocked(ctx, name); err != nil {
+		return err
+	}
+
+	return b.verifyIPv6Locked(ctx, name, false)
 }
 
 func (b *SealedLabBackend) requireOnlyLoopback(ctx context.Context, name string) error {

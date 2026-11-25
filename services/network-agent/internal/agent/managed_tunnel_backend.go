@@ -102,6 +102,10 @@ func (b *ManagedTunnelBackend) connectConfig(ctx context.Context, namespace stri
 		return err
 	}
 
+	if err := b.sealed.verifyIPv6Locked(ctx, namespace, false); err != nil {
+		return err
+	}
+
 	// Recovery does not inventory root WireGuard links yet, so refuse while any could be ours.
 	outside, err := b.listLinksLocked(ctx, "")
 	if err != nil {
@@ -201,6 +205,11 @@ func (b *ManagedTunnelBackend) connectKernelLocked(
 		return err
 	}
 
+	// Only now is the link wg0 inside the lab: it is still down and has no peer.
+	if err := b.sealed.disableIPv6Locked(ctx, ns, true); err != nil {
+		return err
+	}
+
 	if err := b.applyDefaultMTULocked(ctx, t, cfg); err != nil {
 		return fmt.Errorf("configure default MTU: %w", err)
 	}
@@ -209,6 +218,10 @@ func (b *ManagedTunnelBackend) connectKernelLocked(
 	// underlay policy (table and fwmark), the interface key and an empty peer list are read back.
 	beforePeer := func(ctx context.Context) error {
 		if err := b.sealed.firewall.requireSealedPolicyLocked(ctx, ns); err != nil {
+			return err
+		}
+
+		if err := b.sealed.verifyIPv6Locked(ctx, ns, true); err != nil {
 			return err
 		}
 
@@ -248,6 +261,10 @@ func (b *ManagedTunnelBackend) verifyConfiguredLocked(ctx context.Context, t *ma
 	}
 
 	if err := b.sealed.firewall.requireSealedPolicyLocked(ctx, t.namespace); err != nil {
+		return err
+	}
+
+	if err := b.sealed.verifyIPv6Locked(ctx, t.namespace, true); err != nil {
 		return err
 	}
 
