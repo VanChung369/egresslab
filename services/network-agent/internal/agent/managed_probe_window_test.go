@@ -33,7 +33,13 @@ func TestManagedProbePolicy(t *testing.T) {
 }
 
 func TestManagedProbePolicyRejectsDrift(t *testing.T) {
-	fixture := string(probeCapture(t, "nft-lab-probe-window.json"))
+	// Re-encoded first, so the textual edits below do not depend on how the file is formatted.
+	var parsed map[string]any
+	if err := json.Unmarshal(probeCapture(t, "nft-lab-probe-window.json"), &parsed); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture := string(encodeRuleset(t, parsed))
 
 	withRule := func(rule string) string {
 		var doc map[string]any
@@ -44,11 +50,41 @@ func TestManagedProbePolicyRejectsDrift(t *testing.T) {
 		return string(encodeRuleset(t, withObject(t, doc, rule)))
 	}
 
-	const (
-		daddr   = `{"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}`
-		element = `{"elem": {"val": "1.1.1.1", "timeout": 30, "expires": 29}}`
-		ctState = `, {"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": "established"}}`
-	)
+	// Structural edits on the parsed capture, so they do not depend on how the file is formatted.
+	edit := func(object string, match func(map[string]any) bool, change func(map[string]any)) string {
+		t.Helper()
+
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(fixture), &doc); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, item := range objects(doc) {
+			if value, ok := item.(map[string]any)[object].(map[string]any); ok && match(value) {
+				change(value)
+				return string(encodeRuleset(t, doc))
+			}
+		}
+
+		t.Fatalf("%s missing from the capture", object)
+
+		return ""
+	}
+
+	mutateSet := func(change func(map[string]any)) string {
+		return edit("set", func(map[string]any) bool { return true }, change)
+	}
+
+	mutatePermit := func(chain string, change func(map[string]any)) string {
+		return edit("rule", func(rule map[string]any) bool {
+			expr, _ := json.Marshal(rule["expr"])
+			return rule["chain"] == chain && strings.Contains(string(expr), "@egresslab_probe4")
+		}, change)
+	}
+
+	firstElement := func(set map[string]any) map[string]any {
+		return set["elem"].([]any)[0].(map[string]any)["elem"].(map[string]any)
+	}
 
 	// The output permit moved ahead of the loopback accept: every sealed rule is still present and in
 	// order, so only the "permit last in its chain" check can refuse it.
@@ -90,21 +126,46 @@ func TestManagedProbePolicyRejectsDrift(t *testing.T) {
 		"permit before a sealed rule": permitFirst(),
 		"wrong destination":           strings.ReplaceAll(fixture, `"1.1.1.1"`, `"8.8.8.8"`),
 		"wrong interface":             strings.ReplaceAll(fixture, `"wg0"`, `"eth0"`),
-		"wrong port":                  strings.ReplaceAll(fixture, `"right": 443`, `"right": 80`),
-		"extended lifetime":           strings.ReplaceAll(fixture, `"timeout": 30`, `"timeout": 300`),
-		"expired":                     strings.ReplaceAll(fixture, `"expires": 29`, `"expires": 0`),
-		"expires past TTL":            strings.ReplaceAll(fixture, `"expires": 29`, `"expires": 31`),
-		"no expiry":                   strings.ReplaceAll(fixture, `, "expires": 29`, ""),
-		"second element": strings.ReplaceAll(fixture, "["+element+"]",
-			"["+element+", "+strings.Replace(element, "1.1.1.1", "1.0.0.1", 1)+"]"),
-		"larger set":         strings.ReplaceAll(fixture, `"size": 1`, `"size": 2`),
-		"extra set flag":     strings.ReplaceAll(fixture, `"flags": ["timeout"]`, `"flags": ["timeout", "interval"]`),
-		"unknown set field":  strings.ReplaceAll(fixture, `"size": 1`, `"size": 1, "gc-interval": 1`),
-		"other set name":     strings.ReplaceAll(fixture, `"name": "egresslab_probe4"`, `"name": "probe"`),
-		"set membership op":  strings.ReplaceAll(fixture, daddr, strings.Replace(daddr, `"=="`, `"in"`, 1)),
-		"stateless input":    strings.ReplaceAll(fixture, ctState, ""),
-		"missing DNS drop":   strings.ReplaceAll(fixture, `"right": 853`, `"right": 8853`),
-		"empty element list": strings.ReplaceAll(fixture, "["+element+"]", "[]"),
+		"wrong port":                  strings.ReplaceAll(fixture, `"right":443`, `"right":80`),
+		"extended lifetime":           strings.ReplaceAll(fixture, `"timeout":30`, `"timeout":300`),
+		"expired":                     strings.ReplaceAll(fixture, `"expires":29`, `"expires":0`),
+		"expires past TTL":            strings.ReplaceAll(fixture, `"expires":29`, `"expires":31`),
+		"no expiry":                   mutateSet(func(set map[string]any) { delete(firstElement(set), "expires") }),
+		"second element": mutateSet(func(set map[string]any) {
+			set["elem"] = append(set["elem"].([]any), map[string]any{
+				"elem": map[string]any{"val": "1.0.0.1", "timeout": 30, "expires": 29},
+			})
+		}),
+		"larger set":        strings.ReplaceAll(fixture, `"size":1`, `"size":2`),
+		"extra set flag":    mutateSet(func(set map[string]any) { set["flags"] = []any{"timeout", "interval"} }),
+		"unknown set field": strings.ReplaceAll(fixture, `"size":1`, `"size":1,"gc-interval":1`),
+		"other set name":    strings.ReplaceAll(fixture, `"name":"egresslab_probe4"`, `"name":"probe"`),
+		"set membership op": mutatePermit("output", func(rule map[string]any) {
+			for _, item := range rule["expr"].([]any) {
+				if match, ok := item.(map[string]any)["match"].(map[string]any); ok && match["right"] == "@egresslab_probe4" {
+					match["op"] = "in"
+					return
+				}
+			}
+
+			t.Fatal("set membership expression missing")
+		}),
+		"stateless input": mutatePermit("input", func(rule map[string]any) {
+			expr := rule["expr"].([]any)
+
+			for i, item := range expr {
+				if match, ok := item.(map[string]any)["match"].(map[string]any); ok {
+					if left, ok := match["left"].(map[string]any); ok && left["ct"] != nil {
+						rule["expr"] = append(expr[:i:i], expr[i+1:]...)
+						return
+					}
+				}
+			}
+
+			t.Fatal("conntrack expression missing")
+		}),
+		"missing DNS drop":   strings.ReplaceAll(fixture, `"right":853`, `"right":8853`),
+		"empty element list": mutateSet(func(set map[string]any) { set["elem"] = []any{} }),
 		"extra permit": withRule(`{"rule": {"family": "inet", "table": "egresslab_lab", "chain": "output", "handle": 40,
 			"expr": [{"match": {"op": "==", "left": {"meta": {"key": "oifname"}}, "right": "wg0"}}, {"accept": null}]}}`),
 		"sealed rule after the permit": withRule(`{"rule": {"family": "inet", "table": "egresslab_lab",

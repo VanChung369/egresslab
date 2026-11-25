@@ -1,13 +1,13 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 29A — time-limited managed probe permission.** A controller CLI signs `CreateLab`
+Status: **Step 29B.1 — managed diagnostic probe backend.** A controller CLI signs `CreateLab`
 and `ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in the Linux runtime;
 the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports inside its
 labs, resolves a hostname endpoint once and pins it, checks the peer state and the IPv4 addresses,
 MTU, rules and routes the kernel reports against the staged config, and stays the source of truth
-for lab and tunnel state. A kernel-timed probe window exists as an internal firewall primitive,
-not yet reachable over IPC. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to
-end. Probes and proxy traffic are still not implemented; the sections from "Typed operations only"
+for lab and tunnel state. A one-shot diagnostic probe (kernel-timed firewall window, unprivileged
+worker, handshake check) exists in the backend, not yet reachable over IPC. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to
+end. No probe or proxy traffic is reachable over IPC yet; the sections from "Typed operations only"
 on are partly design.
 
 ## Implemented
@@ -380,6 +380,50 @@ Internet traffic): with the seal alone nothing passed; with the window open only
 passed (not port 8443, not another address); after 30 s everything was blocked, including a
 connection opened inside the window; the close by handle left exactly the sealed ruleset. Not yet
 run on WSL2.
+
+**Diagnostic probe (Step 29B.1).** `ManagedTunnelBackend.ProbeConfigured` makes one observation of
+the tunnel's public IPv4 address. It runs only on a backend built with
+`NewManagedProbeTunnelBackend` (the helper still uses the probe-less constructor, and no IPC
+operation reaches it yet), under the namespace manager's lock:
+
+1. The whole tunnel state verifies (`VerifyConfigured`), and `ip netns pids` lists no process in
+   the lab: nothing may share the window.
+2. The probe window opens (see above), and the worker runs inside it with a 12 s deadline.
+3. The window closes. Then the lab must again hold no process (the worker is gone), the tunnel
+   state must verify, and `wg show wg0 latest-handshakes` must report exactly the staged peer with
+   a handshake at most 180 s old, not zero and not in the future.
+4. Only then is `{ipv4, observed_at, handshake_at, source: "cloudflare_trace", network_ready:
+   false}` returned. The address passes the same public-IPv4 policy as every egress candidate.
+
+No handshake is required before the probe: the request itself may trigger it. The 180 s bound is
+a freshness policy, not proof that the handshake served this request. Once an attempt starts, any
+failure (a foreign process, drift, an HTTPS error, a private address, a missing or stale
+handshake, an unconfirmed window close) discards the result, faults the tunnel and removes it; if
+that removal cannot be proven, the tunnel stays tracked as uncertain. A refusal before the attempt
+(no runner, another namespace, a cancelled request) changes nothing. The observation is not a
+lease and opens nothing.
+
+The worker is `/usr/local/bin/egresslab-probe`, a separate executable: no HTTP client runs in the
+root helper. The helper checks that it is a root-owned regular executable without setuid or
+setgid, in directories that only root can write, then runs `ip netns exec <lab> setpriv
+--reuid=<uid> --regid=<gid> --clear-groups --inh-caps=-all --ambient-caps=-all
+--bounding-set=-all --no-new-privs -- /usr/local/bin/egresslab-probe` with a fixed minimal
+environment (no proxy, TLS, HOME or loader variables). The worker takes no arguments, refuses to
+run as root, with supplementary groups, with any capability set or without no_new_privs, and then
+fetches only `https://1.1.1.1/cdn-cgi/trace` through the pinned numeric dialer (Step 28B), with
+TLS verification. Its output is capped at 4 KiB and its stderr is discarded. It runs as a
+dedicated system user (`egresslab-probe`), not the agent's UID.
+
+Verified on Lima with the real Proton tunnel: the worker refused root, an undropped user and an
+argument; the `setpriv` command left all capability sets empty with `NoNewPrivs: 1`; and through
+`ProbeConfigured` the observed address was the provider's exit IPv4, with a handshake 1 to 3 s
+old, the window gone and the tunnel still verifying afterwards. A process left in the lab refused
+the probe and removed the tunnel. The first call with the production runner failed and, as
+designed, removed the tunnel; its cause is unknown, because the worker collapses its errors and
+the runner discards its stderr. It did not recur: 37 later probes succeeded (two with the
+production runner, the others with a temporary build that also reported the worker's error), and
+the results of 8 more were not captured. Under the current policy a transient failure costs a
+full reconnect. Not yet run on WSL2.
 
 **Recovery gate.** Before consuming a capability, `CreateLab` scans with the helper's own namespace
 manager. Any lab resource this helper does not own refuses creation with `RECOVERY_REQUIRED`: a

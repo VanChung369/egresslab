@@ -19,11 +19,11 @@ const (
 	managedTunnelCleanupTimeout = 40 * time.Second
 )
 
-// ManagedTunnelBackend brings a WireGuard config from the managed vault up in a sealed lab. It
-// shares the sealed lab's namespace manager and firewall; all of its state is guarded by
-// manager.mu. It holds at most one tunnel, and it configures the tunnel only: the lab firewall
-// stays loopback-only, so no traffic is permitted through it and no handshake or egress is
-// checked.
+// ManagedTunnelBackend configures and verifies a WireGuard tunnel from the managed vault in an
+// owned sealed lab. It shares the sealed lab's namespace manager and firewall, and holds at most
+// one tunnel. The lab firewall stays sealed, except during an explicitly authorized diagnostic
+// probe window when a managed probe runner is configured. All of its state is guarded by
+// manager.mu. No egress observation activates a lease or a proxy.
 type ManagedTunnelBackend struct {
 	sealed *SealedLabBackend
 	vault  *WireGuardConfigVault

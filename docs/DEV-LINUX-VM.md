@@ -343,6 +343,23 @@ Then add `-enable-vault` to the helper (with `-enable-lab-lifecycle` and the pub
 
 Add `-enable-tunnel` as well (it needs `-enable-vault`). On a sealed lab, `egresslab-helperctl connect-tunnel <profile ID> <namespace> <stage ID> < capability.json` brings the staged config up as `wg0` (`tunnel_configured`: configured only, no handshake or egress checked, no traffic permitted), and `egresslab-helperctl disconnect <profile ID> <namespace>` removes it again. `egresslab-controller-lab -approve connect-tunnel` signs the capability for you (see "Controller lab CLI"). A hostname endpoint is resolved once by `connect-tunnel` and pinned (Step 27C.3); `egresslab-helperctl stage-info` never resolves. `verify-lab` re-checks the IPv6 switches (Step 28A), the peer and the IPv4 addresses, MTU, rules and routes (Step 27C.2); any drift faults the lab and removes the tunnel. One tunnel per helper: while it exists, `create-lab` gets `LAB_BUSY`. Stop the helper normally (`Ctrl+C`, `SIGTERM`) so it removes the tunnel before the namespace; after a crash, the underlay table must be removed by hand.
 
+### Managed probe worker (Step 29B.1)
+
+The diagnostic probe runs `egresslab-probe` as its own system user, through `setpriv` (util-linux, installed on Ubuntu by default). Install it once, root-owned, and create the user:
+
+```bash
+# On the macOS host, from services/network-agent
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o /tmp/egresslab-probe ./cmd/egresslab-probe
+limactl copy --backend=scp /tmp/egresslab-probe egresslab:/tmp/egresslab-probe
+
+# Inside the VM
+sudo install -o root -g root -m 0755 /tmp/egresslab-probe /usr/local/bin/egresslab-probe
+id egresslab-probe >/dev/null 2>&1 || sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin egresslab-probe
+sudo /usr/local/bin/egresslab-probe   # must print: probe must not run as root
+```
+
+Do not reuse the agent's UID: the worker needs neither the helper socket nor the vault. No helper flag or IPC operation uses the worker yet (Step 29B.2).
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
@@ -354,4 +371,4 @@ Add `-enable-tunnel` as well (it needs `-enable-vault`). On a sealed lab, `egres
 
 ## Next Milestone
 
-A one-shot HTTPS probe through the managed tunnel inside the kernel-timed probe window, with handshake verification and a signed IPC operation (Step 29B), then multi-source public IP verification (Step 29C). See `docs/PRIVILEGED-HELPER.md`.
+A signed `PermitProbe` IPC operation and controller integration for the managed diagnostic probe (Step 29B.2), then multi-source public IP verification (Step 29C). See `docs/PRIVILEGED-HELPER.md`.
