@@ -1,6 +1,6 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 29C.2 — pinned HTTPS sources and timed firewall (not wired in yet).** A controller
+Status: **Step 29C.3 — managed multi-source probe lifecycle (not exposed over IPC yet).** A controller
 CLI signs `CreateLab`, `ConnectTunnel` and `PermitProbe` and drives the helper's sealed lab, tunnel
 and diagnostic probe in the Linux runtime; the helper holds the encrypted WireGuard configs,
 disables IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once and pins
@@ -416,7 +416,8 @@ root helper. The helper checks that it is a root-owned regular executable withou
 setgid, in directories that only root can write, then runs `ip netns exec <lab> setpriv
 --reuid=<uid> --regid=<gid> --clear-groups --inh-caps=-all --ambient-caps=-all
 --bounding-set=-all --no-new-privs -- /usr/local/bin/egresslab-probe` with a fixed minimal
-environment (no proxy, TLS, HOME or loader variables). The worker takes no arguments, refuses to
+environment (no proxy, TLS, HOME or loader variables). For this probe the worker takes no arguments
+(the multi-source mode of Step 29C.3 passes `--source SOURCE_ID IPV4`), refuses to
 run as root, with supplementary groups, with any capability set or without no_new_privs, and then
 fetches only `https://1.1.1.1/cdn-cgi/trace` through the pinned numeric dialer (Step 28B), with
 TLS verification. Its output is capped at 4 KiB and its stderr is discarded. It runs as a
@@ -897,8 +898,8 @@ HTTPS sources and timed firewall").
 
 The evidence is accepted only when every required source returned exactly one observation, each a
 valid public IPv4 address observed inside the attempt's interval (at most 80 s, the helper's
-operation context, to be revisited in Step 29C.3), and all of them the same address. It is
-refused when:
+operation context; Step 29C.3 runs the whole attempt under one deadline of that length), and all
+of them the same address. It is refused when:
 
 - a required observation is missing, or there are more observations than sources;
 - an observation names an unknown source, or a source twice;
@@ -944,9 +945,9 @@ The probe window now takes its destination: `managedProbeRulesFor(destination)` 
 and the same two permits (wg0, TCP 443, 30 s kernel timeout) with that one element, and the
 verifying and closing code requires exactly that element. A window holding another address, public
 or not, is refused and is not closed by a request for another destination. An expired window (no
-element listed) is accepted for cleanup only. The rule for Step 29C.3, which will sequence the
+element listed) is accepted for cleanup only. The rule Step 29C.3 follows when it sequences the
 sources: each source gets its own window, closed and verified before the next one opens, and a
-window that cannot be closed stops the attempt. Nothing sequences sources yet. The single-source
+window that cannot be closed stops the attempt. The single-source
 `PermitProbe` still opens only the 1.1.1.1 window, now through the destination-aware functions.
 
 Host preflight on 2026-11-25 (an observation, not the provisioned pin): `4.ident.me` resolved to
@@ -956,5 +957,58 @@ HTTP 200 with a verified certificate and a bare IPv4 address of 12 bytes with no
 same address the Cloudflare trace reported. The ASN lookup shows two different networks; it does
 not prove the operators independent. This was a host check, not a managed observation: it
 fed no registry and no lease. The new source code is unit-tested only (a local TLS server stands in
-for the sources); no window for a second destination has run on a kernel yet, and the runtime does
-not call any of it until Step 29C.3.
+for the sources); no window for a second destination has run on a kernel yet. Step 29C.3 calls it
+from the multi-source lifecycle.
+
+### Managed multi-source probe lifecycle (Step 29C.3)
+
+`ProbeConfiguredMulti` (`managed_multi_probe.go`) observes the tunnel's public IPv4 address from
+every mandatory source, one after another, through the same configured tunnel. The namespace
+manager lock is held for the whole attempt and the attempt has one 80 s deadline, so no backend
+operation can disconnect, reconnect or change the tunnel between two observations. The lock does
+not stop another privileged process on the host from changing kernel state, so the kernel is
+checked again throughout:
+
+| Gate | When |
+|---|---|
+| Backend configuration, source policy, tunnel ownership | before the attempt starts |
+| Full tunnel verification (link, sealed firewall, IPv6, underlay, peer, network) | before the first window and after every window |
+| Empty namespace process inventory | before and after every window |
+| Kernel route lookup for the source's own destination (wg0, planned source address) | before every window |
+| Window readback (exact destination, time left) | after opening and when the worker returns |
+| Window close and sealed policy readback | after every source, with its own context |
+| Recent handshake with the expected peer, judged at the finish time | after the last source |
+| Strict consensus against the whole mandatory policy | before any evidence is returned |
+
+Each source gets its own kernel-timed window for its own destination. The next window cannot open
+until the previous one is closed and verified and the worker has exited; a window that cannot be
+closed marks the namespace drifted and stops the attempt. There is no retry per source: the
+second source only gets the time the first one left.
+
+The worker receives only a built-in source ID and its numeric IPv4 pin (`egresslab-probe --source
+cloudflare_trace 1.1.1.1` or `--source ident_me <pin>`); the host name, path and response format
+come from code, and it accepts no URL, host, port, proxy or TLS setting. It runs through the same
+`ip netns exec … setpriv` drop as the single-source probe, with no supplementary groups, no
+capabilities, no_new_privs and no inherited environment, and its output is capped at 4 KiB. The
+parent parses and validates every body itself in the source's format.
+
+Before the attempt starts, a refusal (no multi-source configuration, an invalid source policy,
+another namespace, a faulted tunnel, a cancelled context) changes nothing. Once it has started, any
+failure discards every observation, faults the tunnel and removes it; an unconfirmed removal keeps
+the faulted tunnel tracked (`ErrManagedTunnelUncertain`). All timestamps are wall-clock UTC, and each one is
+checked against monotonic time: if the wall clock moved more than 1 s away from it since the
+attempt started or since the previous reading (a clock step in either direction), or if a
+reading is earlier than the previous one, the attempt fails closed.
+
+A successful attempt returns the agreed IPv4 address, the start and finish times, the earliest
+source observation time, the handshake time, per-source evidence (source, destination, address,
+time) and `network_ready=false`. It authorizes no lease and no application traffic.
+
+The multi-source backend is enabled only by its own constructor,
+`NewManagedMultiProbeTunnelBackend`, which takes the ident.me pin from trusted local provisioning.
+It leaves the single-source runner disabled, so a failed multi-source attempt cannot fall back to
+one source; `NewManagedProbeTunnelBackend` (single source) and `NewManagedTunnelBackend` (no
+probe) are unchanged. `egresslab-helper` still uses the single-source backend, and nothing in the
+signed IPC calls the multi-source lifecycle until Step 29C.4. The lifecycle is tested against
+fakes only: the worker's argument refusals ran on Lima, but no `--source` worker and no window for
+a second destination has run in a real namespace.

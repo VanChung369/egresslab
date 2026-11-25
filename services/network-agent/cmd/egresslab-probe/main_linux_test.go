@@ -43,3 +43,40 @@ func TestRequireProbePrivileges(t *testing.T) {
 		}
 	}
 }
+
+func TestParseWorkerProbeRequest(t *testing.T) {
+	if request, err := parseWorkerProbeRequest(nil); err != nil || !request.legacy {
+		t.Fatalf("legacy invocation refused: %+v %v", request, err)
+	}
+
+	for _, args := range [][]string{
+		{"--source", "cloudflare_trace", "1.1.1.1"},
+		{"--source", "ident_me", "9.9.9.9"},
+	} {
+		request, err := parseWorkerProbeRequest(args)
+		if err != nil || request.legacy || request.sourceID != args[1] || request.destination.String() != args[2] {
+			t.Fatalf("%v: %+v %v", args, request, err)
+		}
+	}
+
+	for _, args := range [][]string{
+		{""},
+		{"--source"},
+		{"--source", "ident_me"},
+		{"--source", "unknown", "9.9.9.9"},
+		{"--source", "IDENT_ME", "9.9.9.9"},
+		{"--source", "ident_me", "4.ident.me"},
+		{"--source", "ident_me", "9.9.9.9:443"},
+		{"--source", "ident_me", "2001:db8::1"},
+		{"--source", "ident_me", "::ffff:9.9.9.9"},
+		{"--source", "ident_me", "9.9.9.9 "},
+		{"--source", "ident_me", "009.9.9.9"},
+		{"--source", "ident_me", "9.9.9.9", "--insecure"},
+		{"--source=ident_me", "9.9.9.9"},
+		{"--url", "https://example.com/"},
+	} {
+		if _, err := parseWorkerProbeRequest(args); err == nil {
+			t.Fatalf("invalid worker arguments accepted: %q", args)
+		}
+	}
+}

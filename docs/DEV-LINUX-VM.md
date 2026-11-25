@@ -367,6 +367,18 @@ Do not reuse the agent's UID: the worker needs neither the helper socket nor the
 
 The log then reads `signed sealed lab, managed tunnel and diagnostic probe enabled; proxy disabled`. `egresslab-helperctl probe-egress PROFILE_ID NAMESPACE < capability.json` runs one probe of the lab's tunnel; `egresslab-controller-lab -approve probe-egress PROFILE_ID NAMESPACE` signs the capability and prints the observation (Step 29B.2b).
 
+### Managed multi-source worker (Step 29C.3)
+
+The worker now has two modes: with no arguments it is the single-source Cloudflare probe above; with `--source SOURCE_ID IPV4` it makes one request to a built-in source (`cloudflare_trace` or `ident_me`) pinned to that numeric address. Only the helper uses the second mode, inside that source's own timed firewall window; running the worker by hand produces no managed evidence. It still refuses root, supplementary groups, any capability and a missing no_new_privs before any request, and it checks its arguments before that:
+
+```bash
+egresslab-probe --source unknown 9.9.9.9        # unknown probe source, exit 1
+egresslab-probe --url https://example.com/      # invalid probe arguments, exit 1
+egresslab-probe --source ident_me 2001:db8::1   # invalid probe destination, exit 1
+```
+
+Build and test it on Linux before installing it. End-to-end multi-source testing over the VPN needs the signed IPC and controller integration of Step 29C.4; do not open the lab firewall by hand to try it.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
@@ -387,8 +399,8 @@ curl -q --noproxy '*' --ipv4 --proto '=https' --connect-timeout 5 --max-time 10 
   --resolve "4.ident.me:443:<candidate IPv4>" -H 'Accept-Encoding: identity' -fsS https://4.ident.me/
 ```
 
-If DNS returns several addresses, do not take the first one blindly. The provider does not promise a stable address. DNS at probe time, automatic replacement of the address and skipping certificate verification (`curl -k`) are not allowed. A host-side check reveals the host's own public IP to the provider; it is not a managed observation and never activates an egress lease. No helper configuration takes the pin yet (Step 29C.3).
+If DNS returns several addresses, do not take the first one blindly. The provider does not promise a stable address. DNS at probe time, automatic replacement of the address and skipping certificate verification (`curl -k`) are not allowed. A host-side check reveals the host's own public IP to the provider; it is not a managed observation and never activates an egress lease. No helper configuration takes the pin yet: `NewManagedMultiProbeTunnelBackend` accepts it (Step 29C.3), but the helper exposes no flag for it until Step 29C.4.
 
 ## Next Milestone
 
-Multi-source public IP verification: the managed multi-source probe lifecycle (Step 29C.3), then its signed IPC and controller integration (Step 29C.4). The consensus engine (Step 29C.1) and the pinned HTTPS sources with destination-aware windows (Step 29C.2) exist but are not wired in. See `docs/PRIVILEGED-HELPER.md`.
+Multi-source public IP verification: signed IPC and controller integration of the multi-source lifecycle (Step 29C.4). The consensus engine (Step 29C.1), the pinned HTTPS sources with destination-aware windows (Step 29C.2) and the managed multi-source lifecycle (Step 29C.3) exist in the network agent, but no helper operation calls them yet. See `docs/PRIVILEGED-HELPER.md`.

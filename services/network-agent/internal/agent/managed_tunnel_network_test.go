@@ -24,6 +24,9 @@ const (
 
 	managedSelectionFixture = `[{"dst":"1.1.1.1","dev":"wg0","prefsrc":"10.2.0.2","flags":[],"uid":0,"cache":[]}]`
 
+	// The same lookup for the synthetic ident.me pin of the probe tests.
+	managedPinSelectionFixture = `[{"dst":"9.9.9.9","dev":"wg0","prefsrc":"10.2.0.2","flags":[],"uid":0,"cache":[]}]`
+
 	// The same capture with the address as 10.2.0.2/24.
 	managedSubnetRoutesFixture = `[{"dst":"default","dev":"wg0","scope":"link","flags":[]},{"dst":"10.2.0.0/24",` +
 		`"dev":"wg0","protocol":"kernel","scope":"link","prefsrc":"10.2.0.2","flags":[]},{"type":"local",` +
@@ -43,6 +46,7 @@ var managedNetworkReadbacks = map[string]string{
 	"-4 -json rule show":            managedRulesFixture,
 	"-4 -json route show table all": managedRoutesFixture,
 	"-4 -json route get 1.1.1.1":    managedSelectionFixture,
+	"-4 -json route get 9.9.9.9":    managedPinSelectionFixture,
 }
 
 func managedTestPolicy(prefix string) managedNetworkPolicy {
@@ -53,11 +57,14 @@ func TestManagedNetworkAcceptsKernelCaptures(t *testing.T) {
 	policy := managedTestPolicy("10.2.0.2/32")
 
 	for name, err := range map[string]error{
-		"addresses":       verifyManagedAddresses([]byte(managedAddressFixture), policy),
-		"empty link":      verifyManagedAddresses([]byte("[{},"+managedAddressFixture[1:]), policy),
-		"rules":           verifyManagedRules([]byte(managedRulesFixture)),
-		"routes":          verifyManagedRoutes([]byte(managedRoutesFixture), policy),
-		"route selection": verifyManagedRouteSelection([]byte(managedSelectionFixture), policy),
+		"addresses":  verifyManagedAddresses([]byte(managedAddressFixture), policy),
+		"empty link": verifyManagedAddresses([]byte("[{},"+managedAddressFixture[1:]), policy),
+		"rules":      verifyManagedRules([]byte(managedRulesFixture)),
+		"routes":     verifyManagedRoutes([]byte(managedRoutesFixture), policy),
+		"route selection": verifyManagedRouteSelection([]byte(managedSelectionFixture), policy,
+			netip.MustParseAddr("1.1.1.1")),
+		"pin route selection": verifyManagedRouteSelection([]byte(managedPinSelectionFixture), policy,
+			netip.MustParseAddr("9.9.9.9")),
 	} {
 		if err != nil {
 			t.Errorf("%s: %v", name, err)

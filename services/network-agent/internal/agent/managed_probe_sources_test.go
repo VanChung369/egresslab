@@ -269,3 +269,38 @@ func TestIdentityEncodingOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestManagedProbeSourceFactory(t *testing.T) {
+	for _, expected := range testManagedHTTPSources(t) {
+		actual, err := managedProbeHTTPSourceFor(expected.id, expected.destination)
+		if err != nil || actual != expected {
+			t.Fatalf("source not rebuilt: %+v %v", actual, err)
+		}
+	}
+
+	for _, tt := range []struct {
+		id  string
+		pin netip.Addr
+	}{
+		{"unknown", netip.MustParseAddr("9.9.9.9")},
+		{"", netip.MustParseAddr("9.9.9.9")},
+		{"cloudflare_trace", netip.MustParseAddr("8.8.8.8")},
+		{"ident_me", netip.MustParseAddr("1.1.1.1")},
+		{"ident_me", netip.MustParseAddr("10.0.0.1")},
+		{"ident_me", netip.MustParseAddr("100.64.0.1")},
+		{"ident_me", netip.MustParseAddr("192.0.2.42")},
+		{"ident_me", netip.MustParseAddr("::ffff:9.9.9.9")},
+		{"ident_me", netip.MustParseAddr("2001:db8::1")},
+		{"ident_me", netip.Addr{}},
+	} {
+		if _, err := managedProbeHTTPSourceFor(tt.id, tt.pin); !errors.Is(err, ErrManagedProbeSourcePolicy) {
+			t.Fatalf("invalid source accepted: %q %v: %v", tt.id, tt.pin, err)
+		}
+
+		// Refused before any connection is attempted.
+		body, err := FetchManagedProbeSource(context.Background(), tt.id, tt.pin)
+		if body != nil || !errors.Is(err, ErrManagedProbeSourcePolicy) {
+			t.Fatalf("invalid source reached the transport: %q %v: %v", tt.id, tt.pin, err)
+		}
+	}
+}

@@ -358,9 +358,10 @@ func verifyManagedRoutes(data []byte, p managedNetworkPolicy) error {
 	return nil
 }
 
-// verifyManagedRouteSelection reads "ip -4 -json route get 1.1.1.1", a kernel lookup that sends no
-// packet: it must choose wg0 with a planned source address. It does not prove that traffic flows.
-func verifyManagedRouteSelection(data []byte, p managedNetworkPolicy) error {
+// verifyManagedRouteSelection reads "ip -4 -json route get <destination>", a kernel lookup that
+// sends no packet: it must choose wg0 with a planned source address. It does not prove that traffic
+// flows.
+func verifyManagedRouteSelection(data []byte, p managedNetworkPolicy, destination netip.Addr) error {
 	type selection struct {
 		Destination     string   `json:"dst"`
 		Device          string   `json:"dev"`
@@ -383,7 +384,7 @@ func verifyManagedRouteSelection(data []byte, p managedNetworkPolicy) error {
 	_, known := p.address(src)
 
 	if err != nil || !known ||
-		r.Destination != managedRouteProbe ||
+		r.Destination != destination.String() ||
 		r.Device != labWGInterface ||
 		(r.Table != "" && r.Table != "main") ||
 		(r.Type != "" && r.Type != "unicast") ||
@@ -409,7 +410,9 @@ func (b *ManagedTunnelBackend) verifyNetworkLocked(ctx context.Context, t *manag
 		{"routes", []string{"-4", "-json", "route", "show", "table", "all"},
 			func(data []byte) error { return verifyManagedRoutes(data, t.network) }},
 		{"route selection", []string{"-4", "-json", "route", "get", managedRouteProbe},
-			func(data []byte) error { return verifyManagedRouteSelection(data, t.network) }},
+			func(data []byte) error {
+				return verifyManagedRouteSelection(data, t.network, netip.MustParseAddr(managedRouteProbe))
+			}},
 	}
 
 	for _, check := range checks {
@@ -420,6 +423,28 @@ func (b *ManagedTunnelBackend) verifyNetworkLocked(ctx context.Context, t *manag
 		if err != nil || check.verify(data) != nil {
 			return fmt.Errorf("%w: %s", ErrManagedNetworkDrift, check.name)
 		}
+	}
+
+	return nil
+}
+
+// verifyRouteSelectionLocked checks the kernel's route lookup for one public IPv4 destination, such
+// as a probe source's pin. The caller must hold manager.mu.
+func (b *ManagedTunnelBackend) verifyRouteSelectionLocked(
+	ctx context.Context,
+	t *managedTunnel,
+	destination netip.Addr,
+) error {
+	if _, err := parseCandidateIPv4(destination.String()); err != nil {
+		return fmt.Errorf("%w: route selection", ErrManagedNetworkDrift)
+	}
+
+	commandCtx, cancel := context.WithTimeout(ctx, netNSCommandTimeout)
+	defer cancel()
+
+	data, err := b.sealed.manager.run(commandCtx, "-n", t.namespace, "-4", "-json", "route", "get", destination.String())
+	if err != nil || verifyManagedRouteSelection(data, t.network, destination) != nil {
+		return fmt.Errorf("%w: route selection", ErrManagedNetworkDrift)
 	}
 
 	return nil

@@ -32,42 +32,73 @@ type managedProbeHTTPSource struct {
 // provisioning only: never from an IPC request, an environment variable or an automatic DNS lookup.
 // Cloudflare's destination is its literal address.
 func managedProbeHTTPSources(identPin netip.Addr) ([]managedProbeHTTPSource, error) {
-	sources := []managedProbeHTTPSource{
-		{
-			managedProbeSourceSpec: managedProbeSourceSpec{
-				id:          managedCloudflareSourceID,
-				operator:    "cloudflare",
-				destination: netip.MustParseAddr("1.1.1.1"),
-			},
-			host: "1.1.1.1",
-			path: "/cdn-cgi/trace",
-		},
-		{
-			managedProbeSourceSpec: managedProbeSourceSpec{
-				id:          managedIdentSourceID,
-				operator:    "ident_me",
-				destination: identPin,
-			},
-			host: "4.ident.me",
-			path: "/",
-		},
+	cloudflare, err := managedProbeHTTPSourceFor(managedCloudflareSourceID, netip.MustParseAddr("1.1.1.1"))
+	if err != nil {
+		return nil, err
 	}
 
-	specs := make([]managedProbeSourceSpec, 0, len(sources))
-
-	for _, source := range sources {
-		if err := source.validate(); err != nil {
-			return nil, err
-		}
-
-		specs = append(specs, source.managedProbeSourceSpec)
+	ident, err := managedProbeHTTPSourceFor(managedIdentSourceID, identPin)
+	if err != nil {
+		return nil, err
 	}
 
+	specs := []managedProbeSourceSpec{cloudflare.managedProbeSourceSpec, ident.managedProbeSourceSpec}
 	if err := validateManagedProbeSources(specs); err != nil {
 		return nil, err
 	}
 
-	return sources, nil
+	return []managedProbeHTTPSource{cloudflare, ident}, nil
+}
+
+// managedProbeHTTPSourceFor rebuilds a known source from its ID and numeric destination. The
+// caller stays responsible for where that destination came from and for authorizing it.
+func managedProbeHTTPSourceFor(id string, destination netip.Addr) (managedProbeHTTPSource, error) {
+	var source managedProbeHTTPSource
+
+	switch id {
+	case managedCloudflareSourceID:
+		source = managedProbeHTTPSource{
+			managedProbeSourceSpec: managedProbeSourceSpec{
+				id:          managedCloudflareSourceID,
+				operator:    "cloudflare",
+				destination: destination,
+			},
+			host: "1.1.1.1",
+			path: "/cdn-cgi/trace",
+		}
+
+	case managedIdentSourceID:
+		source = managedProbeHTTPSource{
+			managedProbeSourceSpec: managedProbeSourceSpec{
+				id:          managedIdentSourceID,
+				operator:    "ident_me",
+				destination: destination,
+			},
+			host: "4.ident.me",
+			path: "/",
+		}
+
+	default:
+		return managedProbeHTTPSource{}, ErrManagedProbeSourcePolicy
+	}
+
+	if err := source.validate(); err != nil {
+		return managedProbeHTTPSource{}, err
+	}
+
+	return source, nil
+}
+
+// FetchManagedProbeSource makes one HTTPS request to a built-in source; it is the worker's entry
+// point. It opens no firewall window and its result is not managed tunnel evidence: the privileged
+// parent chooses the destination from trusted policy and parses the body itself.
+func FetchManagedProbeSource(ctx context.Context, sourceID string, destination netip.Addr) ([]byte, error) {
+	source, err := managedProbeHTTPSourceFor(sourceID, destination)
+	if err != nil {
+		return nil, err
+	}
+
+	return fetchManagedProbeBody(ctx, source)
 }
 
 // validate accepts only the two known sources, exactly as built in.
@@ -123,7 +154,7 @@ func newManagedProbeHTTPClient(host string, destination netip.Addr, dial probeDi
 	}
 }
 
-// fetchManagedProbeBody makes one request to a validated source. Step 29C.3 runs it inside the
+// fetchManagedProbeBody makes one request to a validated source. The worker runs it inside the
 // source's own firewall window.
 func fetchManagedProbeBody(ctx context.Context, source managedProbeHTTPSource) ([]byte, error) {
 	if err := source.validate(); err != nil {

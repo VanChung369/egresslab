@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,10 +61,12 @@ func (b *boundedProbeOutput) Write(data []byte) (int, error) {
 	return b.buf.Write(data)
 }
 
-// newSystemManagedProbeRunner runs egresslab-probe in the lab namespace as probeUID:probeGID, with
-// no supplementary groups, no capabilities and no_new_privs ("ip netns exec" enters the namespace,
-// setpriv then drops everything). The worker takes no arguments: its URL is fixed.
-func newSystemManagedProbeRunner(uid, gid int) (egressProbeRunner, error) {
+type managedProbeProcessRunner func(ctx context.Context, namespace string, workerArgs ...string) ([]byte, error)
+
+// newSystemManagedProbeProcessRunner runs egresslab-probe in the lab namespace as probeUID:probeGID,
+// with no supplementary groups, no capabilities and no_new_privs ("ip netns exec" enters the
+// namespace, setpriv then drops everything). Only the trusted wrappers below choose workerArgs.
+func newSystemManagedProbeProcessRunner(uid, gid int) (managedProbeProcessRunner, error) {
 	if uid <= 0 || gid <= 0 || uint64(uid) >= uint64(^uint32(0)) || uint64(gid) >= uint64(^uint32(0)) {
 		return nil, ErrManagedProbeUnavailable
 	}
@@ -82,20 +85,24 @@ func newSystemManagedProbeRunner(uid, gid int) (egressProbeRunner, error) {
 		return nil, err
 	}
 
-	return func(ctx context.Context, namespace, url string) ([]byte, error) {
-		if !labNamePattern.MatchString(namespace) || url != DefaultEgressProbeURL {
+	return func(ctx context.Context, namespace string, workerArgs ...string) ([]byte, error) {
+		if !labNamePattern.MatchString(namespace) {
 			return nil, ErrProbeDestination
+		}
+
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 
 		if err := verifyProbeBinary(managedProbeBinary); err != nil {
 			return nil, err
 		}
 
-		cmd := exec.CommandContext(ctx, ipPath,
+		args := []string{
 			"netns", "exec", namespace,
 			setprivPath,
-			"--reuid="+strconv.Itoa(uid),
-			"--regid="+strconv.Itoa(gid),
+			"--reuid=" + strconv.Itoa(uid),
+			"--regid=" + strconv.Itoa(gid),
 			"--clear-groups",
 			"--inh-caps=-all",
 			"--ambient-caps=-all",
@@ -103,7 +110,9 @@ func newSystemManagedProbeRunner(uid, gid int) (egressProbeRunner, error) {
 			"--no-new-privs",
 			"--",
 			managedProbeBinary,
-		)
+		}
+
+		cmd := exec.CommandContext(ctx, ipPath, append(args, workerArgs...)...)
 
 		isolateFromTerminalSignals(cmd)
 
@@ -128,6 +137,39 @@ func newSystemManagedProbeRunner(uid, gid int) (egressProbeRunner, error) {
 	}, nil
 }
 
+// newSystemManagedProbeRunner is the legacy single-source runner: the worker without arguments,
+// for the fixed trace URL only.
+func newSystemManagedProbeRunner(uid, gid int) (egressProbeRunner, error) {
+	run, err := newSystemManagedProbeProcessRunner(uid, gid)
+	if err != nil {
+		return nil, err
+	}
+
+	return func(ctx context.Context, namespace, url string) ([]byte, error) {
+		if url != DefaultEgressProbeURL {
+			return nil, ErrProbeDestination
+		}
+
+		return run(ctx, namespace)
+	}, nil
+}
+
+// newSystemManagedMultiProbeRunner passes the worker one built-in source ID and its numeric pin.
+func newSystemManagedMultiProbeRunner(uid, gid int) (managedMultiProbeRunner, error) {
+	run, err := newSystemManagedProbeProcessRunner(uid, gid)
+	if err != nil {
+		return nil, err
+	}
+
+	return func(ctx context.Context, namespace string, source managedProbeHTTPSource) ([]byte, error) {
+		if err := source.validate(); err != nil {
+			return nil, err
+		}
+
+		return run(ctx, namespace, "--source", source.id, source.destination.String())
+	}, nil
+}
+
 // NewManagedProbeTunnelBackend is the explicit opt-in for the signed probe lifecycle (Step 29B.2).
 // NewManagedTunnelBackend stays probe-disabled.
 func NewManagedProbeTunnelBackend(
@@ -146,6 +188,34 @@ func NewManagedProbeTunnelBackend(
 	}
 
 	backend.vpn.probe = runner
+
+	return backend, nil
+}
+
+// NewManagedMultiProbeTunnelBackend is the explicit opt-in for the multi-source lifecycle. identPin
+// comes from trusted local provisioning, never from the controller or an IPC request. The legacy
+// single-source runner stays disabled, so a failed multi-source attempt has nothing to fall back to.
+func NewManagedMultiProbeTunnelBackend(
+	sealed *SealedLabBackend,
+	vault *WireGuardConfigVault,
+	probeUID, probeGID int,
+	identPin netip.Addr,
+) (*ManagedTunnelBackend, error) {
+	if _, err := managedProbeHTTPSources(identPin); err != nil {
+		return nil, err
+	}
+
+	backend, err := NewManagedTunnelBackend(sealed, vault)
+	if err != nil {
+		return nil, err
+	}
+
+	runner, err := newSystemManagedMultiProbeRunner(probeUID, probeGID)
+	if err != nil {
+		return nil, err
+	}
+
+	backend.multiProbe = &managedMultiProbeConfig{identPin: identPin, run: runner}
 
 	return backend, nil
 }

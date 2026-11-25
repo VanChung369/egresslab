@@ -29,6 +29,8 @@ type ManagedTunnelBackend struct {
 	vault  *WireGuardConfigVault
 	vpn    *VPNEgressLab
 
+	multiProbe *managedMultiProbeConfig
+
 	lookupEndpoint endpointLookup
 
 	active *managedTunnel
