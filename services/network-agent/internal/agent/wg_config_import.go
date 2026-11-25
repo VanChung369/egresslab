@@ -109,7 +109,13 @@ func (c *ImportedWireGuardConfig) Summary() WireGuardImportSummary {
 // CheckVPNLabCompatibility reports, at import time, whether the VPN egress lab can use cfg. The
 // importer accepts a wider set (for example hostname endpoints) than the lab can connect.
 func CheckVPNLabCompatibility(cfg *ImportedWireGuardConfig) error {
-	_, err := planVPNTunnel(cfg)
+	plan, err := planVPNTunnel(cfg)
+	if err != nil {
+		return err
+	}
+
+	_, err = newManagedNetworkPolicy(cfg, plan)
+
 	return err
 }
 

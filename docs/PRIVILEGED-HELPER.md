@@ -1,10 +1,10 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 27C.1 — WireGuard peer verification and endpoint pinning.** A controller CLI
-signs `CreateLab` and `ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in
-the Linux runtime; the helper holds the encrypted WireGuard configs, checks the peer state the
-kernel reports against the staged config, and stays the source of truth for lab and tunnel
-state. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to end. Probes and
+Status: **Step 27C.2 — managed network verification.** A controller CLI signs `CreateLab` and
+`ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in the Linux runtime; the
+helper holds the encrypted WireGuard configs, checks the peer state and the IPv4 addresses, MTU,
+rules and routes the kernel reports against the staged config, and stays the source of truth for
+lab and tunnel state. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to end. Probes and
 proxy traffic are still not implemented; the sections from "Typed operations only" on are
 partly design.
 
@@ -78,9 +78,8 @@ partly design.
   after sealing (only the managed tunnel backend also checks the intended policy); egress-IP
   leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
-- Interface address, MTU, routing table and policy routing verification (Step 27C.2); hostname
-  endpoints, DNS policy and endpoint selection (Step 27C.3). The HTTP controller and the desktop
-  know nothing of labs or tunnels; only the lab CLI drives them.
+- Hostname endpoints, DNS policy and endpoint selection (Step 27C.3). The HTTP controller and
+  the desktop know nothing of labs or tunnels; only the lab CLI drives them.
 - A controller approval workflow for individual operations.
 - Live key rotation and automatic key distribution.
 - `PermitProbe` and `RecoverClean` through IPC.
@@ -503,15 +502,18 @@ itself, so it must never be wired to the HTTP agent.
 6. No `egwg*` link and no managed alias exists in the VM namespace.
 7. The expected peer state is written down from the vault config alone: the interface public key
    (`wg pubkey`, the private key on stdin), the peer key, the pinned IPv4 endpoint and port, and
-   the keepalive. A key that cannot be derived, or equals the peer's, stops here.
+   the keepalive. A key that cannot be derived, or equals the peer's, stops here. So is the
+   expected network state: the planned IPv4 addresses (distinct unicast prefixes) and the MTU
+   (the config's, or 1420).
 8. The root underlay table is installed. Then the link is created with an alias
    `egresslab-managed:<namespace>:<link>`, moved into the lab and renamed `wg0`. Its name, alias
    and kind (`wireguard`) are read back.
 9. After the fwmark and private key are set, and before any peer exists, the lab firewall, the
    underlay table and the fwmark are read back again, and the kernel must report the expected
    interface public key and no peer.
-10. The peer, addresses, MTU and default route are configured. The link, firewall and underlay
-    are checked once more, and so is the peer (see "Peer verification").
+10. The peer, addresses, MTU and default route are configured; without an MTU in the config,
+    1420 is set explicitly. The link, firewall and underlay are checked once more, and so are the
+    peer (see "Peer verification") and the network (see "Network verification").
 
 What the backend guarantees:
 
@@ -526,8 +528,8 @@ What the backend guarantees:
   failed, the underlay install failed), the table is kept and the tunnel stays tracked as faulted.
   New tunnels are then refused until `Disconnect` succeeds or the helper restarts and recovery is
   done by hand.
-- `VerifyConfigured` re-reads the link, firewall, underlay and peer; a failure faults the
-  tunnel, and a later correct readback does not clear the fault.
+- `VerifyConfigured` re-reads the link, firewall, underlay, peer and network; a failure faults
+  the tunnel, and a later correct readback does not clear the fault.
 
 **Peer verification.** Each property is read on its own with `wg show wg0 <property>`, never with
 `showconf` or `dump`, which print the private and preshared keys, and compared exactly with the
@@ -551,6 +553,29 @@ endpoint) is not seen. Moving to another endpoint will need a controlled transit
 preshared key is never read back, so it is not verified; a wrong one only breaks the handshake.
 The formats are pinned by a real capture (`testdata/wg-show-peer.json`).
 
+**Network verification (Step 27C.2).** A `default dev wg0` route alone proves little: Linux picks
+a routing table through policy rules (by source, fwmark, UID or interface), so the addresses, the
+rules, every table and the kernel's own route choice are read back together, with `ip -4 -json`
+in the lab namespace. The expected state comes from the vault config alone.
+
+| Readback | Must be |
+|---|---|
+| `addr show` | only `wg0` has IPv4 addresses: exactly the planned ones (prefix length, scope `global`, no expiry), with the planned MTU and the flags `UP`, `POINTOPOINT` and `NOARP`. `lo` stays without an address |
+| `rule show` | exactly the three default rules: `0 local`, `32766 main`, `32767 default` |
+| `route show table all` | every route on `wg0`. Main table: one `default` route (scope `link`, no gateway) and the kernel's connected route for each planned prefix shorter than /32. Local table: the `local` route of each planned address and the broadcast routes derived from them. No other table |
+| `route get 1.1.1.1` | `wg0`, with a planned address as source |
+
+Any attribute the check does not know (a gateway, metric, fwmark, nexthop, encapsulation, ...)
+fails it, as does an unreadable or empty readback. `UP` is the administrative state only, and
+`route get` is a kernel lookup that sends no packet: neither proves a handshake or working
+traffic. The check is IPv4 only and sees one moment, like the peer check. The import summary's
+`vpn_lab_compatible` now also requires the planned addresses to be distinct unicast IPv4
+prefixes, so the controller refuses such a stage before signing. The formats come from real
+captures (iproute2 6.1, Linux 6.8, Ubuntu 24.04), kept in `managed_tunnel_network_test.go`. This
+check has run end to end on Lima only, not yet on WSL2 (Ubuntu 22.04, an older iproute2): since
+the readbacks are decoded strictly, a format difference there would fault every tunnel. The
+controller reports only `LAB_FAULTED`; the helper log names the readback that drifted.
+
 Known gaps:
 
 - One tunnel per helper (see "Signed tunnel lifecycle"); more need a tunnel registry that the
@@ -561,9 +586,8 @@ Known gaps:
 - If `ip link del` removes the link but reports an error (a timeout), or the inventory after it
   fails, later `Disconnect` calls find no link and stay uncertain: the table is kept until the
   operator recovers by hand.
-- Addresses, MTU and routes are not read back (Step 27C.2), hostname endpoints are not
-  supported (Step 27C.3), and nothing monitors the tunnel continuously; drift is found only by
-  `VerifyLab`.
+- Hostname endpoints are not supported (Step 27C.3), IPv6 is neither configured nor verified,
+  and nothing monitors the tunnel continuously; drift is found only by `VerifyLab`.
 
 ## Invariants the helper keeps
 

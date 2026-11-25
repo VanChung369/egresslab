@@ -31,13 +31,17 @@ type managedTestKernel struct {
 	peerInstalled bool
 	wgReadError   string            // a "wg show" property that fails to read
 	wgOverrides   map[string]string // "wg show" property -> value the kernel reports instead
+
+	mtu              string            // set by "link set wg0 mtu"; empty means the WireGuard default
+	networkReadError string            // an "ip -4 -json" readback that fails
+	networkOverrides map[string]string // "ip -4 -json" readback -> value the kernel reports instead
 }
 
 func newManagedTunnelFixture(t *testing.T) (*ManagedTunnelBackend, *managedTestKernel) {
 	t.Helper()
 
 	vpn, _ := testVPNLab(true)
-	kernel := &managedTestKernel{wgOverrides: make(map[string]string)}
+	kernel := &managedTestKernel{wgOverrides: make(map[string]string), networkOverrides: make(map[string]string)}
 
 	sealed := &SealedLabBackend{manager: vpn.manager, firewall: vpn.firewall}
 	backend := &ManagedTunnelBackend{sealed: sealed, vpn: vpn}
@@ -162,6 +166,29 @@ func (k *managedTestKernel) runIP(_ context.Context, args ...string) ([]byte, er
 		return json.Marshal(links)
 	}
 
+	command := strings.Join(args, " ")
+
+	if fixture, exists := managedNetworkReadbacks[command]; exists {
+		if namespace != vpnTestNS || k.name != labWGInterface || k.namespace != namespace {
+			return nil, errors.New("tunnel not configured")
+		}
+
+		if command == k.networkReadError {
+			return nil, errors.New("network readback failed")
+		}
+
+		if override, exists := k.networkOverrides[command]; exists {
+			return []byte(override), nil
+		}
+
+		mtu := k.mtu
+		if mtu == "" {
+			mtu = "1420"
+		}
+
+		return []byte(strings.Replace(fixture, `"mtu":1280`, `"mtu":`+mtu, 1)), nil
+	}
+
 	k.mutations++
 
 	switch {
@@ -185,6 +212,9 @@ func (k *managedTestKernel) runIP(_ context.Context, args ...string) ([]byte, er
 
 		k.name = args[4]
 
+	case len(args) == 5 && args[0] == "link" && args[1] == "set" && args[2] == labWGInterface && args[3] == "mtu":
+		k.mtu = args[4]
+
 	case len(args) == 4 && args[0] == "link" && args[1] == "del":
 		if k.failDelete {
 			return nil, errors.New("delete failed")
@@ -194,7 +224,7 @@ func (k *managedTestKernel) runIP(_ context.Context, args ...string) ([]byte, er
 			return nil, errors.New("unexpected link deletion")
 		}
 
-		k.name, k.alias, k.namespace = "", "", ""
+		k.name, k.alias, k.namespace, k.mtu = "", "", "", ""
 		k.peerInstalled = false
 	}
 

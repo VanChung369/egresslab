@@ -79,6 +79,12 @@ func (b *ManagedTunnelBackend) connectConfig(ctx context.Context, namespace stri
 		return fmt.Errorf("%w: endpoint must be a unicast address", ErrUnsupportedTunnelConfig)
 	}
 
+	// Before anything is created: the expected addresses and MTU, from the vault config alone.
+	network, err := newManagedNetworkPolicy(cfg, plan)
+	if err != nil {
+		return err
+	}
+
 	b.sealed.manager.mu.Lock()
 	defer b.sealed.manager.mu.Unlock()
 
@@ -136,6 +142,7 @@ func (b *ManagedTunnelBackend) connectConfig(ctx context.Context, namespace stri
 		rootName:  link,
 		alias:     managedTunnelAliasPrefix + namespace + ":" + link,
 		peer:      peer,
+		network:   network,
 	}
 
 	// Tracked before the first kernel change, so a failure can never forget what was created.
@@ -189,6 +196,10 @@ func (b *ManagedTunnelBackend) connectKernelLocked(
 		return err
 	}
 
+	if err := b.applyDefaultMTULocked(ctx, t, cfg); err != nil {
+		return fmt.Errorf("configure default MTU: %w", err)
+	}
+
 	// The peer, and with it the first handshake, comes only after the lab firewall, the root
 	// underlay policy (table and fwmark), the interface key and an empty peer list are read back.
 	beforePeer := func(ctx context.Context) error {
@@ -239,12 +250,16 @@ func (b *ManagedTunnelBackend) verifyConfiguredLocked(ctx context.Context, t *ma
 		return err
 	}
 
-	return b.verifyPeerLocked(ctx, t)
+	if err := b.verifyPeerLocked(ctx, t); err != nil {
+		return err
+	}
+
+	return b.verifyNetworkLocked(ctx, t)
 }
 
-// VerifyConfigured re-checks the link, the lab firewall, the underlay policy and the WireGuard peer
-// state against what was staged. It proves neither a handshake nor the egress address. A failure
-// faults the tunnel until Disconnect.
+// VerifyConfigured re-checks the link, the lab firewall, the underlay policy, the WireGuard peer
+// state and the IPv4 addresses, MTU, rules, routes and route lookup against what was staged. It
+// proves neither a handshake nor the egress address. A failure faults the tunnel until Disconnect.
 func (b *ManagedTunnelBackend) VerifyConfigured(ctx context.Context, namespace string) error {
 	b.sealed.manager.mu.Lock()
 	defer b.sealed.manager.mu.Unlock()

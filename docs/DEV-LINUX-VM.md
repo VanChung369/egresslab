@@ -340,7 +340,7 @@ Then add `-enable-vault` to the helper (with `-enable-lab-lifecycle` and the pub
 
 ### Managed tunnel (Step 27B.2)
 
-Add `-enable-tunnel` as well (it needs `-enable-vault`). On a sealed lab, `egresslab-helperctl connect-tunnel <profile ID> <namespace> <stage ID> < capability.json` brings the staged config up as `wg0` (`tunnel_configured`: configured only, no handshake or egress checked, no traffic permitted), and `egresslab-helperctl disconnect <profile ID> <namespace>` removes it again. `egresslab-controller-lab -approve connect-tunnel` signs the capability for you (see "Controller lab CLI"). One tunnel per helper: while it exists, `create-lab` gets `LAB_BUSY`. Stop the helper normally (`Ctrl+C`, `SIGTERM`) so it removes the tunnel before the namespace; after a crash, the underlay table must be removed by hand.
+Add `-enable-tunnel` as well (it needs `-enable-vault`). On a sealed lab, `egresslab-helperctl connect-tunnel <profile ID> <namespace> <stage ID> < capability.json` brings the staged config up as `wg0` (`tunnel_configured`: configured only, no handshake or egress checked, no traffic permitted), and `egresslab-helperctl disconnect <profile ID> <namespace>` removes it again. `egresslab-controller-lab -approve connect-tunnel` signs the capability for you (see "Controller lab CLI"). `verify-lab` re-checks the peer and the IPv4 addresses, MTU, rules and routes (Step 27C.2); any drift faults the lab and removes the tunnel. One tunnel per helper: while it exists, `create-lab` gets `LAB_BUSY`. Stop the helper normally (`Ctrl+C`, `SIGTERM`) so it removes the tunnel before the namespace; after a crash, the underlay table must be removed by hand.
 
 ## Security Notes
 
@@ -353,4 +353,4 @@ Add `-enable-tunnel` as well (it needs `-enable-vault`). On a sealed lab, `egres
 
 ## Next Milestone
 
-Address, MTU and route verification for the managed tunnel (Step 27C.2, see `docs/PRIVILEGED-HELPER.md`), then hostname endpoints and DNS policy (Step 27C.3).
+Hostname endpoints and DNS policy for the managed tunnel (Step 27C.3, see `docs/PRIVILEGED-HELPER.md`).

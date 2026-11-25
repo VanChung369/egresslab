@@ -31,7 +31,8 @@ type managedTunnel struct {
 	rootName  string
 	alias     string
 
-	peer managedPeerPolicy
+	peer    managedPeerPolicy
+	network managedNetworkPolicy
 
 	linkRemoved bool
 	faulted     bool
