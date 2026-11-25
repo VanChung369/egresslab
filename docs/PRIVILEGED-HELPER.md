@@ -11,8 +11,9 @@ unanimous evidence of two independent HTTPS sources; both are printed only. The 
 that evidence once into a local egress candidate (`ReserveEgressCandidateV1`), and the controller
 has the in-process core of the shared registry that holds each address for one tunnel owner; neither
 is wired to a client yet, and neither is a lease. Windows (WSL2), Linux and macOS (Lima, Keychain)
-are verified end to end. No lease or proxy traffic exists; the sections from "Typed operations only"
-on are partly design.
+are verified end to end, except that the multi-source probe has run on WSL2 and Lima only, not on
+native Linux. No lease or proxy traffic exists; the sections from "Typed operations only" on are
+partly design.
 
 ## Implemented
 

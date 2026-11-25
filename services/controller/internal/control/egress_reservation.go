@@ -60,7 +60,8 @@ type EgressReservation struct {
 // FreshAt reports the controller's local eligibility deadline only; it does not establish that the
 // helper still holds the candidate or a healthy tunnel. Expiry ends eligibility, not the hold.
 func (r EgressReservation) FreshAt(now time.Time) bool {
-	return r.ID != "" && stableReservationClock(r.ReservedAt, now) && now.Before(r.EligibleUntil)
+	return r.ID != "" && stableReservationClock(r.ReservedAt, now) &&
+		eligibleAt(r.EligibleUntil, r.CandidateExpiresAt, now)
 }
 
 func newEgressReservationID() (string, error) {
@@ -169,7 +170,7 @@ func (r *egressReservationRegistry) reserve(admission candidateAdmission) (Egres
 		return EgressReservation{}, ErrReservationUnavailable
 	}
 
-	if !commitAt.Before(candidate.eligibleUntil) {
+	if !eligibleAt(candidate.eligibleUntil, candidate.receipt.ExpiresAt, commitAt) {
 		return EgressReservation{}, ErrReservationCandidateExpired
 	}
 

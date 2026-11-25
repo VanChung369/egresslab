@@ -273,6 +273,44 @@ func TestReservationExpiresBeforeCommit(t *testing.T) {
 	assertReservationIndexes(t, registry, 0)
 }
 
+// A forward wall-clock step after admission leaves the monotonic deadline in the future; the
+// helper's wall-clock cutoff must still end eligibility.
+func TestReservationWallClockCutoff(t *testing.T) {
+	base := reservationTestBase
+	expires := base.Add(10 * time.Second)
+	monotonicDeadline := base.Add(time.Minute)
+
+	cases := []struct {
+		at   time.Time
+		want bool
+	}{
+		{base.Add(4 * time.Second), true},
+		{base.Add(5 * time.Second), false},
+		{base.Add(6 * time.Second), false},
+	}
+
+	for _, tc := range cases {
+		if got := eligibleAt(monotonicDeadline, expires, tc.at); got != tc.want {
+			t.Fatalf("eligibleAt(%v) = %v", tc.at.Sub(base), got)
+		}
+	}
+
+	if eligibleAt(base.Add(3*time.Second), expires, base.Add(3*time.Second)) {
+		t.Fatal("eligible at the monotonic deadline")
+	}
+
+	reservation := EgressReservation{
+		ID:                 "reservation_00112233445566778899aabbccddeeff",
+		CandidateExpiresAt: expires,
+		ReservedAt:         base,
+		EligibleUntil:      monotonicDeadline,
+	}
+
+	if !reservation.FreshAt(base.Add(4*time.Second)) || reservation.FreshAt(base.Add(6*time.Second)) {
+		t.Fatal("FreshAt ignores the helper's wall-clock cutoff")
+	}
+}
+
 func TestReservationCapacityDoesNotEvict(t *testing.T) {
 	base := reservationTestBase
 	registry := testRegistryAt(base.Add(11 * time.Second))

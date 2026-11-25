@@ -143,6 +143,12 @@ func stableReservationClock(from, to time.Time) bool {
 	return elapsed >= 0 && step >= -time.Second && step <= time.Second
 }
 
+// eligibleAt checks the monotonic deadline fixed at admission and, again, the helper's cutoff on
+// the wall clock, so a wall-clock step after admission cannot carry eligibility past the cutoff.
+func eligibleAt(eligibleUntil, candidateExpiresAt, at time.Time) bool {
+	return at.Before(eligibleUntil) && at.Round(0).Before(candidateExpiresAt.Add(-labProbeClockSkew))
+}
+
 // validateCandidateAdmission requires every identity and piece of evidence to agree: the trusted
 // runtime and its pinned key, the strict profile and its configured lab, the helper epoch, the
 // original V2 probe (target, nonce, address, observation time), the reservation request, both
@@ -199,6 +205,7 @@ func validateCandidateAdmission(a candidateAdmission, now time.Time) (admittedCa
 	if claims.IssuedAt <= 0 ||
 		claims.NotAfter <= claims.IssuedAt ||
 		claims.NotAfter-claims.IssuedAt > 30 ||
+		// IssuedAt has 1 s resolution; the monotonic order of probe receipt and send is checked below.
 		claims.IssuedAt < a.probeReceivedAt.Unix() ||
 		a.reserveSentAt.Before(time.Unix(claims.IssuedAt, 0)) ||
 		a.reserveSentAt.Unix() >= claims.NotAfter {
