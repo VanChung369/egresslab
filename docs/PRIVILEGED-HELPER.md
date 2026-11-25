@@ -1,10 +1,10 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 27C.2 — managed network verification.** A controller CLI signs `CreateLab` and
+Status: **Step 27C.3 — managed endpoint resolution.** A controller CLI signs `CreateLab` and
 `ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in the Linux runtime; the
-helper holds the encrypted WireGuard configs, checks the peer state and the IPv4 addresses, MTU,
-rules and routes the kernel reports against the staged config, and stays the source of truth for
-lab and tunnel state. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to end. Probes and
+helper holds the encrypted WireGuard configs, resolves a hostname endpoint once and pins it,
+checks the peer state and the IPv4 addresses, MTU, rules and routes the kernel reports against
+the staged config, and stays the source of truth for lab and tunnel state. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to end. Probes and
 proxy traffic are still not implemented; the sections from "Typed operations only" on are
 partly design.
 
@@ -78,8 +78,9 @@ partly design.
   after sealing (only the managed tunnel backend also checks the intended policy); egress-IP
   leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
-- Hostname endpoints, DNS policy and endpoint selection (Step 27C.3). The HTTP controller and
-  the desktop know nothing of labs or tunnels; only the lab CLI drives them.
+- DNS for traffic inside the lab, DNS refresh or endpoint failover for a running tunnel, and
+  IPv6 endpoints. The HTTP controller and the desktop know nothing of labs or tunnels; only the
+  lab CLI drives them.
 - A controller approval workflow for individual operations.
 - Live key rotation and automatic key distribution.
 - `PermitProbe` and `RecoverClean` through IPC.
@@ -425,7 +426,10 @@ The helper can hold one encrypted WireGuard config per profile, inside the Linux
   The kernel releases the lock when the helper exits, crash included; never delete
   `vault.lock` to get around it.
 - `StageInfo` (`egresslab-helperctl stage-info PROFILE_ID`) returns the profile ID, stage ID and
-  `vpn_lab_compatible`, nothing else: no endpoint, key or config crosses the socket.
+  `vpn_lab_compatible`, nothing else: no endpoint, key or config crosses the socket. For the
+  helper the field means compatible with the managed tunnel (the import summary's
+  `managed_vpn_compatible`, which accepts DNS names); it keeps its name for the controller. It is
+  a static check: `StageInfo` never resolves anything.
 - Internally, a config is lent only for the exact profile and current stage ID, under the vault's
   read lock, and only if it is compatible. A replaced or revoked stage cannot be selected.
 - A stage is used only by `ConnectTunnel` on a helper with `-enable-tunnel` (see "Signed tunnel
@@ -461,9 +465,10 @@ sealed topology, and `DeleteLab` removes the tunnel before the namespace. In hel
   the vault refuses before anything runs, so the lab stays sealed. Read `stage-info` and sign
   again.
 - Any other failed connect leaves the lab `faulted` and the slot held, even after a clean
-  rollback (`STATE_UNCERTAIN`). That includes a stage with `vpn_lab_compatible=false` (a hostname
-  endpoint, for example), so check `stage-info` before signing. `Disconnect` then releases the tunnel and answers `faulted`; only
-  `DeleteLab` clears the lab.
+  rollback (`STATE_UNCERTAIN`). That includes a stage with `vpn_lab_compatible=false` (an IPv6
+  endpoint or a reserved domain, for example), so check `stage-info` before signing, and a
+  hostname that does not resolve to an acceptable address. `Disconnect` then releases the tunnel
+  and answers `faulted`; only `DeleteLab` clears the lab.
 - A failed `VerifyLab` faults the lab and removes the tunnel at once.
 - When removing a tunnel fails (on `Disconnect`, `DeleteLab`, a failed verify or shutdown), the
   lab, its namespace and the slot stay; nothing is deleted around a tunnel whose removal is
@@ -493,25 +498,28 @@ itself, so it must never be wired to the HTTP agent.
 1. The vault lends the config for the exact profile and current stage (see "Managed WireGuard
    vault").
 2. The recovery gate and kernel check pass (`Preflight`).
-3. The endpoint is a unicast IPv4 address and the config is a full IPv4 tunnel.
+3. The config is a full IPv4 tunnel, and the endpoint a unicast IPv4 literal or a DNS name
+   outside local and reserved domains (a static check: nothing is resolved yet).
 4. No tunnel is tracked and the lab holds only `lo`.
 5. The lab firewall matches both the session baseline and the intended sealed policy (the rules
    written out in `sealed_policy.go`, not the state read back after sealing). A mismatch marks the
    lab drifted. An nft version that prints the same rules differently is refused as well, and so
    is a table with any flags (a `dormant` table still lists its rules but enforces none).
 6. No `egwg*` link and no managed alias exists in the VM namespace.
-7. The expected peer state is written down from the vault config alone: the interface public key
+7. A DNS name is resolved once and one IPv4 address is pinned (see "Endpoint resolution"). A
+   failed or refused lookup stops here, before any kernel change.
+8. The expected peer state is written down from the vault config alone: the interface public key
    (`wg pubkey`, the private key on stdin), the peer key, the pinned IPv4 endpoint and port, and
    the keepalive. A key that cannot be derived, or equals the peer's, stops here. So is the
    expected network state: the planned IPv4 addresses (distinct unicast prefixes) and the MTU
    (the config's, or 1420).
-8. The root underlay table is installed. Then the link is created with an alias
+9. The root underlay table is installed. Then the link is created with an alias
    `egresslab-managed:<namespace>:<link>`, moved into the lab and renamed `wg0`. Its name, alias
    and kind (`wireguard`) are read back.
-9. After the fwmark and private key are set, and before any peer exists, the lab firewall, the
-   underlay table and the fwmark are read back again, and the kernel must report the expected
-   interface public key and no peer.
-10. The peer, addresses, MTU and default route are configured; without an MTU in the config,
+10. After the fwmark and private key are set, and before any peer exists, the lab firewall, the
+    underlay table and the fwmark are read back again, and the kernel must report the expected
+    interface public key and no peer.
+11. The peer, addresses, MTU and default route are configured; without an MTU in the config,
     1420 is set explicitly. The link, firewall and underlay are checked once more, and so are the
     peer (see "Peer verification") and the network (see "Network verification").
 
@@ -539,7 +547,7 @@ expected state; nothing is learned from the kernel. A value read is never put in
 |---|---|
 | `public-key` | the key derived from the vault's private key |
 | `peers` | exactly one: the staged peer key |
-| `endpoints` | the staged IPv4 address and UDP port |
+| `endpoints` | the pinned IPv4 address (staged, or resolved at connect) and UDP port |
 | `allowed-ips` | exactly `0.0.0.0/0` |
 | `persistent-keepalive` | the staged value, or `off` when it is 0 |
 | `fwmark` | the tunnel's mark (as before) |
@@ -568,13 +576,38 @@ in the lab namespace. The expected state comes from the vault config alone.
 Any attribute the check does not know (a gateway, metric, fwmark, nexthop, encapsulation, ...)
 fails it, as does an unreadable or empty readback. `UP` is the administrative state only, and
 `route get` is a kernel lookup that sends no packet: neither proves a handshake or working
-traffic. The check is IPv4 only and sees one moment, like the peer check. The import summary's
-`vpn_lab_compatible` now also requires the planned addresses to be distinct unicast IPv4
+traffic. The check is IPv4 only and sees one moment, like the peer check. Both compatibility
+flags of the import summary also require the planned addresses to be distinct unicast IPv4
 prefixes, so the controller refuses such a stage before signing. The formats come from real
 captures (iproute2 6.1, Linux 6.8, Ubuntu 24.04), kept in `managed_tunnel_network_test.go`. This
 check has run end to end on Lima only, not yet on WSL2 (Ubuntu 22.04, an older iproute2): since
 the readbacks are decoded strictly, a format difference there would fault every tunnel. The
 controller reports only `LAB_FAULTED`; the helper log names the readback that drifted.
+
+**Endpoint resolution (Step 27C.3).** The managed tunnel accepts `Endpoint = name:port`. The name
+is resolved once, during `ConnectTunnel`, and the result is pinned; DNS is never consulted again
+for that tunnel. This is bootstrap DNS to find the VPN server, in the VM namespace with the
+runtime's own resolver (`/etc/hosts`, then the servers in `/etc/resolv.conf`; none is
+hardcoded). It opens nothing inside the lab, where port 53 stays dropped.
+
+| Case | Behaviour |
+|---|---|
+| IPv4 literal | unchanged: any unicast IPv4 address, staged by root |
+| DNS name | needs a dot and an alphabetic top-level label; `.local`, `.localhost`, `.internal`, `.home.arpa`, `.invalid`, `.test`, `.example` and `.onion` are refused without a lookup |
+| Lookup | IPv4 (A) only, as an absolute name (no search domain), 5 s timeout, at most 16 answers |
+| Any answer private, loopback, link-local, multicast, shared (100.64/10), documentation, benchmarking, reserved, or not IPv4 | the whole response is refused |
+| Several acceptable answers | the numerically lowest is pinned |
+| Lookup fails or is refused | the connect stops before any kernel change |
+| The name later resolves elsewhere | nothing changes; `VerifyLab` compares with the pinned address |
+| The server roams | the underlay table and the peer check still hold the pinned address |
+
+The pinned address is the one the underlay table allows, the one `wg set ... endpoint` gets, and
+the one the peer check expects. To follow a new DNS answer, disconnect and sign a new
+`ConnectTunnel`; there is no refresh or failover. The legacy `egresslab-vpn-lab` still needs an
+IPv4 literal (`vpn_lab_compatible` in the import summary). Verified on Lima with a real provider
+hostname: the resolved address was pinned in both the peer and the underlay table, a changed
+answer (through `/etc/hosts`) did not move it, and a private answer was refused with no link or
+table created.
 
 Known gaps:
 
@@ -586,8 +619,11 @@ Known gaps:
 - If `ip link del` removes the link but reports an error (a timeout), or the inventory after it
   fails, later `Disconnect` calls find no link and stay uncertain: the table is kept until the
   operator recovers by hand.
-- Hostname endpoints are not supported (Step 27C.3), IPv6 is neither configured nor verified,
-  and nothing monitors the tunnel continuously; drift is found only by `VerifyLab`.
+- A failed endpoint lookup faults the lab and reads `STATE_UNCERTAIN`, although nothing was
+  changed: delete the lab and create a new one (no helper restart is needed). The helper log
+  names the cause.
+- IPv6 is neither configured nor verified, and nothing monitors the tunnel continuously; drift is
+  found only by `VerifyLab`.
 
 ## Invariants the helper keeps
 

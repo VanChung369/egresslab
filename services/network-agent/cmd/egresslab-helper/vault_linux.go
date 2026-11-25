@@ -190,7 +190,12 @@ func (v *managedVault) readStage(profileID string) (helperipc.StageInfo, error) 
 		return helperipc.StageInfo{}, errors.New("unexpected vault storage state")
 	}
 
-	return helperipc.StageInfo{ProfileID: status.ProfileID, StageID: status.StageID, Compatible: status.Config.VPNLabCompatible}, nil
+	// The IPC field keeps its name (vpn_lab_compatible); for the helper it means the managed tunnel.
+	return helperipc.StageInfo{
+		ProfileID:  status.ProfileID,
+		StageID:    status.StageID,
+		Compatible: status.Config.ManagedVPNCompatible,
+	}, nil
 }
 
 // runVaultAdmin runs the local, root-only vault commands. They are never reachable through the

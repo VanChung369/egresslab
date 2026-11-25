@@ -144,7 +144,24 @@ func planVPNTunnel(cfg *ImportedWireGuardConfig) (vpnTunnelPlan, error) {
 		return vpnTunnelPlan{}, fmt.Errorf("%w: endpoint must be an IPv4 address", ErrUnsupportedTunnelConfig)
 	}
 
-	plan := vpnTunnelPlan{endpoint: netip.AddrPortFrom(host, cfg.endpointPort)}
+	plan, err := planVPNNetwork(cfg)
+	if err != nil {
+		return vpnTunnelPlan{}, err
+	}
+
+	plan.endpoint = netip.AddrPortFrom(host, cfg.endpointPort)
+
+	return plan, nil
+}
+
+// planVPNNetwork checks the interface addresses and AllowedIPs. It neither resolves nor selects
+// the remote endpoint.
+func planVPNNetwork(cfg *ImportedWireGuardConfig) (vpnTunnelPlan, error) {
+	if cfg == nil {
+		return vpnTunnelPlan{}, errors.New("missing WireGuard config")
+	}
+
+	var plan vpnTunnelPlan
 
 	fullTunnel := false
 	for _, route := range cfg.allowedIPs {

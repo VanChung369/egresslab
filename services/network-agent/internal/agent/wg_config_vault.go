@@ -305,7 +305,7 @@ func (v *WireGuardConfigVault) useVPNStage(profileID, stageID string, use func(*
 		return ErrWGStageNotFound
 	}
 
-	if err := CheckVPNLabCompatibility(entry.cfg); err != nil {
+	if _, err := planManagedVPNTunnel(entry.cfg); err != nil {
 		return err
 	}
 

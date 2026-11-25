@@ -70,8 +70,7 @@ func TestUseVPNStageBinding(t *testing.T) {
 }
 
 func TestUseVPNStageRejectsUnsupportedConfig(t *testing.T) {
-	// The VPN engine needs an IPv4 literal endpoint; hostnames come in Step 27C.
-	path, _ := writeVaultFixture(t, "vpn.example.com")
+	path, _ := writeVaultFixture(t, "[2001:db8::7]")
 
 	vault := NewWireGuardConfigVault()
 	defer vault.Close()
@@ -88,5 +87,37 @@ func TestUseVPNStageRejectsUnsupportedConfig(t *testing.T) {
 
 	if !errors.Is(err, ErrUnsupportedTunnelConfig) {
 		t.Fatalf("unexpected compatibility error: %v", err)
+	}
+}
+
+func TestUseVPNStageAllowsHostname(t *testing.T) {
+	path, _ := writeVaultFixture(t, "vpn.example.com")
+
+	vault := NewWireGuardConfigVault()
+	defer vault.Close()
+
+	stage, err := vault.StageFile(vaultProfileA, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !stage.Config.ManagedVPNCompatible || stage.Config.VPNLabCompatible {
+		t.Fatal("unexpected compatibility metadata")
+	}
+
+	called := false
+
+	err = vault.useVPNStage(vaultProfileA, stage.StageID, func(cfg *ImportedWireGuardConfig) error {
+		called = true
+
+		if cfg.endpointHost != "vpn.example.com" {
+			t.Fatal("vault endpoint changed")
+		}
+
+		return nil
+	})
+
+	if err != nil || !called {
+		t.Fatalf("hostname stage rejected: %v", err)
 	}
 }

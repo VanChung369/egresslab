@@ -29,6 +29,8 @@ type ManagedTunnelBackend struct {
 	vault  *WireGuardConfigVault
 	vpn    *VPNEgressLab
 
+	lookupEndpoint endpointLookup
+
 	active *managedTunnel
 }
 
@@ -50,7 +52,7 @@ func NewManagedTunnelBackend(sealed *SealedLabBackend, vault *WireGuardConfigVau
 
 	vpn := newVPNEgressLab(sealed.manager, sealed.firewall, runWG, nil, randomTunnelLinkName, rootNFT)
 
-	return &ManagedTunnelBackend{sealed: sealed, vault: vault, vpn: vpn}, nil
+	return &ManagedTunnelBackend{sealed: sealed, vault: vault, vpn: vpn, lookupEndpoint: newEndpointLookup()}, nil
 }
 
 // ConnectStage configures the profile's current vault stage in namespace. It does not check any
@@ -70,13 +72,9 @@ func (b *ManagedTunnelBackend) ConnectStage(ctx context.Context, profileID, name
 }
 
 func (b *ManagedTunnelBackend) connectConfig(ctx context.Context, namespace string, cfg *ImportedWireGuardConfig) error {
-	plan, err := planVPNTunnel(cfg)
+	plan, err := planManagedVPNTunnel(cfg)
 	if err != nil {
 		return err
-	}
-
-	if !plan.endpoint.Addr().IsGlobalUnicast() {
-		return fmt.Errorf("%w: endpoint must be a unicast address", ErrUnsupportedTunnelConfig)
 	}
 
 	// Before anything is created: the expected addresses and MTU, from the vault config alone.
@@ -114,6 +112,13 @@ func (b *ManagedTunnelBackend) connectConfig(ctx context.Context, namespace stri
 		if tunnelLinkPattern.MatchString(link.Name) || strings.HasPrefix(link.Alias, managedTunnelAliasPrefix) {
 			return fmt.Errorf("%w: tunnel link %s in the VM namespace", ErrRecoveryRequired, link.Name)
 		}
+	}
+
+	// Resolved once, after the ownership, firewall and slot checks and before any kernel change.
+	// The pinned address serves the underlay, the peer and the expected peer state; VerifyLab never
+	// resolves again.
+	if plan.endpoint, err = resolveManagedEndpoint(ctx, cfg.endpointHost, cfg.endpointPort, b.lookupEndpoint); err != nil {
+		return err
 	}
 
 	link, err := b.vpn.linkName()

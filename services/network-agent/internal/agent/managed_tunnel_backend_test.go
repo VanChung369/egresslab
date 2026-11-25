@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -573,4 +575,91 @@ func TestManagedTunnelCleanupStage(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestManagedTunnelPinsResolvedEndpoint(t *testing.T) {
+	b, kernel := newManagedTunnelFixture(t)
+	ctx := context.Background()
+
+	const pinned = "8.8.8.8:51820"
+
+	lookups := 0
+	b.lookupEndpoint = func(ctx context.Context, network, host string) ([]netip.Addr, error) {
+		lookups++
+		return fixedLookup("9.9.9.9", "8.8.8.8")(ctx, network, host)
+	}
+
+	b.vpn.rootNFT.list = func(context.Context, string) ([]byte, error) {
+		return underlayListing(t, pinned, 0xabcd, "accept"), nil
+	}
+
+	kernel.wgOverrides["endpoints"] = demoKey(2) + "\t" + pinned
+
+	// The commands must carry the pinned address, never the hostname.
+	originalWG := b.vpn.runWG
+	b.vpn.runWG = func(ctx context.Context, ns string, stdin []byte, args ...string) (string, error) {
+		if slices.Contains(args, "endpoint") && !slices.Contains(args, pinned) {
+			t.Fatal("incorrect WireGuard endpoint")
+		}
+
+		return originalWG(ctx, ns, stdin, args...)
+	}
+
+	originalNFT := b.vpn.rootNFT.run
+	b.vpn.rootNFT.run = func(ctx context.Context, script string, checkOnly bool) error {
+		if strings.HasPrefix(script, "create table") && !strings.Contains(script, "ip daddr 8.8.8.8 udp dport 51820") {
+			t.Fatal("incorrect underlay endpoint")
+		}
+
+		return originalNFT(ctx, script, checkOnly)
+	}
+
+	cfg := mustParse(t, demoConfig())
+
+	if err := b.connectConfig(ctx, vpnTestNS, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if lookups != 1 || b.active.peer.endpoint.String() != pinned || b.vpn.underlay[vpnTestNS].endpoint.String() != pinned {
+		t.Fatal("endpoint not consistently pinned")
+	}
+
+	// A changed DNS answer must not matter: verification never resolves again.
+	b.lookupEndpoint = func(ctx context.Context, network, host string) ([]netip.Addr, error) {
+		lookups++
+		return fixedLookup("1.0.0.1")(ctx, network, host)
+	}
+
+	if err := b.VerifyConfigured(ctx, vpnTestNS); err != nil {
+		t.Fatal(err)
+	}
+
+	if lookups != 1 || cfg.endpointHost != "vpn.example.com" {
+		t.Fatal("DNS resolved again, or the vault config was modified")
+	}
+
+	if err := b.Disconnect(ctx, vpnTestNS); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagedTunnelLookupFailureBeforeMutation(t *testing.T) {
+	for name, lookup := range map[string]endpointLookup{
+		"DNS unavailable": func(context.Context, string, string) ([]netip.Addr, error) {
+			return nil, errors.New("DNS unavailable")
+		},
+		"private answer": fixedLookup("8.8.8.8", "10.0.0.7"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, kernel := newManagedTunnelFixture(t)
+			b.lookupEndpoint = lookup
+
+			err := b.connectConfig(context.Background(), vpnTestNS, mustParse(t, demoConfig()))
+			if !errors.Is(err, ErrEndpointResolution) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			requireUntouched(t, b, kernel)
+		})
+	}
 }

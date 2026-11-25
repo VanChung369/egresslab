@@ -69,7 +69,10 @@ type WireGuardImportSummary struct {
 	KeepaliveSeconds uint16 `json:"keepalive_seconds,omitempty"`
 	VPNLabCompatible bool   `json:"vpn_lab_compatible"`
 	VPNLabIssue      string `json:"vpn_lab_issue,omitempty"`
-	NetworkReady     bool   `json:"network_ready"`
+
+	// The managed tunnel also accepts DNS names (resolved once, at connect time).
+	ManagedVPNCompatible bool `json:"managed_vpn_compatible"`
+	NetworkReady         bool `json:"network_ready"`
 }
 
 func (c *ImportedWireGuardConfig) Summary() WireGuardImportSummary {
@@ -102,6 +105,9 @@ func (c *ImportedWireGuardConfig) Summary() WireGuardImportSummary {
 	} else {
 		summary.VPNLabCompatible = true
 	}
+
+	_, managedErr := planManagedVPNTunnel(c)
+	summary.ManagedVPNCompatible = managedErr == nil
 
 	return summary
 }
