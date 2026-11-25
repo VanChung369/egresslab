@@ -74,6 +74,7 @@ func (f *fakeRuntime) ProbeEgressMulti(
 	f.calls = append(f.calls, control.LabMultiProbeV2Op)
 	f.multiProbeCalls = append(f.multiProbeCalls, capability)
 	f.lastMultiProbe = nil
+	f.lastCandidate = nil
 
 	if f.multiProbeErr != nil {
 		return control.LabMultiProbeInfo{}, f.multiProbeErr
@@ -395,7 +396,7 @@ func (f *fakeRuntime) ReserveEgressCandidate(
 
 	f.lastMultiProbe = nil
 
-	return control.LabCandidateInfo{
+	receipt := control.LabCandidateInfo{
 		LabMultiProbeTarget: control.LabMultiProbeTarget{
 			ProfileID:           profileID,
 			Namespace:           namespace,
@@ -407,5 +408,48 @@ func (f *fakeRuntime) ReserveEgressCandidate(
 		IPv4:             probe.IPv4,
 		ObservedAt:       probe.ObservedAt,
 		ExpiresAt:        probe.ObservedAt.Add(60 * time.Second),
-	}, nil
+	}
+
+	f.lastCandidate = &receipt
+
+	return receipt, nil
+}
+
+// PrepareEgressLease simulates binding the last candidate once, for the CLI sequencing tests; the
+// real signature, freshness and kernel checks are the helper's (Step 31D.3a tests).
+func (f *fakeRuntime) PrepareEgressLease(
+	_ context.Context,
+	profileID, namespace string,
+	capability control.LabCapability,
+) (control.LabPreparedLeaseInfo, error) {
+	f.calls = append(f.calls, control.LabPrepareEgressLeaseOp)
+	f.prepareCalls = append(f.prepareCalls, capability)
+
+	if f.prepareErr != nil {
+		return control.LabPreparedLeaseInfo{}, f.prepareErr
+	}
+
+	candidate := f.lastCandidate
+	if candidate == nil {
+		return control.LabPreparedLeaseInfo{}, labruntime.Errorf(labruntime.CodeEvidenceUnavailable, "candidate unavailable")
+	}
+
+	if f.tunnelProfile != profileID || f.labs[profileID] != namespace || candidate.TunnelGeneration != f.tunnelGeneration {
+		return control.LabPreparedLeaseInfo{}, labruntime.Errorf(labruntime.CodeAuthorizationDenied, "stale generation")
+	}
+
+	receipt := control.LabPreparedLeaseInfo{
+		LabCandidateInfo: *candidate,
+		AuthorityID:      capability.Claims.Intent.AuthorityID,
+		ReservationID:    capability.Claims.Intent.ReservationID,
+		PreparationNonce: capability.Claims.Nonce,
+	}
+
+	if !receipt.MatchesCapability(capability) {
+		return control.LabPreparedLeaseInfo{}, labruntime.Errorf(labruntime.CodeAuthorizationDenied, "preparation binding mismatch")
+	}
+
+	f.lastCandidate = nil
+
+	return receipt, nil
 }

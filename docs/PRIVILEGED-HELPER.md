@@ -1,23 +1,25 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 31D.3a — signed lease preparation in the helper.** A controller CLI signs
-`CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV2` and drives the helper's sealed
-lab, tunnel and diagnostic probes in the Linux runtime; the helper holds the encrypted WireGuard
-configs, disables IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once
-and pins it, checks the peer state and the IPv4 addresses, MTU, rules and routes the kernel reports
-against the staged config, and stays the source of truth for lab and tunnel state. A single-source
-probe yields one observation of the tunnel's public IPv4 address, and a multi-source probe the
-unanimous evidence of two independent HTTPS sources; both are printed only. The helper can consume
-that evidence once into a local egress candidate (`ReserveEgressCandidateV1`, also through
-helperctl), and the controller has the shared authority that holds each address for one tunnel
-owner, durably and across controller processes (an append-only journal under an OS file lock), and a
-workflow that chains the verification, the candidate and the durable reservation, which
-`reserve-egress` runs against an explicitly provisioned per-user authority (`init-reservations`).
-The helper can also bind its candidate to such a durable reservation as a sealed, generation-bound
-prepared lease (`PrepareEgressLeaseV1`), which no client sends yet; neither a reservation nor a
-prepared lease is an active lease. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end
-to end, except that the multi-source probe has run on WSL2 and Lima only, not on native Linux. No
-lease or proxy traffic exists; the sections from "Typed operations only" on are partly design.
+Status: **Step 31D.3b — controller lease preparation.** A controller CLI signs `CreateLab`,
+`ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`, `ReserveEgressCandidateV1` and
+`PrepareEgressLeaseV1` and drives the helper's sealed lab, tunnel and diagnostic probes in the Linux
+runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports
+inside its labs, resolves a hostname endpoint once and pins it, checks the peer state and the IPv4
+addresses, MTU, rules and routes the kernel reports against the staged config, and stays the source
+of truth for lab and tunnel state. A single-source probe yields one observation of the tunnel's
+public IPv4 address, and a multi-source probe the unanimous evidence of two independent HTTPS
+sources; both are printed only. The helper can consume that evidence once into a local egress
+candidate (`ReserveEgressCandidateV1`, also through helperctl), and the controller has the shared
+authority that holds each address for one tunnel owner, durably and across controller processes (an
+append-only journal under an OS file lock), and a workflow that chains the verification, the
+candidate and the durable reservation, which `reserve-egress` runs against an explicitly provisioned
+per-user authority (`init-reservations`). The helper can also bind its candidate to such a durable
+reservation as a sealed, generation-bound prepared lease (`PrepareEgressLeaseV1`), which
+`reserve-egress` signs right after the durable commit, in the same operation; neither a reservation
+nor a prepared lease is an active lease. Windows (WSL2), Linux and macOS (Lima, Keychain) are
+verified end to end, except that the multi-source probe has run on WSL2 and Lima only, not on native
+Linux. No lease or proxy traffic exists; the sections from "Typed operations only" on are partly
+design.
 
 ## Implemented
 
@@ -75,16 +77,17 @@ lease or proxy traffic exists; the sections from "Typed operations only" on are 
   candidate (see "Egress candidates"). helperctl sends it (Step 31D.1), and so does the controller's
   `reserve-egress` (Step 31D.2).
 - `PrepareEgressLeaseV1` in the same mode: that candidate bound once to a controller-signed durable
-  reservation as a prepared lease, which opens nothing (see "Egress candidates"); no client sends it
-  yet.
+  reservation as a prepared lease, which opens nothing (see "Egress candidates"); helperctl
+  (`prepare-egress-lease`) and the controller's `reserve-egress` send it (Step 31D.3b).
 - Controller side (see "Controller and runtimes"):
-  - an Ed25519 signer for `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV2`
-    (the `PermitMultiProbeV1` signer stays for compatibility tests), checked against the five golden
-    vectors the helper also pins; `ConnectTunnel` is signed only for the profile's own lab in the
-    current helper process and the vault's current, compatible stage, and the probes only for that
-    lab once its tunnel is configured, `PermitMultiProbeV2` also only for the tunnel generation and
-    policy that helper generation reports right before signing (see "Controller and runtimes" and
-    "Generation-bound controller integration");
+  - an Ed25519 signer for `CreateLab`, `ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`,
+    `ReserveEgressCandidateV1` and `PrepareEgressLeaseV1` (the `PermitMultiProbeV1` signer stays for
+    compatibility tests), checked against the seven golden vectors the helper also pins;
+    `ConnectTunnel` is signed only for the profile's own lab in the current helper process and the
+    vault's current, compatible stage, and the probes only for that lab once its tunnel is
+    configured, `PermitMultiProbeV2` also only for the tunnel generation and policy that helper
+    generation reports right before signing (see "Controller and runtimes" and "Generation-bound
+    controller integration");
   - signing-key storage per platform;
   - runtime providers that reach the helper from each host OS;
   - `egresslab-controller-lab`, which needs `-approve` for every mutation, including
@@ -104,10 +107,9 @@ lease or proxy traffic exists; the sections from "Typed operations only" on are 
 - A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
-- The controller side of lease preparation (Step 31D.3b), generation-bound revocation (Step 31D.3c),
-  durable release records (Step 31D.3d), the complete lifecycle smoke test (Step 31D.3e), key
-  rotation and authority migration, and the multi-runtime collision and recovery tests (Step 31E);
-  no reservation hold is ever released yet.
+- Generation-bound revocation (Step 31D.3c), durable release records (Step 31D.3d), the complete
+  lifecycle smoke test (Step 31D.3e), key rotation and authority migration, and the multi-runtime
+  collision and recovery tests (Step 31E); no reservation hold is ever released yet.
 - Open from earlier steps: egress-IP leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
 - DNS for applications in the lab (a session resolver, with filesystem and resolver IPC
@@ -1606,5 +1608,24 @@ preparation answers `LAB_BUSY`, and so do a new diagnostic probe and a new candi
 lease expired, until a disconnect, `DeleteLab`, a failed verification, a reconnect or helper
 shutdown drops it. Dropping it is not proof of a confirmed kernel cleanup and never releases durable
 ownership. The receipt carries `network_ready: false`, and no application traffic is opened.
-helperctl and the controller do not send the operation yet (Step 31D.3b); the tests use real
-signatures and a real Unix socket with the fake kernel backend.
+helperctl and the controller send it since Step 31D.3b; the tests use real signatures and a real
+Unix socket with the fake kernel backend.
+
+### Controller preparation integration (Step 31D.3b)
+
+helperctl exposes `prepare-egress-lease PROFILE_ID NAMESPACE` with the signed capability on stdin;
+argv names no authority, reservation or address. `reserve-egress` now runs the verification, the
+candidate, the durable reservation and the preparation in one approved operation, so it signs three
+capabilities: `PermitMultiProbeV2`, `ReserveEgressCandidateV1` and `PrepareEgressLeaseV1`. The
+controller signs the preparation only for the live hold this operation just committed, after
+confirming the matching record in its authority's journal; a reservation read back from the journal
+never authorizes one. The capability binds the authority, reservation, runtime, helper epoch, tunnel
+generation, verified address and both candidate nonces. The controller requires at least 5 s of
+eligibility left when it signs and sends, so the helper never starts its tunnel verification with
+the deadline about to pass; the original evidence deadline is never extended. It accepts the receipt
+only when it matches both the signed capability and the durable hold, the evidence timestamps and
+the key fingerprint included. A prepared lease receipt activates no application traffic. A lost,
+rejected or late preparation answers `EGRESS_PREPARATION_UNCONFIRMED`: the durable hold stays,
+nothing is retried or released, and the helper may or may not hold a prepared lease. The new
+helperctl is not installed in a runtime, and the command has not run against a real tunnel, because
+a test hold could not be released yet (Step 31D.3d).

@@ -64,7 +64,14 @@ type LabIntent struct {
 	ProbeIPv4 string `json:"probe_ipv4,omitempty"`
 
 	TunnelGeneration string `json:"tunnel_generation,omitempty"`
-	EvidenceNonce    string `json:"evidence_nonce,omitempty"` // ReserveEgressCandidateV1 only
+	EvidenceNonce    string `json:"evidence_nonce,omitempty"` // ReserveEgressCandidateV1 and PrepareEgressLeaseV1
+
+	// PrepareEgressLeaseV1 only, in helperauth.Intent's order.
+	ReservationNonce string `json:"reservation_nonce,omitempty"`
+	RuntimeID        string `json:"runtime_id,omitempty"`
+	AuthorityID      string `json:"authority_id,omitempty"`
+	ReservationID    string `json:"reservation_id,omitempty"`
+	EgressIPv4       string `json:"egress_ipv4,omitempty"`
 }
 
 type LabClaims struct {

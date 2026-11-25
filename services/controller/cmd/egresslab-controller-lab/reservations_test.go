@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,10 +163,13 @@ func TestControllerReserveEgress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if result.State != "held" || result.AuthorityID == "" || result.Reservation.ID == "" ||
+	if result.State != "prepared" || result.AuthorityID == "" || result.Reservation.ID == "" ||
 		result.Reservation.Owner.ProfileID != p || result.Reservation.Owner.RuntimeID != runtimeA ||
 		result.Reservation.IPv4.String() != "8.8.4.4" || result.ActivationAllowed || result.NetworkReady ||
-		len(a.multiProbeCalls) != 1 || len(a.candidateCalls) != 1 {
+		result.PreparedLease.ReservationID != result.Reservation.ID ||
+		result.PreparedLease.AuthorityID != result.AuthorityID ||
+		result.PreparedLease.IPv4 != result.Reservation.IPv4 ||
+		len(a.multiProbeCalls) != 1 || len(a.candidateCalls) != 1 || len(a.prepareCalls) != 1 {
 		t.Fatalf("incorrect reservation workflow: %s", h.out.String())
 	}
 
@@ -183,7 +187,7 @@ func TestControllerReserveEgress(t *testing.T) {
 
 	h.requireCode(codeReservationHeld, approved...)
 
-	if len(a.multiProbeCalls) != 1 || len(a.candidateCalls) != 1 {
+	if len(a.multiProbeCalls) != 1 || len(a.candidateCalls) != 1 || len(a.prepareCalls) != 1 {
 		t.Fatal("an existing reservation triggered another probe")
 	}
 }
@@ -251,6 +255,10 @@ func TestControllerReserveCollision(t *testing.T) {
 		t.Fatal("both runtimes should have consumed a candidate")
 	}
 
+	if len(a.prepareCalls) != 1 || len(b.prepareCalls) != 0 {
+		t.Fatal("the colliding runtime reached lease preparation")
+	}
+
 	listed := reservationList(t, h)
 	if len(listed.Reservations) != 1 || listed.Reservations[0].Owner.RuntimeID != runtimeA {
 		t.Fatal("the collision replaced the first hold")
@@ -291,6 +299,11 @@ func TestReservationCommandError(t *testing.T) {
 		{control.ErrReservationUnavailable, codeReservationUnavailable},
 		{control.ErrReservationCommittedExpired, labruntime.CodeStateUncertain},
 		{control.ErrReservationStateUncertain, labruntime.CodeStateUncertain},
+		// After the commit, even a coded helper refusal or an uncertain outcome reads as unconfirmed.
+		{fmt.Errorf("%w: %w", control.ErrLeasePreparationUnconfirmed,
+			labruntime.Errorf(labruntime.CodeEvidenceUnavailable, "expired")), codeLeasePreparationUnconfirmed},
+		{fmt.Errorf("%w: %w", control.ErrLeasePreparationUnconfirmed, control.ErrReservationStateUncertain),
+			codeLeasePreparationUnconfirmed},
 		// Uncertain wins over anything joined with it.
 		{errors.Join(control.ErrReservationStateUncertain, control.ErrReservationCandidateExpired), labruntime.CodeStateUncertain},
 		{labruntime.Errorf(labruntime.CodeEvidenceUnavailable, "expired evidence"), labruntime.CodeEvidenceUnavailable},
@@ -338,5 +351,29 @@ func TestControllerReserveLostReceipt(t *testing.T) {
 
 	if listed := reservationList(t, h); len(listed.Reservations) != 1 {
 		t.Fatal("the committed hold is missing")
+	}
+}
+
+// A failure after the durable commit keeps the hold and says so; nothing retries.
+func TestControllerPreparationUnconfirmed(t *testing.T) {
+	h := newHarness(t)
+	h.now = time.Now
+	p := h.profile.ID
+
+	h.mustRun("-approve", "init-reservations")
+	a := setupReservationLab(t, h, "Ubuntu-A", p)
+	a.prepareErr = labruntime.Errorf(labruntime.CodeEvidenceUnavailable, "candidate expired")
+
+	reserve := []string{"-approve", "-wsl-distro", "Ubuntu-A", "reserve-egress", p, labNS}
+	h.requireCode(codeLeasePreparationUnconfirmed, reserve...)
+
+	if listed := reservationList(t, h); len(listed.Reservations) != 1 || len(a.prepareCalls) != 1 {
+		t.Fatal("a preparation failure lost the hold or retried")
+	}
+
+	h.requireCode(codeReservationHeld, reserve...)
+
+	if len(a.prepareCalls) != 1 {
+		t.Fatal("the existing hold triggered another preparation")
 	}
 }

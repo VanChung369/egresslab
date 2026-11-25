@@ -83,6 +83,19 @@ func TestLabSignerGolden(t *testing.T) {
 				EvidenceNonce:    "ffeeddccbbaa99887766554433221100"},
 			"WrDOmIHMAE-VvemqyqyxXj4iSwf_nJeFu9I0gTqRdcopF2fCfQxnYbidX_0WCkX8dEDzvUwBMclAf8R_Bq0jCg",
 		},
+		// From TestPrepareEgressLeaseSigningMessageGolden in the network agent.
+		"PrepareEgressLeaseV1": {
+			LabIntent{Operation: LabPrepareEgressLeaseOp, ProfileID: "profile_0123456789abcdef",
+				Namespace: "egresslab-lab-0123456789abcdef", ProbeIPv4: "9.9.9.9",
+				TunnelGeneration: "tunnelgen_0123456789abcdef0123456789abcdef",
+				EvidenceNonce:    "ffeeddccbbaa99887766554433221100",
+				ReservationNonce: "aabbccddeeff00112233445566778899",
+				RuntimeID:        "runtime_0123456789abcdef0123456789abcdef",
+				AuthorityID:      "authority_0123456789abcdef0123456789abcdef",
+				ReservationID:    "reservation_0123456789abcdef0123456789abcdef",
+				EgressIPv4:       "8.8.4.4"},
+			"0NoCsoeg6bZBAxHU5qrpNDO0xjOAOS5U98RnZVZUY-POYFxr48rVgpy17K6B2-scLAUC39hSIcsIh4KkTwyPBg",
+		},
 	}
 
 	for name, tt := range tests {

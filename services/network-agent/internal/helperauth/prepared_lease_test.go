@@ -1,6 +1,8 @@
 package helperauth
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -133,5 +135,28 @@ func TestPrepareLeaseIntentEncoding(t *testing.T) {
 
 	if string(raw) != want {
 		t.Fatalf("lease intent encoding changed:\n%s", raw)
+	}
+}
+
+// The seventh golden vector; the controller pins the same signature (test seed 0x42, never a real key).
+func TestPrepareEgressLeaseSigningMessageGolden(t *testing.T) {
+	private := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, ed25519.SeedSize))
+
+	token, err := Mint(private, Claims{
+		Version:  Version,
+		Intent:   testPrepareLeaseIntent(t),
+		HelperID: testHelper,
+		Nonce:    "00112233445566778899aabbccddeeff",
+		IssuedAt: 1795500000,
+		NotAfter: 1795500030,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const want = "0NoCsoeg6bZBAxHU5qrpNDO0xjOAOS5U98RnZVZUY-POYFxr48rVgpy17K6B2-scLAUC39hSIcsIh4KkTwyPBg"
+
+	if token.Signature != want {
+		t.Fatalf("lease signature mismatch: %s", token.Signature)
 	}
 }

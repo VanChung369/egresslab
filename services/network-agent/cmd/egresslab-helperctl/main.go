@@ -163,6 +163,19 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 
 		result, err = helperipc.ReserveEgressCandidate(ctx, socketPath, args[1], args[2], capability)
 
+	case "prepare-egress-lease":
+		// The authority, reservation and address are in the signed capability, never in argv.
+		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
+			return usageError()
+		}
+
+		capability, readErr := readCapability(stdin)
+		if readErr != nil {
+			return readErr
+		}
+
+		result, err = helperipc.PrepareEgressLease(ctx, socketPath, args[1], args[2], capability)
+
 	case "disconnect":
 		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
 			return usageError()
@@ -236,5 +249,6 @@ func usageError() error {
 		"       egresslab-helperctl multi-probe-target PROFILE_ID NAMESPACE\n" +
 		"       egresslab-helperctl probe-egress PROFILE_ID NAMESPACE < capability.json\n" +
 		"       egresslab-helperctl probe-egress-multi PROFILE_ID NAMESPACE < capability.json\n" +
-		"       egresslab-helperctl reserve-egress-candidate PROFILE_ID NAMESPACE < capability.json")
+		"       egresslab-helperctl reserve-egress-candidate PROFILE_ID NAMESPACE < capability.json\n" +
+		"       egresslab-helperctl prepare-egress-lease PROFILE_ID NAMESPACE < capability.json")
 }

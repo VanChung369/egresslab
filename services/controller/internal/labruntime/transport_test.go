@@ -350,6 +350,44 @@ func TestFakeHelperctl(t *testing.T) {
 
 		raw, _ := json.Marshal(receipt)
 		respond(control.LabReserveEgressCandidateOp, extra+`,"candidate":`+string(raw))
+	case "prepare-egress-lease":
+		var capability control.LabCapability
+		data, err := io.ReadAll(os.Stdin)
+		receipt := testPreparedLeaseReceipt()
+
+		if err != nil || len(args) != 3 || args[1] != testProfile || args[2] != testNamespace ||
+			json.Unmarshal(data, &capability) != nil || !receipt.MatchesCapability(capability) {
+			fail("invalid lease preparation request")
+		}
+
+		extra := ""
+
+		switch mode {
+		case "prepare-disabled":
+			failWith(CodeOperationDisabled, "operation not enabled")
+		case "prepare-expired":
+			failWith(CodeEvidenceUnavailable, "candidate expired")
+		case "prepare-missing":
+			respond(control.LabPrepareEgressLeaseOp, "")
+		case "prepare-wrong-reservation":
+			receipt.ReservationID = "reservation_ffffffffffffffffffffffffffffffff"
+		case "prepare-wrong-nonce":
+			receipt.PreparationNonce = strings.Repeat("f", 32)
+		case "prepare-with-lab":
+			extra = lab(control.LabTunnelConfigured)
+		case "prepare-failure-with-null":
+			fmt.Printf(`{"version":1,"operation":"","ok":false,"network_ready":false,"code":%q,"error":"x","prepared_lease":null}`,
+				CodeEvidenceUnavailable)
+			os.Exit(1)
+		case "prepare-failure-with-lease":
+			raw, _ := json.Marshal(receipt)
+			fmt.Printf(`{"version":1,"operation":"","ok":false,"network_ready":false,"code":%q,"error":"x","prepared_lease":%s}`,
+				CodeEvidenceUnavailable, raw)
+			os.Exit(1)
+		}
+
+		raw, _ := json.Marshal(receipt)
+		respond(control.LabPrepareEgressLeaseOp, extra+`,"prepared_lease":`+string(raw))
 	case "disconnect":
 		if mode == "faulted" {
 			respond("Disconnect", lab(control.LabFaulted))
@@ -379,6 +417,15 @@ func testCandidateReceipt(now time.Time) control.LabCandidateInfo {
 		IPv4:             netip.MustParseAddr("8.8.4.4"),
 		ObservedAt:       now,
 		ExpiresAt:        now.Add(60 * time.Second),
+	}
+}
+
+func testPreparedLeaseReceipt() control.LabPreparedLeaseInfo {
+	return control.LabPreparedLeaseInfo{
+		LabCandidateInfo: testCandidateReceipt(time.Unix(1795500000, 0).UTC()),
+		AuthorityID:      "authority_0123456789abcdef0123456789abcdef",
+		ReservationID:    "reservation_0123456789abcdef0123456789abcdef",
+		PreparationNonce: "aabbccddeeff00112233445566778899",
 	}
 }
 
@@ -1058,5 +1105,115 @@ func TestCandidateTransport(t *testing.T) {
 				t.Fatalf("unexpected refusal: %v", err)
 			}
 		})
+	}
+}
+
+func TestPreparedLeaseTransport(t *testing.T) {
+	p := testPreparedLeaseReceipt()
+
+	intent, err := control.NewLabPrepareEgressLeaseIntent(p.ProfileID, p.Namespace, p.IdentIPv4, p.TunnelGeneration,
+		p.EvidenceNonce, p.ReservationNonce, p.RuntimeID, p.AuthorityID, p.ReservationID, p.IPv4.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	capability := control.LabCapability{
+		Claims: control.LabClaims{Version: 1, Intent: intent, HelperID: p.HelperID, Nonce: p.PreparationNonce},
+	}
+
+	fake := &fakeLauncher{mode: "ok"}
+	transport := newCommandProvider(fake).Transport()
+
+	result, err := transport.PrepareEgressLease(context.Background(), testProfile, testNamespace, capability)
+	if err != nil || !result.MatchesCapability(capability) || len(fake.calls) != 1 {
+		t.Fatalf("preparation failed: %+v %v", result, err)
+	}
+
+	if strings.Join(fake.calls[0], " ") != "prepare-egress-lease "+testProfile+" "+testNamespace {
+		t.Fatalf("incorrect helperctl arguments: %v", fake.calls[0])
+	}
+
+	wrongOp := capability
+	wrongOp.Claims.Intent.Operation = control.LabReserveEgressCandidateOp
+
+	for name, call := range map[string]func() error{
+		"other operation": func() error {
+			_, err := transport.PrepareEgressLease(context.Background(), testProfile, testNamespace, wrongOp)
+			return err
+		},
+		"other namespace": func() error {
+			_, err := transport.PrepareEgressLease(context.Background(), testProfile, "egresslab-lab-ffffffffffffffff", capability)
+			return err
+		},
+	} {
+		if err := call(); ErrorCode(err) != CodeInvalidRequest || len(fake.calls) != 1 {
+			t.Fatalf("%s reached the launcher: %v", name, err)
+		}
+	}
+
+	for _, mode := range []string{
+		"prepare-disabled",
+		"prepare-expired",
+		"prepare-missing",
+		"prepare-wrong-reservation",
+		"prepare-wrong-nonce",
+		"prepare-with-lab",
+		"prepare-failure-with-null",
+		"prepare-failure-with-lease",
+		"crash",
+	} {
+		t.Run(mode, func(t *testing.T) {
+			f := &fakeLauncher{mode: mode}
+
+			result, err := newCommandProvider(f).Transport().PrepareEgressLease(context.Background(), testProfile,
+				testNamespace, capability)
+
+			expected := CodeStateUncertain
+			switch mode {
+			case "prepare-disabled":
+				expected = CodeOperationDisabled
+			case "prepare-expired":
+				expected = CodeEvidenceUnavailable
+			}
+
+			if err == nil || ErrorCode(err) != expected || result.Valid() || len(f.calls) != 1 {
+				t.Fatalf("invalid outcome: %+v %v", result, err)
+			}
+		})
+	}
+}
+
+func TestPreparedLeaseResponseMetadata(t *testing.T) {
+	p := testPreparedLeaseReceipt()
+
+	raw, err := json.Marshal(helperResponse{Version: 1, Operation: control.LabPrepareEgressLeaseOp, OK: true, PreparedLease: &p})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := decodeResponse(raw, control.LabPrepareEgressLeaseOp); err != nil {
+		t.Fatal(err)
+	}
+
+	expired := p
+	expired.ExpiresAt = expired.ObservedAt.Add(61 * time.Second)
+
+	for name, response := range map[string]helperResponse{
+		"missing":       {Version: 1, Operation: control.LabPrepareEgressLeaseOp, OK: true},
+		"network ready": {Version: 1, Operation: control.LabPrepareEgressLeaseOp, OK: true, NetworkReady: true, PreparedLease: &p},
+		"with candidate": {Version: 1, Operation: control.LabPrepareEgressLeaseOp, OK: true, PreparedLease: &p,
+			Candidate: &p.LabCandidateInfo},
+		"extended TTL": {Version: 1, Operation: control.LabPrepareEgressLeaseOp, OK: true, PreparedLease: &expired},
+	} {
+		data, _ := json.Marshal(response)
+
+		if _, err := decodeResponse(data, control.LabPrepareEgressLeaseOp); err == nil {
+			t.Errorf("%s: invalid preparation metadata accepted", name)
+		}
+	}
+
+	unsolicited, _ := json.Marshal(helperResponse{Version: 1, Operation: "Ping", OK: true, PreparedLease: &p})
+	if _, err := decodeResponse(unsolicited, "Ping"); err == nil {
+		t.Fatal("unsolicited prepared lease accepted")
 	}
 }

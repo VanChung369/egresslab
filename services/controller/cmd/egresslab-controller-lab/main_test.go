@@ -89,6 +89,10 @@ type fakeRuntime struct {
 	lastMultiProbe *control.LabMultiProbeInfo
 	candidateCalls []control.LabCapability
 	candidateErr   error
+
+	lastCandidate *control.LabCandidateInfo
+	prepareCalls  []control.LabCapability
+	prepareErr    error
 }
 
 func (f *fakeRuntime) HelperInfo(context.Context) (control.LabHelperInfo, error) {

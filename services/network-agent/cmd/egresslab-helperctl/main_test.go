@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/VanChung369/egresslab/services/network-agent/internal/helperauth"
 	"github.com/VanChung369/egresslab/services/network-agent/internal/helperipc"
 )
 
@@ -249,5 +250,70 @@ func TestMultiProbeV1CapabilityRefused(t *testing.T) {
 			!strings.Contains(err.Error(), "generation-bound") || out.Len() != 0 {
 			t.Fatalf("V1 capability reached IPC: %v", err)
 		}
+	}
+}
+
+func TestPrepareLeaseCommand(t *testing.T) {
+	profile := "profile_0123456789abcdef"
+	namespace := "egresslab-lab-0123456789abcdef"
+	args := []string{"prepare-egress-lease", profile, namespace}
+
+	for _, bad := range [][]string{
+		{"prepare-egress-lease"},
+		{"prepare-egress-lease", profile},
+		{"prepare-egress-lease", profile, "../default"},
+		{"prepare-egress-lease", profile, namespace, "8.8.4.4"},
+		{"prepare-egress-lease", profile, namespace, "reservation_0123456789abcdef0123456789abcdef"},
+	} {
+		var out bytes.Buffer
+
+		if err := run(bad, strings.NewReader(validCapability), &out); err == nil || !strings.Contains(err.Error(), "usage") ||
+			out.Len() != 0 {
+			t.Fatalf("invalid preparation arguments accepted: %v %v", bad, err)
+		}
+	}
+
+	intent, err := helperauth.NewPrepareEgressLeaseIntent(profile, namespace, "9.9.9.9",
+		"tunnelgen_0123456789abcdef0123456789abcdef", "ffeeddccbbaa99887766554433221100",
+		"aabbccddeeff00112233445566778899", "runtime_0123456789abcdef0123456789abcdef",
+		"authority_0123456789abcdef0123456789abcdef", "reservation_0123456789abcdef0123456789abcdef", "8.8.4.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	encode := func(intent helperauth.Intent) string {
+		payload, err := json.Marshal(helperauth.SignedCapability{
+			Claims:    helperauth.Claims{Version: 1, Intent: intent},
+			Signature: "test-only",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return string(payload)
+	}
+
+	foreign := intent
+	foreign.Namespace = "egresslab-lab-ffffffffffffffff"
+
+	// Refused before any socket is touched, including a preparation for another lab.
+	for _, input := range []string{"", "{}{}", validCapability,
+		`{"claims":{"intent":{"operation":"ReserveEgressCandidateV1"}}}`, encode(foreign)} {
+		var out bytes.Buffer
+
+		if err := run(args, strings.NewReader(input), &out); helperipc.ErrorCode(err) != helperipc.CodeInvalidRequest ||
+			out.Len() != 0 {
+			t.Fatalf("invalid preparation input accepted: %v", err)
+		}
+	}
+
+	// The wiring, against a socket that does not exist; no helper is contacted.
+	previous := socketPath
+	socketPath = filepath.Join(t.TempDir(), "missing.sock")
+	t.Cleanup(func() { socketPath = previous })
+
+	var out bytes.Buffer
+	if err := run(args, strings.NewReader(encode(intent)), &out); helperipc.ErrorCode(err) != helperipc.CodeRuntimeUnavailable {
+		t.Fatalf("command did not reach the test socket: %v", err)
 	}
 }

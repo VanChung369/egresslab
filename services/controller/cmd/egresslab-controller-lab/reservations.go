@@ -14,14 +14,15 @@ type reservationListResult struct {
 	NetworkReady bool                             `json:"network_ready"`
 }
 
-// reservationCommandResult is diagnostic ownership metadata: a durable hold, not a lease, and no
-// reusable activation evidence once this process exits.
+// reservationCommandResult is diagnostic metadata: a durable hold and its prepared lease, not an
+// active lease, and no reusable activation evidence once this process exits.
 type reservationCommandResult struct {
-	AuthorityID       string                    `json:"authority_id"`
-	Reservation       control.EgressReservation `json:"reservation"`
-	State             string                    `json:"state"`
-	ActivationAllowed bool                      `json:"activation_allowed"`
-	NetworkReady      bool                      `json:"network_ready"`
+	AuthorityID       string                       `json:"authority_id"`
+	Reservation       control.EgressReservation    `json:"reservation"`
+	PreparedLease     control.LabPreparedLeaseInfo `json:"prepared_lease"`
+	State             string                       `json:"state"`
+	ActivationAllowed bool                         `json:"activation_allowed"`
+	NetworkReady      bool                         `json:"network_ready"`
 }
 
 // The controller's own codes; they are not helper codes.
@@ -36,6 +37,7 @@ const (
 	codeReservationLimit             = "EGRESS_RESERVATION_LIMIT"
 	codeReservationExpired           = "EGRESS_CANDIDATE_EXPIRED"
 	codeReservationInvalid           = "INVALID_EGRESS_CANDIDATE"
+	codeLeasePreparationUnconfirmed  = "EGRESS_PREPARATION_UNCONFIRMED"
 )
 
 // reservationCommandError maps the authority's errors to stable codes and keeps coded runtime and
@@ -49,6 +51,9 @@ func reservationCommandError(err error) error {
 	var code string
 
 	switch {
+	// After the durable commit: the hold exists whatever the cause, so never a plain refusal.
+	case errors.Is(err, control.ErrLeasePreparationUnconfirmed):
+		code = codeLeasePreparationUnconfirmed
 	case errors.Is(err, control.ErrReservationStateUncertain), errors.Is(err, control.ErrReservationCommittedExpired):
 		code = labruntime.CodeStateUncertain
 	case errors.Is(err, control.ErrReservationBusy):
@@ -147,9 +152,9 @@ func (s *session) listReservations() error {
 	})
 }
 
-// reserveEgress runs one signed verification, candidate and durable reservation. It refuses an
-// unavailable authority before any runtime call, and changes no profile, endpoint or binding: a
-// hold is not an active profile.
+// reserveEgress runs one signed verification, candidate, durable reservation and lease preparation.
+// It refuses an unavailable authority before any runtime call, and changes no profile, endpoint or
+// binding: a prepared hold is not an active profile.
 func (s *session) reserveEgress(profileID, namespace string) (reservationCommandResult, error) {
 	authority, keys, err := s.openReservationAuthority()
 	if err != nil {
@@ -211,10 +216,15 @@ func (s *session) reserveEgress(profileID, namespace string) (reservationCommand
 
 	trust := control.ReservationContext{Profile: profile, Binding: binding, Runtime: rt, Helper: info, Lab: lab}
 
-	hold, err := authority.ReserveVerifiedEgress(s.ctx, transport, keys, trust)
+	result, err := authority.ReserveAndPrepareEgress(s.ctx, transport, keys, trust)
 	if err != nil {
 		return reservationCommandResult{}, reservationCommandError(err)
 	}
 
-	return reservationCommandResult{AuthorityID: authority.Info().ID, Reservation: hold, State: "held"}, nil
+	return reservationCommandResult{
+		AuthorityID:   authority.Info().ID,
+		Reservation:   result.Reservation,
+		PreparedLease: result.PreparedLease,
+		State:         "prepared",
+	}, nil
 }

@@ -1,6 +1,7 @@
-// Command egresslab-controller-lab signs CreateLab, ConnectTunnel, PermitProbe, PermitMultiProbeV2
-// and ReserveEgressCandidateV1 capabilities with the controller key and drives the helper's sealed
-// lab, tunnel and diagnostic probes through the host's Linux runtime (WSL2, Lima or native Linux).
+// Command egresslab-controller-lab signs CreateLab, ConnectTunnel, PermitProbe, PermitMultiProbeV2,
+// ReserveEgressCandidateV1 and PrepareEgressLeaseV1 capabilities with the controller key and drives
+// the helper's sealed lab, tunnel and diagnostic probes through the host's Linux runtime (WSL2, Lima
+// or native Linux).
 // It also provisions and uses the per-user egress reservation authority. The helper stays the
 // source of truth for lab and tunnel state. It is a lab tool: -approve is an operator confirmation,
 // not user authentication.
