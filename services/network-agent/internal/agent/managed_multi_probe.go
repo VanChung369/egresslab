@@ -279,6 +279,12 @@ func (b *ManagedTunnelBackend) ProbeConfiguredMulti(
 		return ManagedMultiProbeObservation{}, err
 	}
 
+	// Last, once every window is closed and the tunnel, handshake and consensus are verified, so
+	// partial evidence can never set the pin; a mismatch faults the tunnel through the defer above.
+	if err := b.acceptStickyConsensusLocked(t, consensus); err != nil {
+		return ManagedMultiProbeObservation{}, err
+	}
+
 	return ManagedMultiProbeObservation{
 		IPv4:        consensus.ipv4,
 		StartedAt:   startedAt,

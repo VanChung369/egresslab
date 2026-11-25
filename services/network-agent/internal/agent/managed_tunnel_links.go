@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 )
 
 // A managed tunnel link carries an alias (ifalias) naming its namespace and creation name. The
@@ -30,6 +31,12 @@ type managedTunnel struct {
 	namespace string
 	rootName  string
 	alias     string
+
+	// One managed tunnel lifetime; a reconnect gets a new generation with no pin.
+	generation string
+
+	// Set only by a complete multi-source verification of this generation. It is not a lease.
+	expectedIPv4 netip.Addr
 
 	peer    managedPeerPolicy
 	network managedNetworkPolicy

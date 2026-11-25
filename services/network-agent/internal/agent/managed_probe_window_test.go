@@ -218,7 +218,8 @@ type probeWindowKernel struct {
 	failAdd bool
 	failDel bool
 
-	expectedScript string // the window script to accept; the 1.1.1.1 window when empty
+	expectedScript string     // the window script to accept; the 1.1.1.1 window when empty
+	destination    netip.Addr // the destination of the window the multi-source fixture opened
 }
 
 func (k *probeWindowKernel) list(context.Context, string) ([]byte, error) {

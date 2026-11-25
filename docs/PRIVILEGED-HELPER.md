@@ -1,6 +1,6 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 29C.4c — controller multi-source integration and real VPN verification.** A
+Status: **Step 30A — generation-scoped sticky IP enforcement in the helper.** A
 controller CLI signs `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV1` and drives
 the helper's sealed lab, tunnel and diagnostic probes in the Linux runtime; the helper holds the encrypted WireGuard configs,
 disables IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once and pins
@@ -1207,3 +1207,50 @@ observation, and `network_ready: false`. After a successful attempt the lab veri
 `egresslab_probe4` set or permit remained, and the output chain was back to the sealed rules
 (`policy drop`; IPv6, DNS and DoT drops; `lo` accept). `disconnect` returned the lab to `sealed`
 and `delete-lab` removed it. Not run on WSL2 or native Linux.
+
+## Sticky IP
+
+| Step | Content |
+|---|---|
+| 30A | Tunnel generations and sticky IP enforcement in the helper |
+| 30B | Signed generation binding and the verified evidence lifecycle |
+
+### Generation-scoped sticky IP (Step 30A)
+
+Every managed tunnel gets a new generation before its first kernel change: `tunnelgen_` and 32 hex
+characters, 128 random bits. A generation is one tunnel lifetime, not a profile, namespace or
+helper process: disconnecting and connecting again, with the same profile, namespace and config,
+starts a new generation. It is an identifier, not a secret or an authorization. A generation's
+expected public IPv4 address starts unset and lives on the tracked tunnel itself, under the
+namespace manager lock, in memory only: never on disk and never from IPC, the controller, a
+single-source observation or an earlier tunnel.
+
+Only a complete `ProbeConfiguredMulti` sets it, at the very end, once every source answered, every
+window is closed and verified, the tunnel and a recent handshake with the expected peer are
+verified, strict consensus holds and the deadline has not passed; the lock is held throughout. The
+first such consensus pins the address; every later one must match it. There is no way to override,
+replace or forget the pin of a live generation. Consensus and the pin are separate checks: two
+sources agreeing on a new address pass consensus and still fail the pin
+(`ErrManagedStickyIPChanged`). A violation, like any failure after the attempt starts, returns no
+evidence, faults the tunnel and removes it; if the removal is not confirmed, the faulted generation
+stays tracked with its original pin and refuses further probes. A failed attempt never sets or
+changes the pin. A confirmed removal clears the backend's active tunnel, so the next connect starts
+a new, unpinned generation. The single-source `ProbeConfigured` refuses to run on a multi-source
+backend (even with a runner set by mistake), so its evidence cannot bypass the pin.
+
+The pin detects a change only when a verification runs; EgressLab cannot make a provider keep an
+address. It is not a lease, a reservation or proof that the address stays the same, and it says
+nothing about other profiles (uniqueness comes separately). The generation and the pin are not in
+the signed protocol yet (Step 30B); no continuous monitoring and no application traffic exist.
+
+Verified on Lima on 2026-11-25 with the real Proton tunnel (scratch Keychain key and profile,
+removed afterwards), through the controller: two separately approved `probe-egress-multi` attempts
+on one configured tunnel returned the same address from both sources (`195.242.214.134`), the
+second passing the pin the first had set; afterwards the lab verified as `tunnel_configured` with
+no namespace process, no probe set or permit and the sealed output chain, and `disconnect` and
+`delete-lab` cleaned up. The first attempt of the session again failed in its `cloudflare_trace`
+worker and faulted the lab; as in Step 29C.4c it was the first probe after a long idle period, and
+a fresh lab then succeeded. A metadata-only `strace` of the helper (program names
+and exit codes) during the successful cycle showed four workers exiting 0; the failure was not
+captured. A provider changing its address was tested with a synthetic runner only, not provoked on
+the real tunnel.

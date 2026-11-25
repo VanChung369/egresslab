@@ -148,12 +148,18 @@ func (b *ManagedTunnelBackend) connectConfig(ctx context.Context, namespace stri
 		return err
 	}
 
+	generation, err := newManagedTunnelGeneration()
+	if err != nil {
+		return err
+	}
+
 	tunnel := &managedTunnel{
-		namespace: namespace,
-		rootName:  link,
-		alias:     managedTunnelAliasPrefix + namespace + ":" + link,
-		peer:      peer,
-		network:   network,
+		namespace:  namespace,
+		rootName:   link,
+		alias:      managedTunnelAliasPrefix + namespace + ":" + link,
+		generation: generation,
+		peer:       peer,
+		network:    network,
 	}
 
 	// Tracked before the first kernel change, so a failure can never forget what was created.

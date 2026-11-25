@@ -86,7 +86,9 @@ func (b *ManagedTunnelBackend) ProbeConfigured(
 	b.sealed.manager.mu.Lock()
 	defer b.sealed.manager.mu.Unlock()
 
-	if b.vpn.probe == nil {
+	// Never on a multi-source backend, even if a single-source runner were set by mistake: its
+	// evidence must not bypass the generation pin.
+	if b.multiProbe != nil || b.vpn.probe == nil {
 		return ManagedProbeObservation{}, ErrManagedProbeUnavailable
 	}
 

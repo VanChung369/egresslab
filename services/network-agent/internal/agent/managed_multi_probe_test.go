@@ -14,8 +14,9 @@ import (
 	"github.com/VanChung369/egresslab/services/network-agent/internal/helperauth"
 )
 
-// multiProbeFixture is a configured tunnel whose firewall fake serves, for each window in turn, a
-// capture holding that source's destination; it fails the test if two windows overlap.
+// multiProbeFixture is a configured tunnel whose firewall fake serves each window a capture holding
+// the destination its script names, over any number of attempts; it fails the test if a window
+// opens before the previous one closed, or for a destination that is no source's.
 func multiProbeFixture(t *testing.T) (*ManagedTunnelBackend, *managedTestKernel, *probeWindowKernel, *[]string) {
 	t.Helper()
 
@@ -24,18 +25,22 @@ func multiProbeFixture(t *testing.T) (*ManagedTunnelBackend, *managedTestKernel,
 
 	b.sealed.firewall.run = func(ctx context.Context, namespace, script string, checkOnly bool) error {
 		if strings.HasPrefix(script, "add set") {
-			index := window.opened
-			if window.open || index >= len(sources) || len(window.closed) != index {
-				t.Fatal("overlapping or unexpected probe window")
+			if window.open || len(window.closed) != window.opened {
+				t.Fatal("overlapping or unclosed probe window")
 			}
 
-			expected, err := managedProbeRulesFor(sources[index].destination)
-			if err != nil {
-				t.Fatal(err)
+			window.expectedScript, window.destination = "", netip.Addr{}
+
+			for _, source := range sources {
+				if expected, err := managedProbeRulesFor(source.destination); err == nil && script == expected {
+					window.expectedScript, window.destination = expected, source.destination
+					window.window = probeCaptureForDestination(t, source.destination)
+				}
 			}
 
-			window.expectedScript = expected
-			window.window = probeCaptureForDestination(t, sources[index].destination)
+			if window.expectedScript == "" {
+				t.Fatal("probe window for a destination that is no source's")
+			}
 		}
 
 		return window.run(ctx, namespace, script, checkOnly)
@@ -133,6 +138,11 @@ func TestManagedMultiProbeLifecycle(t *testing.T) {
 			b, kernel, window, pids := multiProbeFixture(t)
 			sources := testManagedHTTPSources(t)
 
+			tracked := b.active
+			if tracked == nil || tracked.generation == "" || tracked.expectedIPv4.IsValid() {
+				t.Fatal("invalid initial generation state")
+			}
+
 			switch tt.mode {
 			case "busy before probe":
 				*pids = []string{"4242\n"}
@@ -154,7 +164,8 @@ func TestManagedMultiProbeLifecycle(t *testing.T) {
 						t.Fatal("unexpected probe source")
 					}
 
-					if !window.open || window.opened != index+1 || len(window.closed) != index {
+					if !window.open || window.opened != index+1 || len(window.closed) != index ||
+						window.destination != source.destination {
 						t.Fatal("worker ran outside its own window")
 					}
 
@@ -253,6 +264,10 @@ func TestManagedMultiProbeLifecycle(t *testing.T) {
 					t.Fatal("invalid successful lifecycle")
 				}
 
+				if tracked.expectedIPv4 != result.IPv4 {
+					t.Fatal("successful consensus did not pin the generation")
+				}
+
 				if err := b.VerifyConfigured(ctx, vpnTestNS); err != nil {
 					t.Fatal(err)
 				}
@@ -267,6 +282,10 @@ func TestManagedMultiProbeLifecycle(t *testing.T) {
 			if !errors.Is(err, ErrManagedProbeFailed) || (tt.want != nil && !errors.Is(err, tt.want)) ||
 				(tt.text != "" && !strings.Contains(err.Error(), tt.text)) {
 				t.Fatalf("expected %v %q, got %v", tt.want, tt.text, err)
+			}
+
+			if tracked.expectedIPv4.IsValid() {
+				t.Fatal("a failed first verification set the pin")
 			}
 
 			if result.IPv4.IsValid() || !result.StartedAt.IsZero() || !result.FinishedAt.IsZero() ||
