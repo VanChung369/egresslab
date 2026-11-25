@@ -48,6 +48,17 @@ On startup, the controller re-validates every invariant of the persisted state a
 This API is intentionally *not* a remote management API and listens on loopback only.
 CORS is restricted to local development and Tauri origins. This is not full process authentication.
 
+### Shared egress reservation authority (Step 31B)
+
+The unique-IP invariant needs one authority across runtimes: two Linux runtimes, each with its own helper, can see the same exit address and both produce a local candidate (`docs/PRIVILEGED-HELPER.md`, "Egress candidates"). The controller holds that authority's core, an in-process registry in `internal/control`:
+
+- A reservation owner is one managed tunnel's lifetime: profile, runtime, helper epoch, namespace and tunnel generation.
+- A candidate is admitted only when the helper's receipt agrees with the trusted runtime and its pinned key, the strict profile and its configured lab, the original V2 probe (generation, nonce, observation time and the unanimously verified address) and both capabilities this controller issued, whose signatures are checked against the pinned public key. The admission deadline never extends the helper's evidence: it is the earlier of 60 s after the probe was sent and the helper's deadline minus 5 s.
+- Four indexes (owner, public IPv4, profile and reservation ID) change together; validation, the collision checks and publication run under one mutex, so requests through one registry instance never hold the same address twice, and an existing hold is never overwritten or evicted.
+- Expiry ends eligibility for activation, not the hold: an address is released only once a later lifecycle confirms its owner can no longer use it, and no release exists yet.
+
+The registry is in memory, is not wired into the CLI or the HTTP API, and coordinates one process only. Cross-process coordination and durable reservations (Step 31C), signed reservation and lease activation (Step 31D) and collision and recovery tests (Step 31E) come later; no application traffic is allowed.
+
 ### Windows / macOS / Linux
 
 The Go control plane can run natively on Windows and macOS.

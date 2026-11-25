@@ -1,6 +1,6 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 31A — trusted egress candidate reservation (helper only).** A controller CLI signs
+Status: **Step 31B — shared atomic reservation registry (controller core).** A controller CLI signs
 `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV2` and drives the helper's sealed
 lab, tunnel and diagnostic probes in the Linux runtime; the helper holds the encrypted WireGuard
 configs, disables IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once
@@ -8,10 +8,11 @@ and pins it, checks the peer state and the IPv4 addresses, MTU, rules and routes
 against the staged config, and stays the source of truth for lab and tunnel state. A single-source
 probe yields one observation of the tunnel's public IPv4 address, and a multi-source probe the
 unanimous evidence of two independent HTTPS sources; both are printed only. The helper can consume
-that evidence once into a local egress candidate (`ReserveEgressCandidateV1`), which no client sends
-yet; a candidate is not a reservation across runtimes and not a lease. Windows (WSL2), Linux and
-macOS (Lima, Keychain) are verified end to end. No lease or proxy traffic exists; the sections from
-"Typed operations only" on are partly design.
+that evidence once into a local egress candidate (`ReserveEgressCandidateV1`), and the controller
+has the in-process core of the shared registry that holds each address for one tunnel owner; neither
+is wired to a client yet, and neither is a lease. Windows (WSL2), Linux and macOS (Lima, Keychain)
+are verified end to end. No lease or proxy traffic exists; the sections from "Typed operations only"
+on are partly design.
 
 ## Implemented
 
@@ -93,8 +94,9 @@ macOS (Lima, Keychain) are verified end to end. No lease or proxy traffic exists
 - A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
-- A shared, durable uniqueness authority for egress addresses, reservations, leases and their
-  activation (Steps 31B to 31E); helperctl and the controller do not send `ReserveEgressCandidateV1`.
+- A uniqueness authority shared between controller processes and durable, safe release, leases
+  and their activation (Steps 31C to 31E); the controller's reservation registry (Step 31B) is an
+  in-process core, and helperctl and the controller do not send `ReserveEgressCandidateV1`.
 - Open from earlier steps: egress-IP leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
 - DNS for applications in the lab (a session resolver, with filesystem and resolver IPC
@@ -1490,3 +1492,19 @@ an active lease or permission to send traffic: two helpers can produce candidate
 address until the shared authority exists. helperctl and the controller do not send the operation
 yet, and it has not run on a real tunnel; the tests use real Unix sockets and signatures with the
 fake kernel backend.
+
+### Shared atomic reservation registry (Step 31B)
+
+A local candidate does not make an address unique across runtimes. The controller's reservation
+registry (`internal/control/egress_reservation.go`, see `docs/ARCHITECTURE.md`) admits a candidate
+only when the helper's receipt agrees with the trusted runtime, the original signed V2 probe and the
+signed reservation request, and the receipt must come from the trusted runtime transport, never from
+user input. Checking the controller's own signatures proves that this controller issued the
+capabilities, not that the helper ran them: the receipt carries no helper signature. Under one
+mutex the registry checks and holds one public IPv4 for one tunnel owner (profile, runtime, helper
+epoch, namespace, tunnel generation), so no two profiles or runtimes using the same registry
+instance hold the same address; a profile holds at most one reservation, and a reconnect or a move
+to another runtime does not get a second one. Expiry never releases a hold. A reservation is not a
+lease: before any later activation the helper must confirm its candidate and local deadline again.
+The registry is not persistent or wired into the lifecycle yet, the sixth golden vector is pinned in
+both modules now, and application traffic stays disabled.

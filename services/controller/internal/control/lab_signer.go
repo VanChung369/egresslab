@@ -64,6 +64,7 @@ type LabIntent struct {
 	ProbeIPv4 string `json:"probe_ipv4,omitempty"`
 
 	TunnelGeneration string `json:"tunnel_generation,omitempty"`
+	EvidenceNonce    string `json:"evidence_nonce,omitempty"` // ReserveEgressCandidateV1 only
 }
 
 type LabClaims struct {

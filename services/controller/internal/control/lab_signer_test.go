@@ -74,6 +74,15 @@ func TestLabSignerGolden(t *testing.T) {
 				TunnelGeneration: "tunnelgen_0123456789abcdef0123456789abcdef"},
 			"sRRT76f9zHhm22LwX3wRFj1qqP2ug7YzPXCTXaBL3B50bwejThRjeVWLt6Kk33HRkLC3ugajV3ksNo2MUxONCw",
 		},
+		// From TestReserveEgressCandidateSigningMessageGolden in the network agent (cross-checked with
+		// OpenSSL 3).
+		"ReserveEgressCandidateV1": {
+			LabIntent{Operation: LabReserveEgressCandidateOp, ProfileID: "profile_0123456789abcdef",
+				Namespace: "egresslab-lab-0123456789abcdef", ProbeIPv4: "9.9.9.9",
+				TunnelGeneration: "tunnelgen_0123456789abcdef0123456789abcdef",
+				EvidenceNonce:    "ffeeddccbbaa99887766554433221100"},
+			"WrDOmIHMAE-VvemqyqyxXj4iSwf_nJeFu9I0gTqRdcopF2fCfQxnYbidX_0WCkX8dEDzvUwBMclAf8R_Bq0jCg",
+		},
 	}
 
 	for name, tt := range tests {
