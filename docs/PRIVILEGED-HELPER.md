@@ -1,13 +1,14 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 28B — DNS deny policy and resolver boundaries.** A controller CLI signs
-`CreateLab` and `ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in the
-Linux runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS
-transports inside its labs, resolves a hostname endpoint once and pins it, checks the peer state and the IPv4 addresses, MTU, rules and routes the
-kernel reports against the staged config, and stays the source of truth for lab and tunnel state.
-Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to end. Probes and proxy
-traffic are still not implemented; the sections from "Typed operations only" on are partly
-design.
+Status: **Step 29A — time-limited managed probe permission.** A controller CLI signs `CreateLab`
+and `ConnectTunnel` and drives the helper's sealed lab and tunnel lifecycle in the Linux runtime;
+the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports inside its
+labs, resolves a hostname endpoint once and pins it, checks the peer state and the IPv4 addresses,
+MTU, rules and routes the kernel reports against the staged config, and stays the source of truth
+for lab and tunnel state. A kernel-timed probe window exists as an internal firewall primitive,
+not yet reachable over IPC. Windows (WSL2), Linux and macOS (Lima, Keychain) are verified end to
+end. Probes and proxy traffic are still not implemented; the sections from "Typed operations only"
+on are partly design.
 
 ## Implemented
 
@@ -341,6 +342,44 @@ fall back to the bootstrap resolver. Verified on Lima with the real tunnel up: t
 above, `VerifyLab` stayed `tunnel_configured`, and UDP/TCP 53 and 853 to `1.1.1.1` from inside
 the lab were all blocked; the cycle through `Disconnect`, `VerifyLab` and `DeleteLab` passed.
 Not yet run on WSL2.
+
+**Probe window (Step 29A).** `PermitEgressProbe` of the legacy VPN lab adds permanent accepts: a
+crash after it leaves them in place. The managed tunnel will instead open a window whose lifetime
+the kernel enforces. `withManagedProbeWindowLocked` (an internal primitive; no IPC operation calls
+it yet) applies one transaction:
+
+```text
+add set inet egresslab_lab egresslab_probe4 { type ipv4_addr; flags timeout; size 1; }
+add element inet egresslab_lab egresslab_probe4 { 1.1.1.1 timeout 30s }
+add rule inet egresslab_lab output oifname "wg0" ip daddr @egresslab_probe4 tcp dport 443 accept
+add rule inet egresslab_lab input iifname "wg0" ip saddr @egresslab_probe4 tcp sport 443 ct state established accept
+```
+
+Both permits match through the same set, so when the element expires neither direction matches
+any more, even with the helper gone; no general `ct state established` rule exists. The permits
+come after every sealed rule, so the IPv6 and DNS drops still win.
+
+- **Before opening**, the seal must match both the session baseline and the intended policy.
+- **After opening, and again when the probe returns**, the readback must be exactly the seal plus
+  the set (one element, `1.1.1.1`, timeout 30, time left) and the two permits, each last in its
+  chain. Any other destination, interface, port, lifetime, element, set, flag or rule refuses.
+- **The probe callback** gets its own 12 s deadline; the kernel's 30 s bounds the permission.
+- **Closing** always runs, with its own context, even after a failed probe: it deletes the two
+  permits by the handles just verified and the set, in one transaction, then requires the sealed
+  policy again. An expired set (the kernel then lists no element) can still be closed. If the
+  close cannot be confirmed, the namespace is marked drifted and the error carries
+  `ErrProbeCleanup`; the caller (Step 29B) must then fault the tunnel and discard any result.
+- The window is never recorded as a session script or in the baseline, so a later `Reconcile`
+  cannot bring it back.
+
+The JSON is pinned to real captures (nft 1.0.9, Linux 6.8): `testdata/nft-lab-probe-window.json`
+(one second after opening) and `nft-lab-probe-expired.json`. nft 1.0.9 prints set membership with
+`"=="` and lists no `elem` once the element has expired; another rendering is refused. Verified on
+Lima in two scratch namespaces joined by a veth named `wg0`, with `1.1.1.1` held by the peer (no
+Internet traffic): with the seal alone nothing passed; with the window open only `1.1.1.1:443`
+passed (not port 8443, not another address); after 30 s everything was blocked, including a
+connection opened inside the window; the close by handle left exactly the sealed ruleset. Not yet
+run on WSL2.
 
 **Recovery gate.** Before consuming a capability, `CreateLab` scans with the helper's own namespace
 manager. Any lab resource this helper does not own refuses creation with `RECOVERY_REQUIRED`: a

@@ -354,4 +354,4 @@ Add `-enable-tunnel` as well (it needs `-enable-vault`). On a sealed lab, `egres
 
 ## Next Milestone
 
-Handshake and public egress IP verification for the managed tunnel (Step 29). See `docs/PRIVILEGED-HELPER.md`.
+A one-shot HTTPS probe through the managed tunnel inside the kernel-timed probe window, with handshake verification and a signed IPC operation (Step 29B), then multi-source public IP verification (Step 29C). See `docs/PRIVILEGED-HELPER.md`.

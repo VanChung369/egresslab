@@ -1,0 +1,275 @@
+{
+  "nftables": [
+    {
+      "metainfo": {
+        "version": "1.0.9",
+        "release_name": "Old Doc Yak #3",
+        "json_schema_version": 1
+      }
+    },
+    { "table": { "family": "inet", "name": "egresslab_lab", "handle": 1 } },
+    {
+      "set": {
+        "family": "inet",
+        "name": "egresslab_probe4",
+        "table": "egresslab_lab",
+        "type": "ipv4_addr",
+        "handle": 15,
+        "size": 1,
+        "flags": ["timeout"],
+        "elem": [{ "elem": { "val": "1.1.1.1", "timeout": 30, "expires": 29 } }]
+      }
+    },
+    {
+      "chain": {
+        "family": "inet",
+        "table": "egresslab_lab",
+        "name": "input",
+        "handle": 1,
+        "type": "filter",
+        "hook": "input",
+        "prio": 0,
+        "policy": "drop"
+      }
+    },
+    {
+      "chain": {
+        "family": "inet",
+        "table": "egresslab_lab",
+        "name": "output",
+        "handle": 2,
+        "type": "filter",
+        "hook": "output",
+        "prio": 0,
+        "policy": "drop"
+      }
+    },
+    {
+      "chain": {
+        "family": "inet",
+        "table": "egresslab_lab",
+        "name": "forward",
+        "handle": 3,
+        "type": "filter",
+        "hook": "forward",
+        "prio": 0,
+        "policy": "drop"
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "egresslab_lab",
+        "chain": "input",
+        "handle": 4,
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": { "meta": { "key": "nfproto" } },
+              "right": "ipv6"
+            }
+          },
+          { "drop": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "egresslab_lab",
+        "chain": "input",
+        "handle": 5,
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": { "meta": { "key": "iifname" } },
+              "right": "lo"
+            }
+          },
+          { "accept": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "egresslab_lab",
+        "chain": "input",
+        "handle": 17,
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": { "meta": { "key": "iifname" } },
+              "right": "wg0"
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": { "payload": { "protocol": "ip", "field": "saddr" } },
+              "right": "@egresslab_probe4"
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": { "payload": { "protocol": "tcp", "field": "sport" } },
+              "right": 443
+            }
+          },
+          {
+            "match": {
+              "op": "in",
+              "left": { "ct": { "key": "state" } },
+              "right": "established"
+            }
+          },
+          { "accept": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "egresslab_lab",
+        "chain": "output",
+        "handle": 6,
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": { "meta": { "key": "nfproto" } },
+              "right": "ipv6"
+            }
+          },
+          { "drop": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "egresslab_lab",
+        "chain": "output",
+        "handle": 7,
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": { "payload": { "protocol": "udp", "field": "dport" } },
+              "right": 53
+            }
+          },
+          { "drop": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "egresslab_lab",
+        "chain": "output",
+        "handle": 8,
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": { "payload": { "protocol": "tcp", "field": "dport" } },
+              "right": 53
+            }
+          },
+          { "drop": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "egresslab_lab",
+        "chain": "output",
+        "handle": 9,
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": { "payload": { "protocol": "tcp", "field": "dport" } },
+              "right": 853
+            }
+          },
+          { "drop": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "egresslab_lab",
+        "chain": "output",
+        "handle": 10,
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": { "payload": { "protocol": "udp", "field": "dport" } },
+              "right": 853
+            }
+          },
+          { "drop": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "egresslab_lab",
+        "chain": "output",
+        "handle": 11,
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": { "meta": { "key": "oifname" } },
+              "right": "lo"
+            }
+          },
+          { "accept": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "egresslab_lab",
+        "chain": "output",
+        "handle": 16,
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": { "meta": { "key": "oifname" } },
+              "right": "wg0"
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": { "payload": { "protocol": "ip", "field": "daddr" } },
+              "right": "@egresslab_probe4"
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": { "payload": { "protocol": "tcp", "field": "dport" } },
+              "right": 443
+            }
+          },
+          { "accept": null }
+        ]
+      }
+    }
+  ]
+}
