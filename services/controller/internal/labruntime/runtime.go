@@ -55,6 +55,7 @@ type HelperTransport interface {
 	Disconnect(ctx context.Context, profileID, namespace string) (control.LabInfo, error)
 	ProbeEgress(ctx context.Context, profileID, namespace string, capability control.LabCapability) (control.LabProbeInfo, error)
 	MultiProbePolicy(ctx context.Context) (control.LabMultiProbePolicy, error)
+	MultiProbeTarget(ctx context.Context, profileID, namespace string) (control.LabMultiProbeTarget, error)
 	ProbeEgressMulti(
 		ctx context.Context,
 		profileID, namespace string,

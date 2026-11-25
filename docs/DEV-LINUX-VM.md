@@ -312,6 +312,7 @@ egresslab-controller-lab -approve connect-tunnel <profile ID> <namespace> <stage
 egresslab-controller-lab -approve disconnect <profile ID> <namespace>
 egresslab-controller-lab -approve probe-egress <profile ID> <namespace>                # needs -enable-probe
 egresslab-controller-lab multi-probe-policy                                           # needs -enable-multi-probe
+egresslab-controller-lab multi-probe-target <profile ID> <namespace>                  # needs -enable-multi-probe
 egresslab-controller-lab -approve probe-egress-multi <profile ID> <namespace>          # needs -enable-multi-probe
 ```
 
@@ -414,7 +415,7 @@ sudo /usr/local/bin/egresslab-helper -uid "$(id -u)" -gid "$(id -g)" \
   -enable-multi-probe -probe-uid "$(id -u egresslab-probe)" -probe-gid "$(id -g egresslab-probe)"
 ```
 
-A missing or unsafe pin file stops the start before the socket exists. `egresslab-helperctl multi-probe-policy` prints the policy version, the pin and the helper epoch, runtime ID and public-key fingerprint; compare the last three with `egresslab-helperctl helper-info`. The policy is metadata, not authorization. `egresslab-helperctl probe-egress-multi PROFILE_ID NAMESPACE < capability.json` takes the signed capability on stdin and no destination argument. Do not hand-craft capabilities or open the managed firewall by hand; the controller signs `PermitMultiProbeV1`. Changing the pin needs the same provisioning and a helper restart (a new epoch).
+A missing or unsafe pin file stops the start before the socket exists. `egresslab-helperctl multi-probe-policy` prints the policy version, the pin and the helper epoch, runtime ID and public-key fingerprint; compare the last three with `egresslab-helperctl helper-info`. The policy is metadata, not authorization. `egresslab-helperctl probe-egress-multi PROFILE_ID NAMESPACE < capability.json` takes the signed capability on stdin and no destination argument. Do not hand-craft capabilities or open the managed firewall by hand; the controller signs `PermitMultiProbeV2` (`PermitMultiProbeV1` before Step 30B.2). Changing the pin needs the same provisioning and a helper restart (a new epoch).
 
 ### Multi-source verification from the controller (Step 29C.4c)
 
@@ -434,6 +435,18 @@ The answer holds the agreed public IPv4 address, the start and finish times, the
 With one configured tunnel, run two separately approved `-approve probe-egress-multi` attempts without disconnecting in between. The first successful attempt pins the tunnel generation's expected address in the helper; the second must return the same address. A different consensus address faults the tunnel even when both sources agree on it, and a failed attempt returns no evidence and never replaces the pin. The generation and the pin are not printed (no IPC exposes them before Step 30B); the unit tests check them directly. Do not provoke an address change by editing the managed firewall, routes or WireGuard configuration. A `LAB_FAULTED` answer is not necessarily a sticky violation (an HTTPS, consensus or handshake failure looks the same): read the helper log, `list-labs` and `recover-scan`, delete the faulted lab and do not retry on it. Only the helper changed in this step; `egresslab-helperctl`, `egresslab-probe` and the controller stay at Step 29C.4.
 
 Keep the clocks synchronized: the helper checks a capability's `issued_at` with no allowance, so a VM clock behind the host's by more than the request's transit time refuses a fresh capability (`AUTHORIZATION_DENIED`); the 5 s allowance applies only to the evidence the controller checks afterwards. Fix time synchronization rather than the tolerance.
+
+### Generation-bound multi-source verification (Step 30B.2)
+
+Upgrade `egresslab-helper`, `egresslab-helperctl` and the controller together (rebuild `egresslab-probe` from the same revision too). The existing `-enable-multi-probe` flag now enables `PermitMultiProbeV2` only; the start log names `PermitMultiProbeV2`. The provisioned ident.me pin and the controller key stay as they are. Mixed versions refuse each other (no negotiation or fallback): an older controller rejects the V2 policy, and a newer controller gets a usage error from an older helperctl.
+
+```bash
+egresslab-controller-lab multi-probe-policy                                   # policy: PermitMultiProbeV2
+egresslab-controller-lab multi-probe-target <profile ID> <namespace>          # the configured tunnel's generation
+egresslab-controller-lab -approve probe-egress-multi <profile ID> <namespace>
+```
+
+`multi-probe-target` is read-only and needs a configured tunnel (a sealed lab answers `INVALID_REQUEST`). The verification result adds `tunnel_generation` and `attempt_nonce` to the evidence of Step 29C.4c, still with `network_ready: false`. Two successful attempts without reconnecting report the same generation and address with different nonces; after a confirmed `disconnect` and `connect-tunnel`, `multi-probe-target` reports a different generation, and capabilities or evidence of the old generation are not accepted for the new tunnel (the unit tests cover the stale capability; do not mint one by hand). The generation, the pin and the nonce never appear in helperctl arguments. Never fall back to a legacy operation. The controller also refuses evidence 60 s or older at receipt, by the host clock against the runtime's `observed_at` with no skew allowance, which is one more reason to keep the clocks synchronized. The output is diagnostic evidence only: no egress lease or application networking is enabled.
 
 ## Security Notes
 
@@ -459,4 +472,4 @@ If DNS returns several addresses, do not take the first one blindly. The provide
 
 ## Next Milestone
 
-Sticky IP: controller integration of `PermitMultiProbeV2` and the V2 runtime cutover of the helper, helperctl and controller together (Step 30B.2), on top of the generation-scoped pin (Step 30A) and the signed generation binding and trusted evidence in the helper (Step 30B.1, not enabled in the installed helper). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c and 30A; in the last two it was the first probe after a long idle period, and a fresh lab then succeeded); a coded worker failure reason in the helper log would explain it. WSL2 and native Linux have not run the multi-source path. See `docs/PRIVILEGED-HELPER.md`.
+Step 31: a candidate reservation that consumes the helper's trusted evidence record within its deadline, on top of the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover of helper, helperctl and controller (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2; in the last three it was the first probe of the session, and a fresh lab then succeeded); a coded worker failure reason in the helper log would explain it. WSL2 and native Linux have not run the multi-source path. See `docs/PRIVILEGED-HELPER.md`.

@@ -33,7 +33,7 @@ func ValidLabMultiProbePin(raw string) bool {
 }
 
 func (p LabMultiProbePolicy) Valid() bool {
-	return p.Policy == LabMultiProbeOp &&
+	return (p.Policy == LabMultiProbeOp || p.Policy == LabMultiProbeV2Op) &&
 		ValidLabMultiProbePin(p.IdentIPv4) &&
 		ValidRuntimeID(p.RuntimeID) &&
 		labHelperIDPattern.MatchString(p.HelperID) &&
@@ -78,7 +78,7 @@ func MintPermitMultiProbe(
 		return LabCapability{}, err
 	}
 
-	if !policy.Matches(info) {
+	if policy.Policy != LabMultiProbeOp || !policy.Matches(info) {
 		return LabCapability{}, errors.New("multi-source policy identity mismatch")
 	}
 
@@ -108,6 +108,9 @@ type LabMultiProbeInfo struct {
 	HandshakeAt time.Time  `json:"handshake_at"`
 
 	Sources []LabMultiProbeSourceInfo `json:"sources"`
+
+	TunnelGeneration string `json:"tunnel_generation,omitempty"`
+	AttemptNonce     string `json:"attempt_nonce,omitempty"`
 }
 
 // Valid checks the evidence on its own, independently of the helper and the network agent: the
@@ -119,6 +122,12 @@ func (p LabMultiProbeInfo) Valid() bool {
 		!ValidLabNamespace(p.Namespace) ||
 		!validLabPublicIPv4(p.IPv4) ||
 		len(p.Sources) != 2 {
+		return false
+	}
+
+	// V1 evidence carries neither field; V2 carries both.
+	if (p.TunnelGeneration != "" || p.AttemptNonce != "") &&
+		(!ValidLabTunnelGeneration(p.TunnelGeneration) || !labProbeNoncePattern.MatchString(p.AttemptNonce)) {
 		return false
 	}
 
@@ -159,26 +168,51 @@ func (p LabMultiProbeInfo) Valid() bool {
 	return p.ObservedAt.Equal(p.Sources[0].ObservedAt)
 }
 
-// MatchesIntent requires the evidence for exactly the signed intent: its profile, namespace and
-// ident.me pin, not a policy the response chose.
+// MatchesIntent requires the evidence for exactly the signed intent: its profile, namespace, ident.me
+// pin and, for V2, tunnel generation, not a policy the response chose.
 func (p LabMultiProbeInfo) MatchesIntent(intent LabIntent) bool {
-	expected, err := NewLabMultiProbeIntent(intent.ProfileID, intent.Namespace, intent.ProbeIPv4)
+	if !p.Valid() {
+		return false
+	}
+
+	var expected LabIntent
+	var err error
+
+	switch intent.Operation {
+	case LabMultiProbeOp:
+		if p.TunnelGeneration != "" || p.AttemptNonce != "" {
+			return false
+		}
+
+		expected, err = NewLabMultiProbeIntent(intent.ProfileID, intent.Namespace, intent.ProbeIPv4)
+	case LabMultiProbeV2Op:
+		if p.TunnelGeneration != intent.TunnelGeneration || !labProbeNoncePattern.MatchString(p.AttemptNonce) {
+			return false
+		}
+
+		expected, err = NewLabGenerationProbeIntent(intent.ProfileID, intent.Namespace, intent.ProbeIPv4,
+			intent.TunnelGeneration)
+	default:
+		return false
+	}
 
 	return err == nil &&
 		intent == expected &&
-		p.Valid() &&
 		p.ProfileID == intent.ProfileID &&
 		p.Namespace == intent.Namespace &&
 		p.Sources[1].DestinationIPv4.String() == intent.ProbeIPv4
 }
 
-// ValidFor also binds the evidence to this request: it started after the capability was issued
-// and after the request was sent, finished before the answer arrived, is at most 90 s old at
-// receipt, and its handshake fits the helper's 180 s policy, all with 5 s of host/runtime clock
-// skew.
+// ValidFor is the legacy V1 check; V2 evidence must also match the signed nonce (ValidForCapability).
 func (p LabMultiProbeInfo) ValidFor(intent LabIntent, issuedAt, sentAt, receivedAt time.Time) bool {
-	if !p.MatchesIntent(intent) ||
-		issuedAt.Unix() <= 0 || sentAt.Unix() <= 0 || receivedAt.Unix() <= 0 ||
+	return intent.Operation == LabMultiProbeOp && p.MatchesIntent(intent) && p.validForTiming(issuedAt, sentAt, receivedAt)
+}
+
+// validForTiming binds the evidence to the request: it started after the capability was issued and
+// after the request was sent, finished before the answer arrived, is at most 90 s old at receipt,
+// and its handshake fits the helper's 180 s policy, all with 5 s of host/runtime clock skew.
+func (p LabMultiProbeInfo) validForTiming(issuedAt, sentAt, receivedAt time.Time) bool {
+	if issuedAt.Unix() <= 0 || sentAt.Unix() <= 0 || receivedAt.Unix() <= 0 ||
 		sentAt.Before(issuedAt) || receivedAt.Before(sentAt) {
 		return false
 	}

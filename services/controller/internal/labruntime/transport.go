@@ -40,6 +40,7 @@ type helperResponse struct {
 
 	MultiProbe       *control.LabMultiProbeInfo   `json:"multi_probe,omitempty"`
 	MultiProbePolicy *control.LabMultiProbePolicy `json:"multi_probe_policy,omitempty"`
+	MultiProbeTarget *control.LabMultiProbeTarget `json:"multi_probe_target,omitempty"`
 }
 
 type limitedBuffer struct {
@@ -130,7 +131,10 @@ func decodeStrict(data []byte) (helperResponse, error) {
 }
 
 // metadataKeys may not appear in a failure document at all, not even as null: helperctl omits them.
-var metadataKeys = []string{"helper_info", "lab", "labs", "stage", "probe", "multi_probe", "multi_probe_policy"}
+// Matched like encoding/json matches field names, case-insensitively.
+var metadataKeys = []string{
+	"helper_info", "lab", "labs", "stage", "probe", "multi_probe", "multi_probe_policy", "multi_probe_target",
+}
 
 func hasMetadataKey(data []byte) bool {
 	var fields map[string]json.RawMessage
@@ -138,9 +142,11 @@ func hasMetadataKey(data []byte) bool {
 		return true
 	}
 
-	for _, key := range metadataKeys {
-		if _, ok := fields[key]; ok {
-			return true
+	for field := range fields {
+		for _, key := range metadataKeys {
+			if strings.EqualFold(field, key) {
+				return true
+			}
 		}
 	}
 
@@ -153,7 +159,7 @@ func decodeFailure(data []byte) (error, bool) {
 	if err != nil || hasMetadataKey(data) ||
 		resp.Version != 1 || resp.OK || resp.NetworkReady || resp.Error == "" ||
 		resp.Info != nil || resp.Lab != nil || resp.Labs != nil || resp.Stage != nil || resp.Probe != nil ||
-		resp.MultiProbe != nil || resp.MultiProbePolicy != nil {
+		resp.MultiProbe != nil || resp.MultiProbePolicy != nil || resp.MultiProbeTarget != nil {
 		return nil, false
 	}
 
@@ -201,13 +207,26 @@ func decodeResponse(data []byte, expected string) (helperResponse, error) {
 		return helperResponse{}, Errorf(CodeRuntimeUntrusted, "unsupported or invalid multi-source policy")
 	}
 
-	if (expected == control.LabMultiProbeOp) != (resp.MultiProbe != nil) ||
-		(resp.MultiProbe != nil && !resp.MultiProbe.Valid()) {
+	multiProbe := expected == control.LabMultiProbeOp || expected == control.LabMultiProbeV2Op
+	if multiProbe != (resp.MultiProbe != nil) || (resp.MultiProbe != nil && !resp.MultiProbe.Valid()) {
 		return helperResponse{}, errors.New("unexpected managed multi-source probe metadata")
 	}
 
+	if resp.MultiProbe != nil && (resp.MultiProbe.TunnelGeneration != "") != (expected == control.LabMultiProbeV2Op) {
+		return helperResponse{}, errors.New("multi-source evidence version mismatch")
+	}
+
+	if (expected == control.LabMultiProbeTargetOp) != (resp.MultiProbeTarget != nil) {
+		return helperResponse{}, errors.New("unexpected multi-source target metadata")
+	}
+
+	if resp.MultiProbeTarget != nil && !resp.MultiProbeTarget.Valid() {
+		return helperResponse{}, Errorf(CodeRuntimeUntrusted, "invalid generation-bound target")
+	}
+
 	switch expected {
-	case "HelperInfo", "Ping", "StageInfo", "PermitProbe", control.LabMultiProbePolicyOp, control.LabMultiProbeOp:
+	case "HelperInfo", "Ping", "StageInfo", "PermitProbe", control.LabMultiProbePolicyOp, control.LabMultiProbeOp,
+		control.LabMultiProbeV2Op, control.LabMultiProbeTargetOp:
 		if resp.Lab != nil || resp.Labs != nil {
 			return helperResponse{}, errors.New("unexpected lab metadata")
 		}

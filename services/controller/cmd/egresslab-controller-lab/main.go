@@ -1,5 +1,5 @@
 // Command egresslab-controller-lab signs CreateLab, ConnectTunnel, PermitProbe and
-// PermitMultiProbeV1 capabilities with the controller key and drives the helper's sealed lab, tunnel
+// PermitMultiProbeV2 capabilities with the controller key and drives the helper's sealed lab, tunnel
 // and diagnostic probes through the host's Linux runtime (WSL2, Lima or native Linux). The helper
 // stays the source of truth for lab and tunnel state. It is a lab tool: -approve is an operator
 // confirmation, not user authentication.
@@ -142,6 +142,8 @@ func run(argv []string, d deps) error {
 		}{LabProbeInfo: observation}
 	case "multi-probe-policy":
 		result, err = s.provider.Transport().MultiProbePolicy(ctx)
+	case "multi-probe-target":
+		result, err = s.provider.Transport().MultiProbeTarget(ctx, args[1], args[2])
 	case "probe-egress-multi":
 		var observation control.LabMultiProbeInfo
 		observation, err = s.probeEgressMulti(args[1], args[2])
@@ -172,7 +174,7 @@ func checkArgs(args []string) error {
 		if len(args) == 2 && control.ValidRuntimeID(args[1]) {
 			return nil
 		}
-	case "verify-lab", "delete-lab", "disconnect", "probe-egress", "probe-egress-multi":
+	case "verify-lab", "delete-lab", "disconnect", "probe-egress", "probe-egress-multi", "multi-probe-target":
 		if len(args) == 3 && control.ValidProfileID(args[1]) && control.ValidLabNamespace(args[2]) {
 			return nil
 		}
@@ -556,5 +558,6 @@ func usageError() error {
 		"  trust-runtime | untrust-runtime RUNTIME_ID | unbind-profile PROFILE_ID\n" +
 		"  create-lab PROFILE_ID | verify-lab PROFILE_ID NAMESPACE | delete-lab PROFILE_ID NAMESPACE\n" +
 		"  stage-info PROFILE_ID | connect-tunnel PROFILE_ID NAMESPACE STAGE_ID | disconnect PROFILE_ID NAMESPACE\n" +
-		"  probe-egress PROFILE_ID NAMESPACE | probe-egress-multi PROFILE_ID NAMESPACE")
+		"  probe-egress PROFILE_ID NAMESPACE | probe-egress-multi PROFILE_ID NAMESPACE\n" +
+		"  multi-probe-target PROFILE_ID NAMESPACE")
 }

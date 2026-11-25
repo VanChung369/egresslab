@@ -51,7 +51,7 @@ func TestMintPermitMultiProbe(t *testing.T) {
 
 	for name, mutate := range map[string]func(*LabMultiProbePolicy){
 		"legacy policy":       func(p *LabMultiProbePolicy) { p.Policy = "PermitProbe" },
-		"unsupported version": func(p *LabMultiProbePolicy) { p.Policy = "PermitMultiProbeV2" },
+		"unsupported version": func(p *LabMultiProbePolicy) { p.Policy = "PermitMultiProbeV3" },
 		"private pin":         func(p *LabMultiProbePolicy) { p.IdentIPv4 = "10.0.0.1" },
 		"Cloudflare as pin":   func(p *LabMultiProbePolicy) { p.IdentIPv4 = LabProbeIPv4 },
 		"foreign runtime":     func(p *LabMultiProbePolicy) { p.RuntimeID = "runtime_ffffffffffffffffffffffffffffffff" },

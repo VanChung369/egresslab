@@ -127,9 +127,15 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 
 		result, err = helperipc.ProbeEgress(ctx, helperipc.SocketPath, args[1], args[2], capability)
 
+	case "multi-probe-target":
+		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
+			return usageError()
+		}
+
+		result, err = helperipc.ReadMultiProbeTarget(ctx, helperipc.SocketPath, args[1], args[2])
+
 	case "probe-egress-multi":
-		// No destination argument either: the capability names the pin, and the helper's own policy
-		// must match it.
+		// V2 only: the signed intent names the generation and the pin; neither comes from argv.
 		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
 			return usageError()
 		}
@@ -139,7 +145,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 			return readErr
 		}
 
-		result, err = helperipc.ProbeEgressMulti(ctx, helperipc.SocketPath, args[1], args[2], capability)
+		result, err = helperipc.ProbeEgressMultiV2(ctx, helperipc.SocketPath, args[1], args[2], capability)
 
 	case "disconnect":
 		if len(args) != 3 || !helperauth.ValidProfileID(args[1]) || !helperauth.ValidLabNamespace(args[2]) {
@@ -211,6 +217,7 @@ func usageError() error {
 		"       egresslab-helperctl delete-lab PROFILE_ID NAMESPACE\n" +
 		"       egresslab-helperctl connect-tunnel PROFILE_ID NAMESPACE STAGE_ID < capability.json\n" +
 		"       egresslab-helperctl disconnect PROFILE_ID NAMESPACE\n" +
+		"       egresslab-helperctl multi-probe-target PROFILE_ID NAMESPACE\n" +
 		"       egresslab-helperctl probe-egress PROFILE_ID NAMESPACE < capability.json\n" +
 		"       egresslab-helperctl probe-egress-multi PROFILE_ID NAMESPACE < capability.json")
 }

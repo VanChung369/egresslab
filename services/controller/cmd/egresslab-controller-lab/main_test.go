@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,10 +67,11 @@ type fakeRuntime struct {
 	calls        []string
 	afterChange  func() // runs after a successful CreateLab or DeleteLab
 
-	stage         control.LabStageInfo
-	tunnelProfile string
-	tunnelCalls   []control.LabCapability
-	tunnelErr     error
+	stage            control.LabStageInfo
+	tunnelProfile    string
+	tunnelGeneration string
+	tunnelCalls      []control.LabCapability
+	tunnelErr        error
 
 	probeCalls []control.LabCapability
 	probeErr   error
@@ -80,6 +82,7 @@ type fakeRuntime struct {
 	multiPolicyErr  error
 	multiPolicyEdit func(*control.LabMultiProbePolicy)
 	multiProbeEdit  func(*control.LabMultiProbeInfo)
+	multiTargetEdit func(*control.LabMultiProbeTarget)
 }
 
 func (f *fakeRuntime) HelperInfo(context.Context) (control.LabHelperInfo, error) {
@@ -126,7 +129,7 @@ func (f *fakeRuntime) lab(op, p, n, state string) (control.LabInfo, error) {
 		delete(f.labs, p)
 
 		if f.tunnelProfile == p {
-			f.tunnelProfile = ""
+			f.tunnelProfile, f.tunnelGeneration = "", ""
 		}
 
 		if f.afterChange != nil {
@@ -176,6 +179,7 @@ func (f *fakeRuntime) ConnectTunnel(_ context.Context, profileID, namespace, sta
 	}
 
 	f.tunnelProfile = profileID
+	f.tunnelGeneration = fmt.Sprintf("tunnelgen_%032x", len(f.tunnelCalls))
 
 	return control.LabInfo{ProfileID: profileID, Namespace: namespace, State: control.LabTunnelConfigured}, nil
 }
@@ -183,7 +187,7 @@ func (f *fakeRuntime) ConnectTunnel(_ context.Context, profileID, namespace, sta
 func (f *fakeRuntime) Disconnect(_ context.Context, p, n string) (control.LabInfo, error) {
 	lab, err := f.lab("Disconnect", p, n, control.LabSealed)
 	if err == nil && f.tunnelProfile == p {
-		f.tunnelProfile = ""
+		f.tunnelProfile, f.tunnelGeneration = "", ""
 	}
 
 	return lab, err

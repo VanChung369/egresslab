@@ -8,10 +8,10 @@ import (
 	"github.com/VanChung369/egresslab/services/controller/internal/labruntime"
 )
 
-// probeEgressMulti signs one PermitMultiProbeV1 for the profile's own configured tunnel in the
-// current helper process, against the policy that helper generation advertises, and checks the
-// evidence it returns. The result is printed only: no profile, binding, routing or lease state
-// changes. Nothing is retried, and nothing falls back to PermitProbe.
+// probeEgressMulti signs one PermitMultiProbeV2 for the tunnel generation the current helper process
+// reports for the profile's own configured tunnel, and checks the evidence it returns. The result
+// is printed only: no profile, binding, routing or lease state changes. Nothing is retried, and
+// nothing falls back to PermitMultiProbeV1 or PermitProbe.
 func (s *session) probeEgressMulti(profileID, namespace string) (control.LabMultiProbeInfo, error) {
 	profile, err := loadProfile(s.dataDir, profileID)
 	if err != nil {
@@ -66,16 +66,15 @@ func (s *session) probeEgressMulti(profileID, namespace string) (control.LabMult
 			"multi-source probe requires a configured tunnel")
 	}
 
-	// Read right before signing, and only accepted for the trusted helper generation.
-	policy, err := transport.MultiProbePolicy(s.ctx)
+	// Read right before signing, never reused: a reconnect makes a new generation.
+	target, err := transport.MultiProbeTarget(s.ctx, profileID, namespace)
 	if err != nil {
 		return control.LabMultiProbeInfo{}, err
 	}
 
-	if !policy.Matches(info) || policy.RuntimeID != rt.ID || policy.HelperID != binding.HelperEpoch ||
-		policy.PublicKeySHA256 != rt.PublicKeySHA256 {
+	if !target.Matches(info, binding) || target.RuntimeID != rt.ID || target.PublicKeySHA256 != rt.PublicKeySHA256 {
 		return control.LabMultiProbeInfo{}, labruntime.Errorf(labruntime.CodeRuntimeUntrusted,
-			"multi-source policy identity mismatch")
+			"multi-source target identity mismatch")
 	}
 
 	keys, err := s.d.openKeys(s.dataDir)
@@ -83,7 +82,7 @@ func (s *session) probeEgressMulti(profileID, namespace string) (control.LabMult
 		return control.LabMultiProbeInfo{}, err
 	}
 
-	capability, err := control.MintPermitMultiProbe(keys, profile, binding, info, lab, policy, s.d.now())
+	capability, err := control.MintPermitMultiProbeV2(keys, profile, binding, info, lab, target, s.d.now())
 	if err != nil {
 		return control.LabMultiProbeInfo{}, err
 	}
@@ -104,16 +103,16 @@ func (s *session) probeEgressMulti(profileID, namespace string) (control.LabMult
 		switch labruntime.ErrorCode(err) {
 		case labruntime.CodeRuntimeUnavailable, labruntime.CodeInternal, labruntime.CodeStateUncertain:
 			return control.LabMultiProbeInfo{}, labruntime.Errorf(labruntime.CodeStateUncertain,
-				fmt.Sprintf("PermitMultiProbeV1 result uncertain; inspect list-labs: %v", err))
+				fmt.Sprintf("PermitMultiProbeV2 result uncertain; inspect list-labs: %v", err))
 		}
 
 		return control.LabMultiProbeInfo{}, err
 	}
 
 	// A refusal here does not mean the helper rolled the tunnel back: it may still be configured.
-	if !result.ValidFor(capability.Claims.Intent, issuedAt, sentAt, receivedAt) {
+	if !result.ValidForCapability(capability, sentAt, receivedAt) {
 		return control.LabMultiProbeInfo{}, labruntime.Errorf(labruntime.CodeStateUncertain,
-			"multi-source evidence rejected (foreign, stale or clock skew); inspect list-labs")
+			"generation-bound evidence rejected (foreign, stale or clock skew); inspect list-labs")
 	}
 
 	return result, nil

@@ -62,6 +62,8 @@ type LabIntent struct {
 	Namespace string `json:"namespace"`
 	StageID   string `json:"stage_id,omitempty"`
 	ProbeIPv4 string `json:"probe_ipv4,omitempty"`
+
+	TunnelGeneration string `json:"tunnel_generation,omitempty"`
 }
 
 type LabClaims struct {

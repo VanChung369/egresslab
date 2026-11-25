@@ -9,10 +9,10 @@
 // signed ConnectTunnel and Disconnect of a vault stage in a sealed lab (one tunnel per helper), and
 // -enable-probe (with -probe-uid and -probe-gid) the signed PermitProbe, one diagnostic egress probe
 // run by an unprivileged worker. -enable-multi-probe (with the same IDs, and instead of
-// -enable-probe) enables the signed PermitMultiProbeV1 and MultiProbePolicy instead, with the
-// ident.me pin read from /etc/egresslab/multi-probe-pin at startup. The offline commands
-// vault-init, vault-stage and vault-revoke administer the vault, and check-multi-probe-pin applies
-// the startup rules to a staged pin file. Proxy operations are not
+// -enable-probe) enables the signed, generation-bound PermitMultiProbeV2, MultiProbePolicy and
+// MultiProbeTarget instead, with the ident.me pin read from /etc/egresslab/multi-probe-pin at
+// startup. The offline commands vault-init, vault-stage and vault-revoke administer the vault, and
+// check-multi-probe-pin applies the startup rules to a staged pin file. Proxy operations are not
 // implemented.
 //
 // In this step it runs as root under sudo; the production design keeps only CAP_NET_ADMIN.
@@ -217,7 +217,7 @@ func run(
 
 			switch {
 			case enableMultiProbe:
-				labs = helperipc.NewMultiProbeLifecycle(backend, tunnelBackend{tunnels})
+				labs = helperipc.NewGenerationProbeLifecycle(backend, tunnelBackend{tunnels})
 			case enableProbe:
 				labs = helperipc.NewProbeLifecycle(backend, tunnelBackend{tunnels})
 			default:
@@ -264,9 +264,9 @@ func run(
 		}
 
 		if enableMultiProbe {
-			mode = "signed sealed lab, managed tunnel and multi-source verification enabled; single-source probe and proxy disabled"
+			mode = "signed generation-bound multi-source verification enabled; V1, single-source probe and proxy disabled"
 
-			log.Printf("Multi-source policy: %s; ident.me pin: %s", helperauth.OpPermitMultiProbe, identPin)
+			log.Printf("Multi-source policy: %s; ident.me pin: %s", helperauth.OpPermitMultiProbeV2, identPin)
 		}
 
 		if err := backend.Preflight(ctx); err != nil {

@@ -1,7 +1,7 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 30B.1 — signed tunnel generation binding and trusted evidence in the helper (not enabled yet).** A
-controller CLI signs `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV1` and drives
+Status: **Step 30B.2 — generation-bound multi-source verification, controller to helper.** A
+controller CLI signs `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV2` and drives
 the helper's sealed lab, tunnel and diagnostic probes in the Linux runtime; the helper holds the encrypted WireGuard configs,
 disables IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once and pins
 it, checks the peer state and the IPv4 addresses, MTU, rules and routes the kernel reports against
@@ -50,8 +50,8 @@ operations only" on are partly design.
 - The client checks that the production socket is served by root (`SO_PEERCRED`) before it sends
   anything.
 - `egresslab-helperctl` covers every helper operation except `AuthorizeCheck`, including
-  `stage-info`, `connect-tunnel`, `disconnect`, `probe-egress`, `multi-probe-policy` and
-  `probe-egress-multi`. `create-lab`, `connect-tunnel`, `probe-egress` and `probe-egress-multi`
+  `stage-info`, `connect-tunnel`, `disconnect`, `probe-egress`, `multi-probe-policy`,
+  `multi-probe-target` and `probe-egress-multi` (V2 only). `create-lab`, `connect-tunnel`, `probe-egress` and `probe-egress-multi`
   read the capability from stdin only, never from argv. It refuses to run as root.
 - The managed WireGuard vault and `StageInfo` (see "Managed WireGuard vault").
 - Signed `ConnectTunnel` and `Disconnect` behind `-enable-tunnel` (see "Signed tunnel lifecycle"),
@@ -59,16 +59,18 @@ operations only" on are partly design.
 - Signed `PermitProbe` behind `-enable-probe`, with a dedicated probe UID and GID: one diagnostic
   observation through a kernel-timed firewall window and an unprivileged worker (see "Signed
   probe").
-- Instead, signed `PermitMultiProbeV1` and the read-only `MultiProbePolicy` behind
-  `-enable-multi-probe`, with the ident.me pin from `/etc/egresslab/multi-probe-pin` (see "Trusted
-  multi-source provisioning").
+- Instead, signed, generation-bound `PermitMultiProbeV2` and the read-only `MultiProbePolicy` and
+  `MultiProbeTarget` behind `-enable-multi-probe`, with the ident.me pin from
+  `/etc/egresslab/multi-probe-pin` (see "Trusted multi-source provisioning" and "Sticky IP");
+  `PermitMultiProbeV1` (Steps 29C.4a to 30B.1) is disabled in that mode.
 - Controller side (see "Controller and runtimes"):
-  - an Ed25519 signer for `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV1`,
-    checked against the four golden vectors the helper also pins; `ConnectTunnel` is signed only
-    for the profile's own lab in the current helper process and the vault's current, compatible
-    stage, and the probes only for that lab once its tunnel is configured, `PermitMultiProbeV1`
-    also only for the policy of that helper generation (see "Controller and runtimes" and
-    "Controller multi-source integration");
+  - an Ed25519 signer for `CreateLab`, `ConnectTunnel`, `PermitProbe` and `PermitMultiProbeV2`
+    (the `PermitMultiProbeV1` signer stays for compatibility tests), checked against the five golden
+    vectors the helper also pins; `ConnectTunnel` is signed only for the profile's own lab in the
+    current helper process and the vault's current, compatible stage, and the probes only for that
+    lab once its tunnel is configured, `PermitMultiProbeV2` also only for the tunnel generation and
+    policy that helper generation reports right before signing (see "Controller and runtimes" and
+    "Generation-bound controller integration");
   - signing-key storage per platform;
   - runtime providers that reach the helper from each host OS;
   - `egresslab-controller-lab`, which needs `-approve` for every mutation, including
@@ -1084,13 +1086,15 @@ dispatcher and verifier on Lima.
 ### Trusted multi-source provisioning (Step 29C.4b)
 
 `-enable-multi-probe` (with `-enable-tunnel` and a dedicated `-probe-uid`/`-probe-gid`, like
-`-enable-probe`) enables `PermitMultiProbeV1` and `MultiProbePolicy`. Every UID and GID, the
+`-enable-probe`) enabled `PermitMultiProbeV1` and `MultiProbePolicy` in this step; since Step 30B.2
+it enables `PermitMultiProbeV2`, `MultiProbePolicy` and `MultiProbeTarget` instead, with the same
+flags and pin. Every UID and GID, the
 agent's and the worker's, must be a non-root 32-bit ID other than `(uid_t)-1`, checked before the
 worker's are compared with the agent's, so a value that would be truncated cannot alias them. The two probe modes are
 mutually exclusive: starting with both is refused, and in multi-source mode `PermitProbe` answers
 `OPERATION_DISABLED`, so nothing falls back to one source.
 
-| Flags | `PermitProbe` | `PermitMultiProbeV1`, `MultiProbePolicy` |
+| Flags | `PermitProbe` | multi-source (`PermitMultiProbeV2` since Step 30B.2) |
 |---|---|---|
 | neither | disabled | disabled |
 | `-enable-probe` | enabled | disabled |
@@ -1157,8 +1161,9 @@ application traffic is authorized.
 
 ### Controller multi-source integration (Step 29C.4c)
 
-`egresslab-controller-lab -approve probe-egress-multi PROFILE_ID NAMESPACE` signs one
-`PermitMultiProbeV1` through the existing runtime providers and key stores. Before signing it
+In this step `egresslab-controller-lab -approve probe-egress-multi PROFILE_ID NAMESPACE` signed one
+`PermitMultiProbeV1` through the existing runtime providers and key stores (since Step 30B.2 it signs
+`PermitMultiProbeV2` only; see "Generation-bound controller integration"). Before signing it
 requires, like `probe-egress`, a strict, unconfigured profile, a trusted runtime with the pinned
 public-key fingerprint, the current helper epoch, the profile's binding to that runtime and
 namespace, and the profile's own configured tunnel (`ListLabs`). It then reads `MultiProbePolicy`
@@ -1313,7 +1318,62 @@ sticky pin.
 A lifecycle built with `NewGenerationProbeLifecycle` enables V2 only: `PermitMultiProbeV1` and
 `PermitProbe` are refused (`OPERATION_DISABLED` over the socket) and `MultiProbePolicy` advertises
 `PermitMultiProbeV2`. A plain multi-source lifecycle keeps V1 and refuses V2 and
-`MultiProbeTarget`. The installed helper is unchanged in this step: it still runs the V1
-lifecycle, because the controller signs V1 only until Step 30B.2 switches both together. The V2
-path is tested with a fake kernel backend, including over a real Unix socket on Lima; no kernel ran
-it, and the refactored V1 path is covered by tests only until then.
+`MultiProbeTarget`. The installed helper was unchanged in this step: it kept the V1 lifecycle,
+because the controller signed V1 only until Step 30B.2 switched both together. The V2 path was
+tested with a fake kernel backend, including over a real Unix socket on Lima.
+
+### Generation-bound controller integration (Step 30B.2)
+
+The controller discovers `MultiProbeTarget` right before signing every multi-source verification
+attempt and never reuses one: the profile binding outlives the tunnel, so the generation is not
+stored in it. The target must name the profile and namespace of the binding, the trusted runtime,
+the current helper epoch, the pinned public-key fingerprint and policy `PermitMultiProbeV2`
+(`RUNTIME_UNTRUSTED` otherwise). The controller then signs `{PermitMultiProbeV2, profile, namespace,
+probe_ipv4: the advertised pin, tunnel_generation}` with the usual nonce and 30 s lifetime; the
+fifth golden vector, pinned in both modules, keeps the bytes identical. The capability travels on
+stdin only: the launcher gets `multi-probe-target PROFILE_ID NAMESPACE` and `probe-egress-multi
+PROFILE_ID NAMESPACE`, and no generation, nonce or destination. `egresslab-controller-lab
+multi-probe-target PROFILE_ID NAMESPACE` prints the target read-only (no `-approve`).
+
+The controller checks the evidence again, independently: everything of Step 29C.4c, plus the
+signed generation and the nonce of the capability it sent (`attempt_nonce`). That is a
+request-response binding, not a signature over the evidence; the helper stays the trusted runtime
+that checks the kernel. The controller also requires the evidence to be younger than 60 s at
+receipt, by its own clock against `observed_at` with no skew allowance; the helper's monotonic
+evidence deadline stays authoritative. Evidence without the V2 fields answering a V2 request, or
+with them answering a V1 one, is refused, as is a target or evidence on any other operation or
+in a failure document.
+
+The production multi-source mode now builds `NewGenerationProbeLifecycle`: `PermitMultiProbeV1`
+and `PermitProbe` answer `OPERATION_DISABLED`, and `MultiProbePolicy` advertises
+`PermitMultiProbeV2`. helperctl sends V2 only and refuses a V1 capability before contacting the
+helper. There is no version negotiation, automatic retry or fallback, so an older controller and a
+newer helper (or the reverse) refuse each other; upgrade helper, helperctl and controller together.
+The V1 definitions and their golden vectors stay, covered by tests only.
+
+A reconnect makes a new generation, even with the same profile, namespace, config and public
+address. If the tunnel is reconnected between discovery and submission, the capability names the
+old generation and the helper refuses it (`AUTHORIZATION_DENIED`) before consuming the nonce; the
+controller does not discover again and re-sign by itself. A successful attempt creates the helper's
+short-lived evidence record of Step 30B.1, not an egress lease: a controller-side check passing does
+not mean the record is still usable, so Step 31 must check the helper's deadline. `network_ready`
+stays `false`, and no application traffic or lease is authorized.
+
+Verified on Lima on 2026-11-25 after installing the helper, helperctl and worker built from this
+step, with the real Proton tunnel, a scratch Keychain key and a scratch profile (both removed
+afterwards; the provisioned pin was unchanged), VM and host clocks within 0.1 s. The helper logged
+policy `PermitMultiProbeV2`, and `multi-probe-policy` returned it with the epoch, runtime ID and
+fingerprint of `helper-info`, the fingerprint of the controller key. The Step 30B.1 controller
+(V1) refused the V2 helper's policy as `RUNTIME_UNTRUSTED`, also for a configured tunnel, before
+signing anything. On a sealed lab `multi-probe-target` answered `INVALID_REQUEST` and the probe
+`LAB_FAULTED`. The first signed attempt of the session, the first probe after the helper started,
+failed again in its `cloudflare_trace` worker about a second after submission, and the helper
+faulted the lab and removed the tunnel cleanly (only `lo` left, no process, no probe set). On a
+fresh lab, two attempts on one tunnel (3.0 and 2.9 s per controller command) returned the
+generation `multi-probe-target` had reported, the same address from both sources
+(`195.242.214.134`), two different 32-hex nonces and `network_ready: false`. After `disconnect`,
+`multi-probe-target` answered `INVALID_REQUEST`; the reconnect got a different generation, and an
+attempt on it returned that generation, the same address and a new nonce. The lab then verified as
+`tunnel_configured` with no namespace process, no `egresslab_probe4` set or permit and the sealed
+output chain, and `disconnect` and `delete-lab` cleaned up. The stale-generation refusal is covered
+by tests only (no capability was minted by hand), and the path was not run on WSL2 or native Linux.

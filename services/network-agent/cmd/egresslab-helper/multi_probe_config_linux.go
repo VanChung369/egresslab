@@ -20,8 +20,8 @@ const (
 	maxMultiProbePinBytes = 64
 )
 
-// loadMultiProbePin reads the ident.me pin of PermitMultiProbeV1 from trusted local configuration:
-// a root-owned regular file in root-owned directories, read once at startup. There is no flag,
+// loadMultiProbePin reads the multi-source policy's ident.me pin from trusted local configuration: a
+// root-owned regular file in root-owned directories, read once at startup. There is no flag,
 // environment variable, IPC field or DNS lookup for it; changing it means a restart, and so a new
 // helper epoch.
 func loadMultiProbePin() (netip.Addr, error) {

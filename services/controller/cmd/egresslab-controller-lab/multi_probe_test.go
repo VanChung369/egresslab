@@ -19,8 +19,12 @@ func (f *fakeRuntime) MultiProbePolicy(context.Context) (control.LabMultiProbePo
 		return control.LabMultiProbePolicy{}, f.multiPolicyErr
 	}
 
+	return f.multiPolicy(), nil
+}
+
+func (f *fakeRuntime) multiPolicy() control.LabMultiProbePolicy {
 	policy := control.LabMultiProbePolicy{
-		Policy:          control.LabMultiProbeOp,
+		Policy:          control.LabMultiProbeV2Op,
 		IdentIPv4:       "9.9.9.9",
 		HelperID:        f.info.HelperID,
 		RuntimeID:       f.info.RuntimeID,
@@ -31,7 +35,35 @@ func (f *fakeRuntime) MultiProbePolicy(context.Context) (control.LabMultiProbePo
 		f.multiPolicyEdit(&policy)
 	}
 
-	return policy, nil
+	return policy
+}
+
+func (f *fakeRuntime) MultiProbeTarget(
+	_ context.Context,
+	profileID, namespace string,
+) (control.LabMultiProbeTarget, error) {
+	f.calls = append(f.calls, control.LabMultiProbeTargetOp)
+
+	if f.multiPolicyErr != nil {
+		return control.LabMultiProbeTarget{}, f.multiPolicyErr
+	}
+
+	if f.tunnelProfile != profileID || f.labs[profileID] != namespace || f.tunnelGeneration == "" {
+		return control.LabMultiProbeTarget{}, labruntime.Errorf(labruntime.CodeInvalidRequest, "no configured tunnel")
+	}
+
+	target := control.LabMultiProbeTarget{
+		ProfileID:           profileID,
+		Namespace:           namespace,
+		TunnelGeneration:    f.tunnelGeneration,
+		LabMultiProbePolicy: f.multiPolicy(),
+	}
+
+	if f.multiTargetEdit != nil {
+		f.multiTargetEdit(&target)
+	}
+
+	return target, nil
 }
 
 func (f *fakeRuntime) ProbeEgressMulti(
@@ -39,7 +71,7 @@ func (f *fakeRuntime) ProbeEgressMulti(
 	profileID, namespace string,
 	capability control.LabCapability,
 ) (control.LabMultiProbeInfo, error) {
-	f.calls = append(f.calls, control.LabMultiProbeOp)
+	f.calls = append(f.calls, control.LabMultiProbeV2Op)
 	f.multiProbeCalls = append(f.multiProbeCalls, capability)
 
 	if f.multiProbeErr != nil {
@@ -48,6 +80,11 @@ func (f *fakeRuntime) ProbeEgressMulti(
 
 	if f.tunnelProfile != profileID || f.labs[profileID] != namespace {
 		return control.LabMultiProbeInfo{}, labruntime.Errorf(labruntime.CodeLabFaulted, "no configured tunnel")
+	}
+
+	if capability.Claims.Intent.Operation != control.LabMultiProbeV2Op ||
+		capability.Claims.Intent.TunnelGeneration != f.tunnelGeneration {
+		return control.LabMultiProbeInfo{}, labruntime.Errorf(labruntime.CodeAuthorizationDenied, "generation mismatch")
 	}
 
 	now := time.Unix(1795500000, 0).UTC()
@@ -67,6 +104,8 @@ func (f *fakeRuntime) ProbeEgressMulti(
 			{Source: control.LabMultiProbeIdentSource, DestinationIPv4: netip.MustParseAddr("9.9.9.9"), IPv4: ip,
 				ObservedAt: now},
 		},
+		TunnelGeneration: f.tunnelGeneration,
+		AttemptNonce:     capability.Claims.Nonce,
 	}
 
 	if f.multiProbeEdit != nil {
@@ -111,7 +150,8 @@ func TestControllerMultiProbeLifecycle(t *testing.T) {
 		"another epoch":       func(policy *control.LabMultiProbePolicy) { policy.HelperID = epoch2 },
 		"another runtime":     func(policy *control.LabMultiProbePolicy) { policy.RuntimeID = runtimeB },
 		"another fingerprint": func(policy *control.LabMultiProbePolicy) { policy.PublicKeySHA256 = strings.Repeat("f", 64) },
-		"unsupported policy":  func(policy *control.LabMultiProbePolicy) { policy.Policy = "PermitMultiProbeV2" },
+		"legacy policy":       func(policy *control.LabMultiProbePolicy) { policy.Policy = control.LabMultiProbeOp },
+		"unsupported policy":  func(policy *control.LabMultiProbePolicy) { policy.Policy = "PermitMultiProbeV3" },
 	} {
 		a.multiPolicyEdit = edit
 
@@ -142,14 +182,19 @@ func TestControllerMultiProbeLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if len(a.multiProbeCalls) != 1 {
+		t.Fatalf("%d attempts", len(a.multiProbeCalls))
+	}
+
 	if output.IPv4.String() != "8.8.4.4" || output.NetworkReady || output.ProfileID != p || len(output.Sources) != 2 ||
-		len(a.multiProbeCalls) != 1 || !strings.Contains(h.out.String(), `"network_ready": false`) {
+		output.TunnelGeneration != a.tunnelGeneration || output.AttemptNonce != a.multiProbeCalls[0].Claims.Nonce ||
+		!strings.Contains(h.out.String(), `"network_ready": false`) {
 		t.Fatalf("invalid output: %s", h.out.String())
 	}
 
 	claims := a.multiProbeCalls[0].Claims
-	if claims.Intent != (control.LabIntent{Operation: control.LabMultiProbeOp, ProfileID: p, Namespace: labNS,
-		ProbeIPv4: "9.9.9.9"}) || claims.HelperID != epoch1 {
+	if claims.Intent != (control.LabIntent{Operation: control.LabMultiProbeV2Op, ProfileID: p, Namespace: labNS,
+		ProbeIPv4: "9.9.9.9", TunnelGeneration: a.tunnelGeneration}) || claims.HelperID != epoch1 {
 		t.Fatalf("invalid signed operation: %+v", claims)
 	}
 
@@ -169,6 +214,14 @@ func TestControllerMultiProbeLifecycle(t *testing.T) {
 		}
 	}
 	h.requireCode(labruntime.CodeStateUncertain, probe("Ubuntu-A")...)
+
+	a.multiProbeEdit = func(info *control.LabMultiProbeInfo) {
+		info.TunnelGeneration = "tunnelgen_ffffffffffffffffffffffffffffffff"
+	}
+	h.requireCode(labruntime.CodeStateUncertain, probe("Ubuntu-A")...)
+
+	a.multiProbeEdit = func(info *control.LabMultiProbeInfo) { info.AttemptNonce = strings.Repeat("f", 32) }
+	h.requireCode(labruntime.CodeStateUncertain, probe("Ubuntu-A")...)
 	a.multiProbeEdit = nil
 
 	a.multiProbeErr = labruntime.Errorf(labruntime.CodeRuntimeUnavailable, "connection lost")
@@ -178,7 +231,7 @@ func TestControllerMultiProbeLifecycle(t *testing.T) {
 	h.requireCode(labruntime.CodeLabFaulted, probe("Ubuntu-A")...)
 	a.multiProbeErr = nil
 
-	if len(a.multiProbeCalls) != 5 || len(a.probeCalls) != 0 {
+	if len(a.multiProbeCalls) != 7 || len(a.probeCalls) != 0 {
 		t.Fatalf("retried or fell back: %d multi-source, %d single-source", len(a.multiProbeCalls), len(a.probeCalls))
 	}
 
@@ -223,6 +276,11 @@ func TestMultiProbeCLIArguments(t *testing.T) {
 		{"-approve", "probe-egress-multi", h.profile.ID, "invalid-namespace"},
 		{"-approve", "probe-egress-multi", "profile_x", labNS},
 		{"-approve", "probe-egress-multi", h.profile.ID, labNS, "9.9.9.9"},
+		{"multi-probe-target"},
+		{"multi-probe-target", h.profile.ID},
+		{"multi-probe-target", h.profile.ID, "../default"},
+		{"multi-probe-target", "profile_x", labNS},
+		{"multi-probe-target", h.profile.ID, labNS, "tunnelgen_0123456789abcdef0123456789abcdef"},
 	} {
 		if err := h.run(args...); err == nil || !strings.Contains(err.Error(), "usage") {
 			t.Fatalf("invalid arguments accepted: %v: %v", args, err)
@@ -232,4 +290,70 @@ func TestMultiProbeCLIArguments(t *testing.T) {
 	if h.reached != 0 {
 		t.Fatal("invalid arguments reached a runtime")
 	}
+}
+
+func TestControllerGenerationRediscovery(t *testing.T) {
+	h := newHarness(t)
+	a := h.runtimes["Ubuntu-A"]
+	p := h.profile.ID
+	a.stage = control.LabStageInfo{ProfileID: p, StageID: cliTestStage, Compatible: true}
+
+	connect := []string{"-approve", "-wsl-distro", "Ubuntu-A", "connect-tunnel", p, labNS, cliTestStage}
+	disconnect := []string{"-approve", "-wsl-distro", "Ubuntu-A", "disconnect", p, labNS}
+	probe := []string{"-approve", "-wsl-distro", "Ubuntu-A", "probe-egress-multi", p, labNS}
+	target := []string{"-wsl-distro", "Ubuntu-A", "multi-probe-target", p, labNS}
+
+	h.mustRun("-approve", "-wsl-distro", "Ubuntu-A", "trust-runtime")
+	h.mustRun("-approve", "-wsl-distro", "Ubuntu-A", "create-lab", p)
+	h.mustRun(connect...)
+	h.mustRun(probe...)
+	h.mustRun(probe...)
+
+	first, second := a.multiProbeCalls[0].Claims, a.multiProbeCalls[1].Claims
+	if first.Intent != second.Intent || first.Nonce == second.Nonce {
+		t.Fatal("two attempts on one tunnel must share the generation, not the nonce")
+	}
+
+	h.mustRun(disconnect...)
+	h.requireCode(labruntime.CodeInvalidRequest, target...)
+	h.mustRun(connect...)
+
+	// Discovery raced a reconnect: the target still names the previous generation.
+	a.multiTargetEdit = func(target *control.LabMultiProbeTarget) {
+		target.TunnelGeneration = first.Intent.TunnelGeneration
+	}
+	h.requireCode(labruntime.CodeAuthorizationDenied, probe...)
+	a.multiTargetEdit = nil
+
+	if len(a.multiProbeCalls) != 3 {
+		t.Fatal("a stale target was retried")
+	}
+
+	h.mustRun(probe...)
+
+	next := a.multiProbeCalls[3].Claims
+	if next.Intent.TunnelGeneration == first.Intent.TunnelGeneration ||
+		next.Intent.TunnelGeneration != a.tunnelGeneration || next.Nonce == first.Nonce || len(a.probeCalls) != 0 {
+		t.Fatal("generation was reused or downgraded")
+	}
+
+	h.mustRun(target...)
+
+	var discovered control.LabMultiProbeTarget
+	if err := json.Unmarshal(h.out.Bytes(), &discovered); err != nil {
+		t.Fatal(err)
+	}
+
+	if discovered.TunnelGeneration != a.tunnelGeneration || discovered.Policy != control.LabMultiProbeV2Op {
+		t.Fatalf("CLI target: %+v", discovered)
+	}
+
+	signs := h.keys.signs
+	h.mustRun(target...)
+
+	if h.keys.signs != signs {
+		t.Fatal("target discovery signed something")
+	}
+
+	h.mustRun("-approve", "-wsl-distro", "Ubuntu-A", "delete-lab", p, labNS)
 }

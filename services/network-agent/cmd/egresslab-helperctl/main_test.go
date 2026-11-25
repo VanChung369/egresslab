@@ -125,6 +125,11 @@ func TestMultiProbeCommandArguments(t *testing.T) {
 		{"probe-egress-multi", profile, namespace, "9.9.9.9"},
 		{"probe-egress-multi", profile, namespace, "https://example.com/"},
 		{"probe-egress-multi", profile, namespace, "--insecure"},
+		{"multi-probe-target"},
+		{"multi-probe-target", profile},
+		{"multi-probe-target", profile, "../default"},
+		{"multi-probe-target", profile, namespace, "extra"},
+		{"multi-probe-target", "invalid-profile", namespace},
 	} {
 		var out bytes.Buffer
 
@@ -146,6 +151,25 @@ func TestMultiProbeRequiresCapability(t *testing.T) {
 		err := run(args, strings.NewReader(input), &out)
 		if helperipc.ErrorCode(err) != helperipc.CodeInvalidRequest || out.Len() != 0 {
 			t.Fatalf("invalid capability %q accepted: %v", input, err)
+		}
+	}
+}
+
+func TestMultiProbeV1CapabilityRefused(t *testing.T) {
+	v1 := `{"claims":{"version":1,"intent":{"operation":"PermitMultiProbeV1","profile_id":"profile_0123456789abcdef",` +
+		`"namespace":"egresslab-lab-0123456789abcdef","probe_ipv4":"9.9.9.9"},` +
+		`"helper_id":"helper_0123456789abcdef0123456789abcdef","nonce":"00112233445566778899aabbccddeeff",` +
+		`"issued_at":1795500000,"not_after":1795500030},"signature":"x"}`
+	v1WithGeneration := strings.Replace(v1, `"probe_ipv4":"9.9.9.9"`,
+		`"probe_ipv4":"9.9.9.9","tunnel_generation":"tunnelgen_0123456789abcdef0123456789abcdef"`, 1)
+	args := []string{"probe-egress-multi", "profile_0123456789abcdef", "egresslab-lab-0123456789abcdef"}
+
+	for _, input := range []string{v1, v1WithGeneration} {
+		var out bytes.Buffer
+
+		if err := run(args, strings.NewReader(input), &out); helperipc.ErrorCode(err) != helperipc.CodeInvalidRequest ||
+			!strings.Contains(err.Error(), "generation-bound") || out.Len() != 0 {
+			t.Fatalf("V1 capability reached IPC: %v", err)
 		}
 	}
 }
