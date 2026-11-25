@@ -377,7 +377,7 @@ egresslab-probe --url https://example.com/      # invalid probe arguments, exit 
 egresslab-probe --source ident_me 2001:db8::1   # invalid probe destination, exit 1
 ```
 
-Build and test it on Linux before installing it. End-to-end multi-source testing over the VPN needs the signed IPC and controller integration of Step 29C.4; do not open the lab firewall by hand to try it.
+Build and test it on Linux before installing it. End-to-end multi-source testing over the VPN needs the helper provisioning of Step 29C.4b and the controller integration of Step 29C.4c; do not open the lab firewall by hand to try it.
 
 ## Security Notes
 
@@ -399,8 +399,8 @@ curl -q --noproxy '*' --ipv4 --proto '=https' --connect-timeout 5 --max-time 10 
   --resolve "4.ident.me:443:<candidate IPv4>" -H 'Accept-Encoding: identity' -fsS https://4.ident.me/
 ```
 
-If DNS returns several addresses, do not take the first one blindly. The provider does not promise a stable address. DNS at probe time, automatic replacement of the address and skipping certificate verification (`curl -k`) are not allowed. A host-side check reveals the host's own public IP to the provider; it is not a managed observation and never activates an egress lease. No helper configuration takes the pin yet: `NewManagedMultiProbeTunnelBackend` accepts it (Step 29C.3), but the helper exposes no flag for it until Step 29C.4.
+If DNS returns several addresses, do not take the first one blindly. The provider does not promise a stable address. DNS at probe time, automatic replacement of the address and skipping certificate verification (`curl -k`) are not allowed. A host-side check reveals the host's own public IP to the provider; it is not a managed observation and never activates an egress lease. No helper configuration takes the pin yet: `NewManagedMultiProbeTunnelBackend` accepts it (Step 29C.3) and the signed `PermitMultiProbeV1` operation checks requests against it (Step 29C.4a), but the helper exposes no flag for it until Step 29C.4b.
 
 ## Next Milestone
 
-Multi-source public IP verification: signed IPC and controller integration of the multi-source lifecycle (Step 29C.4). The consensus engine (Step 29C.1), the pinned HTTPS sources with destination-aware windows (Step 29C.2) and the managed multi-source lifecycle (Step 29C.3) exist in the network agent, but no helper operation calls them yet. See `docs/PRIVILEGED-HELPER.md`.
+Multi-source public IP verification: trusted pin provisioning, the helper startup flag and `egresslab-helperctl` (Step 29C.4b), then the controller signer and real VPN verification (Step 29C.4c). The consensus engine (Step 29C.1), the pinned HTTPS sources (Step 29C.2), the managed multi-source lifecycle (Step 29C.3) and the signed `PermitMultiProbeV1` helper IPC (Step 29C.4a) exist, but the installed helper does not enable the operation yet. See `docs/PRIVILEGED-HELPER.md`.

@@ -65,6 +65,28 @@ type ManagedMultiProbeObservation struct {
 	NetworkReady bool `json:"network_ready"`
 }
 
+// MultiProbePolicyPin returns the ident.me pin of the configured source policy. The policy is fixed
+// when the backend is built and never comes from an IPC request.
+func (b *ManagedTunnelBackend) MultiProbePolicyPin() (netip.Addr, error) {
+	if b == nil || b.sealed == nil || b.sealed.manager == nil {
+		return netip.Addr{}, ErrManagedProbeUnavailable
+	}
+
+	b.sealed.manager.mu.Lock()
+	defer b.sealed.manager.mu.Unlock()
+
+	config := b.multiProbe
+	if config == nil || config.run == nil {
+		return netip.Addr{}, ErrManagedProbeUnavailable
+	}
+
+	if _, err := managedProbeHTTPSources(config.identPin); err != nil {
+		return netip.Addr{}, err
+	}
+
+	return config.identPin, nil
+}
+
 // ProbeConfiguredMulti observes the tunnel's public IPv4 address from every mandatory source, one
 // after another, through the same configured tunnel and within one 80 s deadline. manager.mu is
 // held throughout, so no backend operation can change the tunnel between two observations. The

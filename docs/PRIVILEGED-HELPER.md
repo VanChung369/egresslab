@@ -1,6 +1,6 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 29C.3 — managed multi-source probe lifecycle (not exposed over IPC yet).** A controller
+Status: **Step 29C.4a — signed multi-source helper IPC (not enabled in the helper yet).** A controller
 CLI signs `CreateLab`, `ConnectTunnel` and `PermitProbe` and drives the helper's sealed lab, tunnel
 and diagnostic probe in the Linux runtime; the helper holds the encrypted WireGuard configs,
 disables IPv6 and drops DNS transports inside its labs, resolves a hostname endpoint once and pins
@@ -178,6 +178,7 @@ The helper exposes a fixed set of operations, never a command line:
 
 `CreateLab` (creates and seals), `ConnectTunnel{profile_id, namespace, stage_id}`,
 `PermitProbe{profile_id, namespace, probe_ipv4}` (fixed to `1.1.1.1`),
+`PermitMultiProbeV1{profile_id, namespace, probe_ipv4}` (the provisioned ident.me pin),
 `VerifyLab`, `Disconnect`, `DeleteLab`, `RecoverScan`, `RecoverClean`.
 
 Every argument is validated with the existing patterns: `egresslab-lab-<16 hex>`,
@@ -186,7 +187,8 @@ Every argument is validated with the existing patterns: `egresslab-lab-<16 hex>`
 
 ## Authorization
 
-`CreateLab` and each operation that opens traffic (`ConnectTunnel`, `PermitProbe`) need a
+`CreateLab` and each operation that opens traffic (`ConnectTunnel`, `PermitProbe`,
+`PermitMultiProbeV1`) need a
 capability that the controller mints. Implemented format, version 1:
 
 ```text
@@ -194,7 +196,7 @@ claims = {"version":1,
           "intent":{"operation":..., "profile_id":"profile_<16 hex>",
                     "namespace":"egresslab-lab-<16 hex>",  ("" for CreateLab)
                     "stage_id":"wgstage_<32 hex>"          (ConnectTunnel only)
-                    "probe_ipv4":"<dotted IPv4>"},          (PermitProbe only)
+                    "probe_ipv4":"<dotted IPv4>"},          (PermitProbe, PermitMultiProbeV1)
           "helper_id":"helper_<32 hex>", "nonce":"<32 hex>",
           "issued_at":<unix s>, "not_after":<unix s, at most issued_at + 30>}
 
@@ -884,7 +886,9 @@ on one operator. Step 29C requires several independent sources that must all agr
 | 29C.1 | Source policy and strict consensus engine |
 | 29C.2 | Pinned HTTPS sources and their timed firewall |
 | 29C.3 | Managed multi-source probe lifecycle |
-| 29C.4 | Signed IPC and controller integration |
+| 29C.4a | Signed multi-source helper IPC |
+| 29C.4b | Trusted provisioning and helperctl |
+| 29C.4c | Controller integration and real VPN verification |
 
 ### Strict consensus policy (Step 29C.1)
 
@@ -1008,7 +1012,63 @@ The multi-source backend is enabled only by its own constructor,
 `NewManagedMultiProbeTunnelBackend`, which takes the ident.me pin from trusted local provisioning.
 It leaves the single-source runner disabled, so a failed multi-source attempt cannot fall back to
 one source; `NewManagedProbeTunnelBackend` (single source) and `NewManagedTunnelBackend` (no
-probe) are unchanged. `egresslab-helper` still uses the single-source backend, and nothing in the
-signed IPC calls the multi-source lifecycle until Step 29C.4. The lifecycle is tested against
+probe) are unchanged. `egresslab-helper` still uses the single-source backend; Step 29C.4a adds the
+signed operation, and Step 29C.4b enables it in the helper. The lifecycle is tested against
 fakes only: the worker's argument refusals ran on Lima, but no `--source` worker and no window for
 a second destination has run in a real namespace.
+
+### Signed multi-source helper IPC (Step 29C.4a)
+
+`PermitMultiProbeV1{profile_id, namespace, probe_ipv4}` authorizes one multi-source verification
+attempt (Step 29C.3) against the fixed V1 source policy: the Cloudflare trace at `1.1.1.1` and
+ident.me at its provisioned pin, both over pinned HTTPS in their own timed windows, with unanimous
+consensus. The operation name is the policy version; `probe_ipv4` binds the one variable, the
+ident.me pin, which must be a canonical public IPv4 address other than `1.1.1.1` (helperauth keeps
+its own copy of the agent's public IPv4 policy, and a test checks that the two agree at every
+reserved-range edge). Changing the sources, their endpoints or the verification semantics needs a
+new operation name, not a new meaning for this one. The signature domain, Ed25519, nonces and the
+30 s capability lifetime are unchanged, and a `PermitProbe` capability cannot authorize this
+operation or the reverse.
+
+The helper reads the pin from its own backend (`MultiProbePolicyPin`) and builds the expected
+intent from it; the request and the capability never choose a destination. A capability validly
+signed for another pin is refused as `INVALID_REQUEST` without consuming its nonce. In order, the
+helper requires a matching intent, an enabled multi-source backend, no other running operation,
+the profile's own lab and namespace, a configured tunnel it owns and a readable local policy, then
+verifies the capability for this helper epoch and consumes its nonce. A refusal before that point
+leaves the lab and the capability untouched.
+
+While the attempt runs, the lab is held as faulted. The helper then checks the evidence again,
+independently of the agent's consensus engine: exactly the two V1 sources in execution order with
+their destinations (`1.1.1.1`, then the signed pin), one public IPv4 address they all report,
+observation times in order inside an interval of at most 80 s that started after the capability
+was issued and after the helper accepted it (1 s tolerance) and did not end after the helper's
+own check,
+`observed_at` equal to the earliest source, and a handshake at most 180 whole seconds old at
+`finished_at`, judged like the agent. Any failure after the nonce is consumed discards the
+evidence, keeps the lab faulted and removes the tunnel; an unconfirmed removal answers
+`STATE_UNCERTAIN` and keeps the ownership. Only `DeleteLab` clears a faulted lab. On success the lab
+returns to `tunnel_configured` with the firewall sealed again. The capability only has to be valid
+when the helper accepts it; the attempt may finish after it expires.
+
+A lifecycle built with `NewMultiProbeLifecycle` refuses `PermitProbe` (`OPERATION_DISABLED` over
+the socket), even if a single-source backend were also set, so nothing falls back to one source.
+A helper without the multi-source backend answers `OPERATION_DISABLED` to `PermitMultiProbeV1`.
+The response carries a `multi_probe` object only on a successful `PermitMultiProbeV1`; the client
+(`ProbeEgressMulti`) applies the same evidence checks against its own request and capability,
+requires the attempt to lie between writing the request and reading the answer (1 s tolerance at
+the start only: the helper and its client share the VM's clock, so evidence never ends in their
+future), and refuses a failure that carries evidence, unsolicited evidence, a `probe` object or
+`network_ready=true`. A helper from before this step refuses the operation without naming it (its
+echo rule allowed letters only); the client maps exactly that bare refusal to
+`OPERATION_DISABLED` and treats any other unnamed answer as invalid. The response budget is the single-source probe's (185 s on the helper side,
+190 s on the client). The server now echoes an operation name made of a letter followed by up to
+31 letters or digits (it was letters only), so the versioned name is echoed; other names still are
+not.
+
+The `multi_probe` response is diagnostic evidence only: `network_ready` stays false, and no lease
+or application traffic exists. `egresslab-helper` does not enable the operation yet: Step 29C.4b
+adds the trusted pin provisioning, the helper startup flag and `egresslab-helperctl`, and Step
+29C.4c the controller signer and end-to-end verification over the VPN. The lifecycle is tested
+with a fake kernel backend, including over a real Unix socket with the real framing, dispatcher
+and verifier on Lima; the new binaries were built but not installed.

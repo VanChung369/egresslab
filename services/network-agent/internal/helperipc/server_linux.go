@@ -25,7 +25,7 @@ const (
 )
 
 // Only short, plain operation names are echoed back to the client.
-var echoableOperation = regexp.MustCompile(`^[A-Za-z]{1,32}$`)
+var echoableOperation = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]{0,31}$`)
 
 type RecoveryScanner func(context.Context) ([]RecoveryItem, error)
 
@@ -296,7 +296,7 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 		resp.Labs = items
 
 	case helperauth.OpPermitProbe:
-		if labs == nil || labs.probes == nil {
+		if labs == nil || labs.probes == nil || labs.multiProbes != nil {
 			return refuse(CodeOperationDisabled, "operation not enabled")
 		}
 
@@ -320,6 +320,31 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 
 		resp.OK = true
 		resp.Probe = &info
+
+	case helperauth.OpPermitMultiProbe:
+		if labs == nil || labs.multiProbes == nil {
+			return refuse(CodeOperationDisabled, "operation not enabled")
+		}
+
+		if ctx.Err() != nil {
+			return refuse(CodeRuntimeUnavailable, "helper is shutting down")
+		}
+
+		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lifecycleTimeout)
+		info, err := labs.executeMultiProbe(probeCtx, req, v)
+		cancel()
+
+		if err != nil {
+			code := labCode(err)
+			if code != CodeAuthorizationDenied {
+				log.Printf("managed multi-source probe: %s: %v", code, err)
+			}
+
+			return refuse(code, labMessages[code])
+		}
+
+		resp.OK = true
+		resp.MultiProbe = &info
 
 	case helperauth.OpCreateLab, OpVerifyLab, OpDeleteLab, helperauth.OpConnectTunnel, OpDisconnect:
 		if labs == nil || (isTunnelOp(req.Operation) && labs.tunnels == nil) {

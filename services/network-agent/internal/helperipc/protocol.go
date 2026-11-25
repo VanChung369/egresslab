@@ -4,8 +4,8 @@
 // Each connection carries one request and one response. A frame is a 4-byte big-endian length
 // followed by at most MaxFrameBytes of JSON. Besides read-only operations and the AuthorizeCheck
 // dry-run, a helper started with the lab lifecycle enabled creates (with a signed capability),
-// verifies and deletes sealed lab namespaces. Tunnel and probe operations are refused
-// (docs/PRIVILEGED-HELPER.md).
+// verifies and deletes sealed lab namespaces. Tunnel, probe and multi-source probe operations are
+// refused unless the helper was started with them enabled (docs/PRIVILEGED-HELPER.md).
 package helperipc
 
 import (
@@ -49,18 +49,19 @@ type RecoveryItem struct {
 }
 
 type Response struct {
-	Version      int            `json:"version"`
-	Operation    string         `json:"operation"`
-	OK           bool           `json:"ok"`
-	NetworkReady bool           `json:"network_ready"`
-	Code         string         `json:"code,omitempty"`
-	Error        string         `json:"error,omitempty"`
-	Items        []RecoveryItem `json:"items,omitempty"`
-	Info         *HelperInfo    `json:"helper_info,omitempty"`
-	Lab          *LabInfo       `json:"lab,omitempty"`
-	Labs         []LabInfo      `json:"labs,omitempty"`
-	Stage        *StageInfo     `json:"stage,omitempty"`
-	Probe        *ProbeInfo     `json:"probe,omitempty"`
+	Version      int             `json:"version"`
+	Operation    string          `json:"operation"`
+	OK           bool            `json:"ok"`
+	NetworkReady bool            `json:"network_ready"`
+	Code         string          `json:"code,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	Items        []RecoveryItem  `json:"items,omitempty"`
+	Info         *HelperInfo     `json:"helper_info,omitempty"`
+	Lab          *LabInfo        `json:"lab,omitempty"`
+	Labs         []LabInfo       `json:"labs,omitempty"`
+	Stage        *StageInfo      `json:"stage,omitempty"`
+	Probe        *ProbeInfo      `json:"probe,omitempty"`
+	MultiProbe   *MultiProbeInfo `json:"multi_probe,omitempty"`
 }
 
 var ErrInvalidFrame = errors.New("invalid helper IPC frame")
@@ -173,6 +174,8 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 		return Response{}, err
 	}
 
+	sentAt := time.Now()
+
 	if err := WriteFrame(conn, req); err != nil {
 		return Response{}, err
 	}
@@ -180,6 +183,12 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 	var resp Response
 	if err := ReadFrame(conn, &resp); err != nil {
 		return Response{}, err
+	}
+
+	receivedAt := time.Now()
+
+	if olderHelperDisabled(req, resp) {
+		return Response{}, &Error{Code: CodeOperationDisabled, Message: "operation not enabled"}
 	}
 
 	if resp.Version != Version ||
@@ -213,6 +222,15 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 
 	if !validProbeResponse(req, resp) {
 		return Response{}, errors.New("invalid managed probe response")
+	}
+
+	if !validMultiProbeResponse(req, resp) {
+		return Response{}, errors.New("invalid managed multi-source probe response")
+	}
+
+	// The attempt must lie between writing this request and reading its answer.
+	if resp.MultiProbe != nil && !multiProbeWithin(resp.MultiProbe, sentAt, receivedAt) {
+		return Response{}, errors.New("multi-source evidence outside this request")
 	}
 
 	if !resp.OK {

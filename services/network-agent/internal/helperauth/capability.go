@@ -26,6 +26,10 @@ const (
 	OpConnectTunnel = "ConnectTunnel"
 	OpPermitProbe   = "PermitProbe"
 
+	// OpPermitMultiProbe names the fixed V1 multi-source policy; ProbeIPv4 binds its ident.me pin.
+	// A change of sources, endpoints or semantics needs a new operation, not a new meaning for this one.
+	OpPermitMultiProbe = "PermitMultiProbeV1"
+
 	// The helper picks the namespace, so a CreateLab intent signs "namespace":"".
 	OpCreateLab = "CreateLab"
 
@@ -113,6 +117,11 @@ func validateIntent(in Intent) error {
 
 		ip, err := netip.ParseAddr(in.ProbeIPv4)
 		if err != nil || !ip.Is4() || !ip.IsGlobalUnicast() || ip.String() != in.ProbeIPv4 {
+			return ErrInvalidCapability
+		}
+
+	case OpPermitMultiProbe:
+		if in.StageID != "" || !ValidMultiProbePin(in.ProbeIPv4) {
 			return ErrInvalidCapability
 		}
 

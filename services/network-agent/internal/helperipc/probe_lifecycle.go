@@ -14,9 +14,9 @@ const (
 	ProbeDestinationIPv4 = "1.1.1.1"
 	ProbeSource          = "cloudflare_trace"
 
-	// Worst case, not a normal probe: the operation context (80 s), then the firewall window
-	// close (20 s), the backend's tunnel rollback (40 s) and the lifecycle's cleanup (40 s), each
-	// with its own deadline, plus a margin.
+	// Worst case, not a normal probe, single- or multi-source: the operation context (80 s), then
+	// the firewall window close (20 s), the backend's tunnel rollback (40 s) and the lifecycle's
+	// cleanup (40 s), each with its own deadline, plus a margin.
 	probeResponseTimeout = 185 * time.Second
 
 	maxProbeHandshakeAge = 180 * time.Second
@@ -90,7 +90,7 @@ func validProbeResponse(req Request, resp Response) bool {
 }
 
 func operationResponseTimeout(operation string) time.Duration {
-	if operation == helperauth.OpPermitProbe {
+	if operation == helperauth.OpPermitProbe || operation == helperauth.OpPermitMultiProbe {
 		return probeResponseTimeout
 	}
 
@@ -111,7 +111,8 @@ func (l *LabLifecycle) executeProbe(ctx context.Context, req Request, v *helpera
 		return ProbeInfo{}, errLabInvalid
 	}
 
-	if l.probes == nil {
+	// A multi-source lifecycle never falls back to one source.
+	if l.probes == nil || l.multiProbes != nil {
 		return ProbeInfo{}, errLabUnavailable
 	}
 

@@ -49,6 +49,7 @@ type tunnelFixture struct {
 	verifier *helperauth.Verifier
 	lab      LabInfo
 	mint     func(helperauth.Intent) Request
+	mintAt   func(helperauth.Intent, time.Time) Request
 }
 
 func newTunnelFixture(t *testing.T) *tunnelFixture {
@@ -69,10 +70,10 @@ func newTunnelFixture(t *testing.T) *tunnelFixture {
 		t.Fatal(err)
 	}
 
-	mint := func(intent helperauth.Intent) Request {
+	mintAt := func(intent helperauth.Intent, issuedAt time.Time) Request {
 		t.Helper()
 
-		claims, err := helperauth.NewClaims(intent, id, time.Now())
+		claims, err := helperauth.NewClaims(intent, id, issuedAt)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -85,11 +86,17 @@ func newTunnelFixture(t *testing.T) *tunnelFixture {
 		return Request{Version: Version, Operation: intent.Operation, Intent: &intent, Capability: &token}
 	}
 
+	mint := func(intent helperauth.Intent) Request {
+		t.Helper()
+		return mintAt(intent, time.Now())
+	}
+
 	f := &tunnelFixture{
 		backend:  &fakeLifecycleBackend{},
 		tunnels:  &fakeTunnelBackend{},
 		verifier: v,
 		mint:     mint,
+		mintAt:   mintAt,
 	}
 	f.labs = NewTunnelLifecycle(f.backend, f.tunnels)
 	f.lab = f.createLab(t, lifecycleProfile)

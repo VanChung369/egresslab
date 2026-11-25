@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/VanChung369/egresslab/services/network-agent/internal/helperauth"
 )
 
 // multiProbeFixture is a configured tunnel whose firewall fake serves, for each window in turn, a
@@ -362,5 +365,70 @@ func TestManagedMultiProbeRefusals(t *testing.T) {
 
 	if err := b.Disconnect(ctx, vpnTestNS); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMultiProbePolicyPin(t *testing.T) {
+	b, _, _, _ := multiProbeFixture(t)
+
+	if _, err := b.MultiProbePolicyPin(); !errors.Is(err, ErrManagedProbeUnavailable) {
+		t.Fatalf("pin of an unconfigured backend: %v", err)
+	}
+
+	run := func(context.Context, string, managedProbeHTTPSource) ([]byte, error) { return nil, nil }
+
+	b.multiProbe = &managedMultiProbeConfig{identPin: netip.MustParseAddr("9.9.9.9")}
+
+	if _, err := b.MultiProbePolicyPin(); !errors.Is(err, ErrManagedProbeUnavailable) {
+		t.Fatalf("pin of a backend without a runner: %v", err)
+	}
+
+	b.multiProbe.run = run
+
+	if pin, err := b.MultiProbePolicyPin(); err != nil || pin != netip.MustParseAddr("9.9.9.9") {
+		t.Fatalf("configured pin: %v %v", pin, err)
+	}
+
+	b.multiProbe.identPin = netip.MustParseAddr("10.0.0.1")
+
+	if _, err := b.MultiProbePolicyPin(); !errors.Is(err, ErrManagedProbeSourcePolicy) {
+		t.Fatalf("invalid pin returned: %v", err)
+	}
+
+	var unset *ManagedTunnelBackend
+	if _, err := unset.MultiProbePolicyPin(); !errors.Is(err, ErrManagedProbeUnavailable) {
+		t.Fatalf("pin of a nil backend: %v", err)
+	}
+}
+
+// helperauth keeps its own copy of the public IPv4 policy; both must agree at every edge of the
+// agent's reserved ranges.
+func TestPublicIPv4PolicyMatchesHelperauth(t *testing.T) {
+	samples := []netip.Addr{
+		netip.MustParseAddr("1.1.1.1"),
+		netip.MustParseAddr("8.8.8.8"),
+		netip.MustParseAddr("255.255.255.255"),
+		netip.MustParseAddr("::ffff:8.8.8.8"),
+		netip.MustParseAddr("2001:4860::1"),
+	}
+
+	for _, prefix := range reservedIPv4 {
+		bytes := prefix.Masked().Addr().As4()
+		hostBits := uint32(1)<<(32-prefix.Bits()) - 1
+		binary.BigEndian.PutUint32(bytes[:], binary.BigEndian.Uint32(bytes[:])|hostBits)
+
+		first, last := prefix.Masked().Addr(), netip.AddrFrom4(bytes)
+		samples = append(samples, first, last, first.Prev(), last.Next())
+	}
+
+	for _, ip := range samples {
+		if !ip.IsValid() {
+			continue
+		}
+
+		_, err := parseCandidateIPv4(ip.String())
+		if agent, helper := err == nil, helperauth.ValidPublicProbeIPv4(ip); agent != helper {
+			t.Errorf("%v: agent public %t, helperauth public %t", ip, agent, helper)
+		}
 	}
 }

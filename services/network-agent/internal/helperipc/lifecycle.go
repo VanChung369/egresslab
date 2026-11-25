@@ -126,9 +126,10 @@ type LabLifecycle struct {
 	blockCreation bool // kernel state uncertain; cleared only by a helper restart
 	closed        bool
 
-	tunnels       TunnelBackend      // nil unless the managed tunnel is enabled
-	probes        ProbeTunnelBackend // nil unless the managed probe is enabled
-	tunnelProfile string             // owner of the one tunnel or unfinished attempt
+	tunnels       TunnelBackend           // nil unless the managed tunnel is enabled
+	probes        ProbeTunnelBackend      // nil unless the single-source probe is enabled
+	multiProbes   MultiProbeTunnelBackend // nil unless the multi-source probe is enabled
+	tunnelProfile string                  // owner of the one tunnel or unfinished attempt
 }
 
 func NewLabLifecycle(backend LabBackend) *LabLifecycle {

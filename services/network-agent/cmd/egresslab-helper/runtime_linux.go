@@ -96,6 +96,12 @@ func classifyLabError(err error) error {
 // classified: after a failed connect the lab is faulted whatever the cause.
 type tunnelBackend struct{ *agent.ManagedTunnelBackend }
 
+// MultiProbePolicyPin is promoted from the embedded backend.
+var (
+	_ helperipc.ProbeTunnelBackend      = tunnelBackend{}
+	_ helperipc.MultiProbeTunnelBackend = tunnelBackend{}
+)
+
 // ProbeConfigured adapts the backend's observation, so helperipc does not depend on the agent package.
 func (b tunnelBackend) ProbeConfigured(ctx context.Context, namespace string) (helperipc.ProbeObservation, error) {
 	result, err := b.ManagedTunnelBackend.ProbeConfigured(ctx, namespace)
@@ -112,6 +118,40 @@ func (b tunnelBackend) ProbeConfigured(ctx context.Context, namespace string) (h
 		ObservedAt:  result.ObservedAt,
 		HandshakeAt: result.HandshakeAt,
 		Source:      result.Source,
+	}, nil
+}
+
+// ProbeConfiguredMulti adapts the backend's multi-source observation the same way.
+func (b tunnelBackend) ProbeConfiguredMulti(
+	ctx context.Context,
+	namespace string,
+) (helperipc.MultiProbeObservation, error) {
+	result, err := b.ManagedTunnelBackend.ProbeConfiguredMulti(ctx, namespace)
+	if err != nil {
+		return helperipc.MultiProbeObservation{}, err
+	}
+
+	if result.NetworkReady {
+		return helperipc.MultiProbeObservation{}, errors.New("diagnostic probe cannot activate networking")
+	}
+
+	sources := make([]helperipc.MultiProbeSourceObservation, 0, len(result.Sources))
+	for _, source := range result.Sources {
+		sources = append(sources, helperipc.MultiProbeSourceObservation{
+			Source:          source.Source,
+			DestinationIPv4: source.DestinationIPv4,
+			IPv4:            source.IPv4,
+			ObservedAt:      source.ObservedAt,
+		})
+	}
+
+	return helperipc.MultiProbeObservation{
+		IPv4:        result.IPv4,
+		StartedAt:   result.StartedAt,
+		FinishedAt:  result.FinishedAt,
+		ObservedAt:  result.ObservedAt,
+		HandshakeAt: result.HandshakeAt,
+		Sources:     sources,
 	}, nil
 }
 
