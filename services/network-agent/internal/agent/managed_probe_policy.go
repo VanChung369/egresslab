@@ -150,16 +150,34 @@ func verifyManagedProbePolicyFor(data []byte, requireActive bool, destination ne
 		return probeRuleHandles{}, ErrProbePolicyDrift
 	}
 
-	return verifyTimedWindowPolicy(data, expectedProbeRules, func(raw []byte) error {
+	return verifyTimedWindowPolicy(data, managedProbeSet, expectedProbeRules, func(raw []byte) error {
 		return verifyManagedProbeSetFor(raw, requireActive, destination)
 	})
 }
 
-// verifyTimedWindowPolicy takes exactly one timed window (its set, checked by verifySet, and the two
-// permits in expectedRules, each last in its chain) out of a readback, and requires everything left
-// to be the sealed policy. It returns the permits' handles for a targeted removal.
-func verifyTimedWindowPolicy(data []byte, expectedRules map[string]string, verifySet func([]byte) error) (
-	probeRuleHandles, error) {
+// verifyTimedWindowPolicy takes exactly one timed window out of a readback (see stripTimedWindow) and
+// requires everything left to be the sealed policy. It returns the permits' handles for a targeted
+// removal.
+func verifyTimedWindowPolicy(data []byte, setName string, expectedRules map[string]string,
+	verifySet func([]byte) error) (probeRuleHandles, error) {
+	sealed, handles, err := stripTimedWindow(data, setName, expectedRules, verifySet)
+	if err != nil {
+		return probeRuleHandles{}, err
+	}
+
+	if err := verifySealedPolicy(sealed); err != nil {
+		return probeRuleHandles{}, fmt.Errorf("%w: %w", ErrProbePolicyDrift, err)
+	}
+
+	return handles, nil
+}
+
+// stripTimedWindow takes exactly one timed window out of a readback: the set named setName, checked
+// by verifySet, and the two permits in expectedRules, each last in its chain. It returns the rest,
+// another window's set and permits included, for the next check; nothing it leaves is accepted
+// here.
+func stripTimedWindow(data []byte, setName string, expectedRules map[string]string, verifySet func([]byte) error) (
+	[]byte, probeRuleHandles, error) {
 	var doc struct {
 		Nftables []map[string]json.RawMessage `json:"nftables"`
 	}
@@ -167,7 +185,7 @@ func verifyTimedWindowPolicy(data []byte, expectedRules map[string]string, verif
 	var handles probeRuleHandles
 
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return handles, ErrProbePolicyDrift
+		return nil, handles, ErrProbePolicyDrift
 	}
 
 	setSeen := false
@@ -176,17 +194,27 @@ func verifyTimedWindowPolicy(data []byte, expectedRules map[string]string, verif
 
 	for _, object := range doc.Nftables {
 		if len(object) != 1 {
-			return handles, ErrProbePolicyDrift
+			return nil, handles, ErrProbePolicyDrift
 		}
 
 		if raw, exists := object["set"]; exists {
-			if setSeen || verifySet(raw) != nil {
-				return handles, ErrProbePolicyDrift
+			var named struct {
+				Name string `json:"name"`
 			}
 
-			setSeen = true
+			if err := json.Unmarshal(raw, &named); err != nil {
+				return nil, handles, ErrProbePolicyDrift
+			}
 
-			continue
+			if named.Name == setName {
+				if setSeen || verifySet(raw) != nil {
+					return nil, handles, ErrProbePolicyDrift
+				}
+
+				setSeen = true
+
+				continue
+			}
 		}
 
 		if raw, exists := object["rule"]; exists {
@@ -199,18 +227,18 @@ func verifyTimedWindowPolicy(data []byte, expectedRules map[string]string, verif
 			}
 
 			if err := json.Unmarshal(raw, &rule); err != nil {
-				return handles, ErrProbePolicyDrift
+				return nil, handles, ErrProbePolicyDrift
 			}
 
 			expr, err := canonicalJSON(rule.Expr)
 			if err != nil {
-				return handles, ErrProbePolicyDrift
+				return nil, handles, ErrProbePolicyDrift
 			}
 
 			if expected, known := expectedRules[rule.Chain]; known && expr == expected {
 				if decodeProbeJSON(raw, &rule) != nil || rule.Family != "inet" || rule.Table != labNFTTable ||
 					rule.Handle == 0 || permitSeen[rule.Chain] {
-					return handles, ErrProbePolicyDrift
+					return nil, handles, ErrProbePolicyDrift
 				}
 
 				permitSeen[rule.Chain] = true
@@ -224,9 +252,9 @@ func verifyTimedWindowPolicy(data []byte, expectedRules map[string]string, verif
 				continue
 			}
 
-			// Every sealed rule precedes the temporary permit in its chain.
+			// Every other rule precedes the temporary permit in its chain.
 			if permitSeen[rule.Chain] {
-				return handles, ErrProbePolicyDrift
+				return nil, handles, ErrProbePolicyDrift
 			}
 		}
 
@@ -234,19 +262,15 @@ func verifyTimedWindowPolicy(data []byte, expectedRules map[string]string, verif
 	}
 
 	if !setSeen || handles.input == 0 || handles.output == 0 || handles.input == handles.output {
-		return probeRuleHandles{}, ErrProbePolicyDrift
+		return nil, probeRuleHandles{}, ErrProbePolicyDrift
 	}
 
 	doc.Nftables = sealed
 
-	sealedData, err := json.Marshal(doc)
+	rest, err := json.Marshal(doc)
 	if err != nil {
-		return probeRuleHandles{}, ErrProbePolicyDrift
+		return nil, probeRuleHandles{}, ErrProbePolicyDrift
 	}
 
-	if err := verifySealedPolicy(sealedData); err != nil {
-		return probeRuleHandles{}, fmt.Errorf("%w: %w", ErrProbePolicyDrift, err)
-	}
-
-	return handles, nil
+	return rest, handles, nil
 }

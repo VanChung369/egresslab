@@ -832,6 +832,124 @@ Limitations:
 
 Application networking as a whole remained disabled.
 
+### Monitor overlay and isolated DNS on Windows and WSL2 (Step 35)
+
+Environment:
+- Host and runtime:
+  - Windows 11 Pro, Go 1.26.2; commit `f66b4d5` with this step's changes.
+  - WSL2 Ubuntu 22.04, Linux 6.6.87, nft 1.0.2.
+- Helper binaries:
+  - The helper, helperctl, the workers and `egresslab-lab-recover` were built from the working tree and installed in `/usr/local/bin`.
+  - The `412aa23` builds are backed up in `/root/egresslab-bin-backup-412aa23`.
+  - Runs 1 and 2 used helper `2d07fa63…`. Run 3 used helper `db96d0b3…`, which adds the check timing and the overlay's opening budget.
+- The controller CLI was built on Windows. Build `87a19874…` was used from the second half of run 2 on; it has the resolver fixes.
+- The reservation authority was the real one in `%APPDATA%\EgressLab`.
+- One route: `profile_156714f52695b619`, with an endpoint on port 1080 created through the HTTP API.
+
+Kernel check in throwaway namespaces (nft 1.0.2, root, both namespaces created and deleted by the check):
+- The lab side was a veth named `wg0`; an echo server ran in a second namespace.
+- With the seal and the gate open, a client of UID 998 got its echoes.
+- With the gate closed (3.2 to 5.25 s), nothing came back.
+- When the overlay and a probe window opened in one transaction, the marked connection resumed at once. It ran until the overlay's element expired 10 s later.
+- During the overlay, new connections of UID 998 and of UID 999 timed out.
+- The readbacks (open, overlay expired, closed) are now `testdata/nft-lab-monitor-overlay-*.json`.
+
+Tests:
+- New in the agent and helper:
+  - `TestMonitorOverlayRules`.
+  - `TestMonitorOverlayRealCapture`: the real captures.
+  - `TestMonitorOverlayRejectsDrift`: wrong UID, a marking output permit, wrong order, a foreign set, a gate permit beside the overlay, and other drift.
+  - `TestMonitorOverlayEligible`.
+  - `TestMonitoredProbeWindow`: the composite script, the close by handle, ineligible overlays, the opening deadline, an expired probe window, a foreign UID, an unconfirmed close.
+  - `TestManagedMultiProbeWithOverlay`: an overlay in every window, none after the streams end, a changed address stopping at the first source.
+  - `TestEgressMonitorTrafficOverlay`: offered only for running streams of the monitored reservation, with the keeper's UID and the old health.
+  - `TestEgressMonitorDriftClosesStreams` and `TestEgressMonitorDueWhenWindowsEnd`.
+  - `TestTunnelBackendOffersMonitorOverlay`.
+- Changed: two sticky-IP tests now expect one window fewer and `ErrManagedStickyIPChanged`.
+- New in the controller:
+  - `TestIsolatedResolver`: answers, aliases, private and reserved addresses, loops, status and size limits, redirects, certificates, invalid names.
+  - `TestIsolatedResolverBuiltInRoots`, `TestIsolatedResolverWaitsForStreamExit`, `TestIsolatedResolverStalledHandshake`, `TestIsolatedResolverStreamEndsDuringQuery`.
+  - `TestIsolatedResolversKeepTheirRoutes`: two routes resolving at once, each through its own streams. This is the only coverage of two runtimes here.
+  - `TestConnectByDomainName` and `TestDomainRefusals`.
+- Mutation checks: each of 15 safety mutations, applied one at a time, failed a test. Among them: an overlay that marks, ignoring liveness or health, no sealed check after the strips, a strip taking any set, no opening deadline, no early stop on a changed address, an overlay without streams or for another reservation, the interval-only check timing, a resolver that keeps its stream, follows redirects or accepts private answers, and DNS ports allowed by name.
+- On the final code:
+  - on Windows, `go vet` (windows, linux, darwin) and `go test ./...` passed with Go 1.26.2 and 1.23.2: 538 controller and 1058 network-agent tests and subtests;
+  - `-race` in WSL passed for both modules. It had caught one data race in a new test (a relay left running past its test), which is fixed.
+
+Real run: three holds, each released. Addresses are compared, never printed.
+- Run 1 was faulted by my own capture.
+  - `tcpdump` ran inside the lab namespace, and the monitor's process inventory refused it ("lab namespace is busy").
+  - The tunnel was removed, and the hold released with `generation_retired: true`.
+  - No process may run in a lab namespace. The later captures used `sniff.py`, which opens a packet socket in the namespace and moves its process back to the root namespace. A plain `tcpdump` watched ports 53 and 853 in the root namespace.
+- Run 2 (helper `2d07fa63…`):
+  - Names resolved by the proxy (curl `socks5h`) all came out at the reserved address:
+    - `api4.ipify.org` 3 of 3 and `ipv4.icanhazip.com` 3 of 3, then 8 of 8 concurrent, with no `LAB_BUSY`;
+    - after the resolver fixes, `api4.ipify.org` 3 of 3, `ifconfig.co` 3 of 3, and 8 of 8 concurrent.
+  - The Windows DNS cache held none of these names, before or after.
+  - Captures over the whole run:
+    - root namespace: 0 packets on ports 53 or 853;
+    - lab namespace: 24579 packets, all on `wg0`, with 0 IPv6 and 0 on ports 53 or 853;
+    - 511 packets with `8.8.8.8:443`, of which 33 SYNs, one per proxied name lookup.
+  - One kept-alive connection, 300 small requests at 3 a second for 4 minutes:
+    - all 300 matched; median 0.64 s, p95 1.87 s, maximum 18.0 s; 31 requests took over 1 s;
+    - the long ones began about 7 s before each check. The keeper stops opening windows 14 s before the renewal deadline, but the check came only at the routine interval, about 8 s later. TCP's backoff stretched that gap to 8 to 18 s. During the probes themselves, the overlay carried the connection.
+  - A 130 s download at 150 KB/s averaged 118 KiB/s, with stalls of 22 s and 5 s. The transport's buffers hide shorter pauses in this measure.
+  - Release during three downloads:
+    - released in 0.7 s with `generation_retired: true`; the lab ended `sealed`;
+    - the downloads drained about 0.8 MB already buffered, then ended (curl 56);
+    - a new name lookup was refused (`reservation is not held`).
+- Run 3 (helper `db96d0b3…`, with the check due when the windows end):
+  - On one connection, 300 requests all matched: median 0.32 s, p95 0.85 s, maximum 2.8 s; 7 took over 1 s.
+  - Checks came about every 17 s.
+  - A 130 s download at 150 KB/s averaged 151 KiB/s, with no stall of a second or more across eight checks.
+- After:
+  - The endpoint was deleted, and `state.json` was identical to before.
+  - The `runtimes.json` binding names the last lab's namespace and helper epoch, as `connect-tunnel` leaves it.
+  - `disconnect` and `delete-lab` ran, and `egresslab-lab-recover` found nothing.
+  - The helper stopped, with no namespace or table left.
+  - Journal: 1772 to 6815 bytes (three holds, three releases).
+  - Helper log: 60 healthy checks; the only fault was run 1's.
+
+Found and fixed during the step:
+- From Codex's review:
+  - The resolver used the platform TLS verifier, which may fetch certificates over the host's network. It now uses built-in roots.
+  - The DNS stream's slot was still busy when the CONNECT followed. The resolver now waits for the runtime process to exit.
+  - An overlay left with milliseconds to open could fault the generation. Eligibility now requires a 2 s opening budget.
+  - A dial could race the HTTP client's cancellation. The stream is now opened before the client starts.
+  - A failed lookup could miss its reply near the deadline, and an empty name got none. Both are fixed.
+  - Reserved answers (CGNAT and others) were taken before a public one. They are now skipped.
+  - The alias walk stopped one alias short, and let an early address bypass a bad alias. Both are fixed.
+  - Two tests could pass vacuously. Both are fixed.
+- From the real run: the gate gap before each check. While streams run, the check is now due as soon as no window may open.
+- From Codex's second review, after the real run (unit tests and mutation checks only; no real run used these builds):
+  - A check slower than about 16 s would have run again at once, and so on back to back. A check that ended past the windows' end now keeps the routine schedule.
+  - No check now starts while an authorized release waits for the lock.
+  - An answer listing a probe source (such as `1.1.1.1`) before an allowed address failed the CONNECT. The resolver now skips answers the mint would refuse.
+  - A name with an alias also passed with a malformed or IPv6 address record, or with the same CNAME twice. It is now refused.
+  - The resolver waited for the stream's process even after a failure. It now waits only after an answer, and only while its caller's context lasts. `serve-socks` passes the listener's context, so a client that leaves does not shorten the wait.
+  - Codex's third look found that a release could start waiting between the monitor's check of it and the lock. The monitor now checks again once it holds the lock.
+  - Three tests were added:
+    - `TestDoHRootsVerifyServedChain`, which checks the chain dns.google served on 2026-11-26, recorded in `testdata`;
+    - a dial that completes only after cancellation;
+    - a failure reply after the original handshake deadline.
+  - Each of these eight fixes, reverted one at a time, failed a test.
+- A direct check of the final resolver against the real service resolved `example.com` and `www.github.com`, and `one.one.one.one` to `1.0.0.1` (skipping `1.1.1.1`).
+
+Limitations:
+- Short pauses remain:
+  - between the last window and the overlay (up to about a second and the check's setup);
+  - between the two sources' windows;
+  - when a probe outlives the overlay's 10 s element.
+- The helper releases a DNS stream's slot asynchronously.
+- After a check slower than about 16 s, no window opens until the next check, as before Step 35, so new streams wait.
+- A release that arrives during a check still waits for it, up to 5 s.
+- The resolver is pinned to Google Trust Services' roots R1, R3 and R4; another CA fails closed.
+- Google Public DNS sees the queried names, coming from the VPN's address.
+- One runtime only on Windows; two runtimes resolving at once were covered by a unit test. Native Linux has not run it.
+- The captures show no traffic on DNS ports and no host lookup of the tested names. They do not exclude every conceivable leak.
+
+Application networking as a whole remained disabled.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
@@ -865,4 +983,4 @@ Both checks that were pending for Windows ran on 2026-11-26; see "Windows and WS
 
 ## Next Milestone
 
-The rest of Step 35 (no pause at monitor checks, DNS for domain names), on top of the proxy plane and an API-created endpoint verified on Windows through WSL2, with the fix for the Windows state files (Step 35), several streams per runtime verified on two Lima runtimes (Step 35), the endpoint-to-runtime integration verified on two Lima runtimes (Step 35), the SOCKS5 proxy runtime verified on Lima through the real tunnel (Step 34), the kernel-timed traffic gate verified in throwaway namespaces on Lima (Step 33), the continuous egress monitoring of prepared generations verified on Lima (Step 32), the reboot-bound reservation recovery verified on Lima through a real helper crash and guest reboot (Step 31E.3), the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting; in Step 31E.3 both reservations, 10 s after `connect-tunnel`, succeeded at the first attempt); since Step 32 a failed worker names a coded reason in the helper's error, but no failure has recurred since, so the cause is still unknown. WSL2 ran the single-source and multi-source paths on 2026-11-25 and the proxy plane on 2026-11-26 (whose first probe of the session succeeded); native Linux has not. See `docs/PRIVILEGED-HELPER.md`.
+To be defined after Step 35, on top of the monitor traffic overlay and the isolated DNS resolver for domain names verified on Windows through WSL2 (Step 35), the proxy plane and an API-created endpoint verified on Windows through WSL2, with the fix for the Windows state files (Step 35), several streams per runtime verified on two Lima runtimes (Step 35), the endpoint-to-runtime integration verified on two Lima runtimes (Step 35), the SOCKS5 proxy runtime verified on Lima through the real tunnel (Step 34), the kernel-timed traffic gate verified in throwaway namespaces on Lima (Step 33), the continuous egress monitoring of prepared generations verified on Lima (Step 32), the reboot-bound reservation recovery verified on Lima through a real helper crash and guest reboot (Step 31E.3), the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting; in Step 31E.3 both reservations, 10 s after `connect-tunnel`, succeeded at the first attempt); since Step 32 a failed worker names a coded reason in the helper's error, but no failure has recurred since, so the cause is still unknown. WSL2 ran the single-source and multi-source paths on 2026-11-25 and the proxy plane, then the monitor overlay and the isolated DNS resolver, on 2026-11-26 (the first probe of every session succeeded); native Linux has not. See `docs/PRIVILEGED-HELPER.md`.

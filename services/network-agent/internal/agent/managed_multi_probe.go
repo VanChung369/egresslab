@@ -102,7 +102,7 @@ func (b *ManagedTunnelBackend) ProbeConfiguredMulti(
 	ctx context.Context,
 	namespace string,
 ) (ManagedMultiProbeObservation, error) {
-	return b.probeConfiguredMulti(ctx, namespace, "")
+	return b.probeConfiguredMulti(ctx, namespace, "", nil)
 }
 
 // ProbeConfiguredMultiForGeneration is ProbeConfiguredMulti for exactly one tunnel generation,
@@ -116,12 +116,29 @@ func (b *ManagedTunnelBackend) ProbeConfiguredMultiForGeneration(
 		return ManagedMultiProbeObservation{}, ErrManagedTunnelGenerationMismatch
 	}
 
-	return b.probeConfiguredMulti(ctx, namespace, generation)
+	return b.probeConfiguredMulti(ctx, namespace, generation, nil)
+}
+
+// ProbeConfiguredMultiForGenerationWithOverlay is ProbeConfiguredMultiForGeneration for the egress
+// monitor of a generation whose proxy streams are running: each window also carries the traffic
+// overlay while it is eligible, so those streams keep flowing. The overlay comes from the trusted
+// data plane only.
+func (b *ManagedTunnelBackend) ProbeConfiguredMultiForGenerationWithOverlay(
+	ctx context.Context,
+	namespace, generation string,
+	overlay MonitorTrafficOverlay,
+) (ManagedMultiProbeObservation, error) {
+	if generation == "" {
+		return ManagedMultiProbeObservation{}, ErrManagedTunnelGenerationMismatch
+	}
+
+	return b.probeConfiguredMulti(ctx, namespace, generation, &overlay)
 }
 
 func (b *ManagedTunnelBackend) probeConfiguredMulti(
 	ctx context.Context,
 	namespace, expectedGeneration string,
+	overlay *MonitorTrafficOverlay,
 ) (observation ManagedMultiProbeObservation, resultErr error) {
 	b.sealed.manager.mu.Lock()
 	defer b.sealed.manager.mu.Unlock()
@@ -229,7 +246,7 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 
 		var sample managedProbeSample
 
-		err := b.sealed.firewall.withManagedProbeWindowForLocked(ctx, namespace, source.destination,
+		err := b.sealed.firewall.withMonitoredProbeWindowLocked(ctx, namespace, source.destination, overlay,
 			func(probeCtx context.Context) error {
 				body, err := config.run(probeCtx, namespace, source)
 				if err != nil {
@@ -239,6 +256,11 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 				ip, err := parseManagedProbeBody(source, body)
 				if err != nil {
 					return err
+				}
+
+				// A pinned generation that one source sees elsewhere is lost: no other source is asked.
+				if t.expectedIPv4.IsValid() && ip != t.expectedIPv4 {
+					return ErrManagedStickyIPChanged
 				}
 
 				if err := probeCtx.Err(); err != nil {

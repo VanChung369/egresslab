@@ -152,6 +152,21 @@ func (b tunnelBackend) ProbeConfiguredMultiForGeneration(
 	return adaptMultiProbeObservation(result, true)
 }
 
+// ProbeConfiguredMultiForGenerationWithOverlay passes the monitor's overlay through unchanged.
+func (b tunnelBackend) ProbeConfiguredMultiForGenerationWithOverlay(
+	ctx context.Context,
+	namespace, generation string,
+	overlay helperipc.MonitorTrafficOverlay,
+) (helperipc.MultiProbeObservation, error) {
+	result, err := b.ManagedTunnelBackend.ProbeConfiguredMultiForGenerationWithOverlay(ctx, namespace, generation,
+		agent.MonitorTrafficOverlay{UID: overlay.UID, HealthUntil: overlay.HealthUntil, Alive: overlay.Alive})
+	if err != nil {
+		return helperipc.MultiProbeObservation{}, err
+	}
+
+	return adaptMultiProbeObservation(result, true)
+}
+
 func adaptMultiProbeObservation(
 	result agent.ManagedMultiProbeObservation,
 	withGeneration bool,

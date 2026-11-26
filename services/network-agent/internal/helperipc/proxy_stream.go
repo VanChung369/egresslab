@@ -87,6 +87,7 @@ type proxyAdmission struct {
 type proxyPlane struct {
 	profileID     string
 	reservationID string
+	uid           uint32 // the proxy user, from the helper's own configuration
 
 	// Windows open on parent, the server's context: ending the plane never fails a window.
 	parent context.Context
@@ -222,6 +223,14 @@ func (p *proxyPlane) idle() bool {
 	defer p.mu.Unlock()
 
 	return p.idleLocked()
+}
+
+// streaming: the plane is not ending and relays at least one admitted stream.
+func (p *proxyPlane) streaming() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return !p.closing && p.ctx.Err() == nil && len(p.streams) > 0
 }
 
 // retireIfIdle ends the plane when nothing is left; nothing can be queued on it afterwards.

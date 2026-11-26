@@ -79,6 +79,64 @@ func (h egressMonitorHealth) due(now time.Time) bool {
 	return !now.Before(h.nextDue())
 }
 
+// MonitorTrafficOverlay lets the proxy streams that the traffic gate admitted keep flowing while a
+// monitor check probes (agent.MonitorTrafficOverlay). It admits no new connection.
+type MonitorTrafficOverlay struct {
+	UID         uint32
+	HealthUntil time.Time
+	Alive       func() bool
+}
+
+type monitorOverlayBackend interface {
+	ProbeConfiguredMultiForGenerationWithOverlay(ctx context.Context, namespace, generation string,
+		overlay MonitorTrafficOverlay) (MultiProbeObservation, error)
+}
+
+// monitorOverlayLocked is offered only for running streams of the monitored reservation, on the
+// health they were admitted on, with the UID the keeper got from the helper's configuration. The
+// caller holds l.mu.
+func (l *LabLifecycle) monitorOverlayLocked(p *preparedEgressLease, now time.Time) (MonitorTrafficOverlay, bool) {
+	plane := l.proxyPlane.Load()
+
+	if plane == nil || plane.reservationID != p.info.ReservationID || plane.profileID != p.info.ProfileID ||
+		plane.uid == 0 || plane.uid == ^uint32(0) || !plane.streaming() || !p.monitor.fresh(now) {
+		return MonitorTrafficOverlay{}, false
+	}
+
+	return MonitorTrafficOverlay{UID: plane.uid, HealthUntil: p.monitor.expiresAt, Alive: plane.streaming}, true
+}
+
+// monitorDueLocked: while proxy streams of the reservation run, the check is due as soon as no
+// traffic window may open any more (trafficWindowMinHealth before renewBy), so that the overlay
+// follows the last window instead of leaving the streams without a gate until the routine interval;
+// a pause of several seconds sets TCP's retransmission back off further. The caller holds l.mu.
+// A check that itself ended past that point leaves no window to follow, and goes by the routine
+// schedule.
+func (l *LabLifecycle) monitorDueLocked(p *preparedEgressLease, now time.Time) bool {
+	if p.monitor.due(now) {
+		return true
+	}
+
+	windowsEnd := p.monitor.renewBy().Add(-trafficWindowMinHealth)
+	plane := l.proxyPlane.Load()
+
+	return plane != nil && plane.reservationID == p.info.ReservationID && plane.streaming() &&
+		p.monitor.checkedAt.Before(windowsEnd) && !now.Before(windowsEnd)
+}
+
+// probeMonitoredGenerationLocked runs the monitor's probe, with the overlay when there is one and the
+// backend supports it. The caller holds l.mu.
+func (l *LabLifecycle) probeMonitoredGenerationLocked(ctx context.Context, p *preparedEgressLease, namespace,
+	generation string) (MultiProbeObservation, error) {
+	if overlay, ok := l.monitorOverlayLocked(p, time.Now()); ok {
+		if backend, supported := l.generationProbes.(monitorOverlayBackend); supported {
+			return backend.ProbeConfiguredMultiForGenerationWithOverlay(ctx, namespace, generation, overlay)
+		}
+	}
+
+	return l.generationProbes.ProbeConfiguredMultiForGeneration(ctx, namespace, generation)
+}
+
 // faultMonitoredTunnelLocked faults the lab and removes its tunnel. Only a confirmed cleanup retires
 // the generation; the durable hold stays with the controller. The caller must hold l.mu.
 func (l *LabLifecycle) faultMonitoredTunnelLocked(lab LabInfo, cause error) error {
@@ -96,9 +154,16 @@ func (l *LabLifecycle) faultMonitoredTunnelLocked(lab LabInfo, cause error) erro
 }
 
 // monitorPreparedOnce checks the prepared generation once, if due. A busy lifecycle skips the check
-// and renews nothing; the log is queued off the lock.
+// and renews nothing, and so does a release waiting for the lock: a check started now would keep it
+// for seconds. The log is queued off the lock.
 func (l *LabLifecycle) monitorPreparedOnce(ctx context.Context) error {
-	if l == nil || ctx.Err() != nil || !l.mu.TryLock() {
+	if l == nil || ctx.Err() != nil || l.proxyHalt.Load() > 0 || !l.mu.TryLock() {
+		return nil
+	}
+
+	// Again under the lock: a release may have started waiting since the first look.
+	if l.proxyHalt.Load() > 0 {
+		l.mu.Unlock()
 		return nil
 	}
 
@@ -146,7 +211,7 @@ func (l *LabLifecycle) monitorPreparedLocked(ctx context.Context) (*PreparedLeas
 		return fail(errors.New("monitor health expired"))
 	}
 
-	if !p.monitor.due(now) {
+	if !l.monitorDueLocked(p, now) {
 		return nil, nil
 	}
 
@@ -187,8 +252,7 @@ func (l *LabLifecycle) monitorPreparedLocked(ctx context.Context) (*PreparedLeas
 	}
 
 	probeCtx, cancel := context.WithDeadline(ctx, deadline)
-	observation, err := l.generationProbes.ProbeConfiguredMultiForGeneration(probeCtx, lab.Namespace,
-		expected.TunnelGeneration)
+	observation, err := l.probeMonitoredGenerationLocked(probeCtx, p, lab.Namespace, expected.TunnelGeneration)
 	probeErr := probeCtx.Err()
 	cancel()
 

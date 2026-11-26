@@ -338,3 +338,7 @@ func (s *ProxyStream) Close() error {
 }
 
 func (s *ProxyStream) BoundAddr() netip.AddrPort { return s.bound }
+
+// Exited is closed once the runtime process has been reaped after Close: the helper has seen the
+// stream end, though it may not have released the stream's slot yet.
+func (s *ProxyStream) Exited() <-chan struct{} { return s.exited }

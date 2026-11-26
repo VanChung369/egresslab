@@ -192,6 +192,7 @@ Managed traffic windows require an exact prepared reservation, tunnel generation
 
 - Both directions depend on a kernel-expiring set (10 s). No unconditional established-connection permit survives the timeout, and only replies of connections the proxy permit admitted (a conntrack mark) come back.
 - A window never runs past the monitor's renewal deadline and leaves time to close; a refusal before opening is retryable, any other failure faults the tunnel.
+- Since Step 35, a monitor probe window can carry an overlay of the gate for the connections the gate already marked. Sealed rules come first, then the overlay, then the probe; the whole composite policy is verified. While streams run, the check is due as soon as no window may open any more.
 - Traffic windows are not persisted as firewall baselines. Closing a window must restore and verify the sealed policy.
 - The primitive itself is not exposed through IPC; only a proxy stream opens it (Step 34).
 
@@ -202,9 +203,12 @@ Application networking remains disabled until the supervised proxy runtime is im
 A loopback SOCKS5 endpoint on the controller host carries IPv4 TCP streams through the prepared generation of one reservation. Every CONNECT is a signed `OpenProxyStreamV1` for one destination, accepted only by the helper epoch that prepared the reservation and only while its monitoring health is fresh.
 
 - An unprivileged worker opens the socket inside the lab namespace and hands it to the helper (`SCM_RIGHTS`); the socket keeps the namespace's routes, firewall and the proxy user's UID, and no process stays in the namespace.
-- The helper renews kernel-timed traffic windows for its streams, through the monitor's check interval; the gate closes only while the monitor probes. Faults, releases and new tunnels close the streams first.
+- The helper renews kernel-timed traffic windows for its streams, through the monitor's check interval. Since Step 35, while the monitor probes, an overlay of the gate keeps the established connections it marked, admitting no new connection. Faults, releases and new tunnels close the streams first.
 - The SOCKS parser never dials; the runtime transport is framed in both directions, since the launcher carries no close signal of its own.
-- IPv4 only, no domain names (no safe resolver yet). One stream per runtime in Step 34; several since Step 35.
+- Destinations:
+  - In Step 34, IPv4 only.
+  - Since Step 35, also domain names. They are resolved by DNS over HTTPS through the reservation's own signed streams, to Google Public DNS, with built-in roots. There is no host resolver, no cache and no fallback.
+- One stream per runtime in Step 34; several since Step 35.
 
 Application networking as a whole remains disabled.
 

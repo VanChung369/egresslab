@@ -111,7 +111,7 @@ func verifyTrafficGatePolicy(data []byte, uid uint32, requireActive bool) (probe
 		return probeRuleHandles{}, ErrTrafficGate
 	}
 
-	handles, err := verifyTimedWindowPolicy(data, expectedTrafficRules(uid), func(raw []byte) error {
+	handles, err := verifyTimedWindowPolicy(data, managedTrafficSet, expectedTrafficRules(uid), func(raw []byte) error {
 		return verifyTrafficSet(raw, requireActive)
 	})
 	if err != nil {

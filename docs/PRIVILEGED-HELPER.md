@@ -2009,9 +2009,9 @@ runs in the foreground until interrupted and changes no global readiness.
   as the helper admits; up to eight more wait up to 10 s for a slot, the rest are refused. After the
   destination finished, an idle client is closed after 30 s.
 
-Limits of this prototype: traffic pauses for a few seconds at each monitor check; native Linux has
-not run it (WSL2 did on 2026-11-26, see `docs/DEV-LINUX-VM.md`). Application networking as a whole
-stays disabled.
+Limits of this prototype: since Step 35 a short pause remains around each monitor check (see Monitor
+traffic overlay below); native Linux has not run it (WSL2 did on 2026-11-26, see
+`docs/DEV-LINUX-VM.md`). Application networking as a whole stays disabled.
 
 ### Endpoint-to-runtime integration (Step 35)
 
@@ -2034,3 +2034,87 @@ Several streams per runtime (Step 35): the helper's streams share one keeper and
 (see Traffic windows and Preemption above), and `serve-socks` and `serve-endpoint` serve up to eight
 clients at once, each CONNECT with its own capability. The IPC protocol, helperctl and the workers
 did not change.
+
+### Monitor traffic overlay (Step 35)
+
+While the egress monitor checks a prepared generation whose proxy streams are running, each probe
+window also carries a traffic overlay, in the same nft transaction. It has the gate's set
+(`egresslab_app4`, element `wg0` with the gate's 10 s kernel timeout) and input permit. Its output
+permit keeps only the established connections the gate already marked:
+
+```text
+add rule inet egresslab_lab output meta nfproto ipv4 oifname @egresslab_app4 meta skuid UID meta l4proto tcp ct state established ct mark 0x65676c01 accept
+```
+
+- **No new connection.** The overlay marks nothing, so no new connection leaves while the monitor
+  probes, whatever its UID.
+- **Order and readback.** The policy is: sealed rules, then the overlay's permits, then the probe's,
+  each window's permits last in their chains. The readback takes the probe window out first, then the
+  overlay, and requires the sealed policy for the rest. Any other set or rule, another order or a
+  duplicate is refused.
+- **Eligibility.** The overlay is used only when all of these hold:
+  - the proxy plane belongs to the monitored reservation and profile;
+  - the plane has running streams, and its UID comes from the helper's own configuration;
+  - the health the streams were admitted on is fresh;
+  - that health leaves 2 s to open the overlay, plus the 10 s kernel timeout and the 2 s close
+    budget.
+
+  Eligibility is checked again before each source's window, so streams that ended get none.
+- **Expiry and close.** The overlay's element expires on its own after 10 s, which can pause the
+  streams before a long probe ends; it is never renewed within the window. After the probe, an
+  expired overlay element is accepted, an expired probe element is not. Both windows close together,
+  by handle, in one transaction; an unconfirmed close drifts the namespace.
+- **Check timing.** While streams run, the check is due as soon as no traffic window may open any
+  more (14 s before the renewal deadline), so the overlay follows the last window. Checks then come
+  about every 17 s instead of 24 s. Before this, the gate stayed closed for about 7 s before each
+  check, and TCP's retransmission backoff turned that into 8 to 18 s stalls.
+  - A check that itself ended past that point keeps the routine schedule, so slow checks never run
+    back to back. After such a check, no window opens until the next check, as before Step 35, and
+    new streams wait.
+  - No check starts while an authorized release waits for the lock. A release that arrives during a
+    check still waits for it, up to 5 s.
+- **A changed address.** A source whose address differs from the generation's pin ends the attempt
+  at once, without asking the second source. The tunnel is faulted and every stream closed; the
+  durable hold stays with the controller.
+
+Short pauses remain:
+- between the last traffic window and the overlay;
+- between the two sources' windows;
+- when a probe outlives the overlay's element.
+
+On WSL2, the longest request on one kept-alive connection across eight checks took 2.8 s. The real
+nft captures and the kernel behaviour are in `docs/DEV-LINUX-VM.md`.
+
+### Isolated DNS for domain names (Step 35)
+
+`serve-socks` and `serve-endpoint` accept domain names (SOCKS5 address type 3). Nothing asks the
+host's resolver.
+
+- **Transport.** Each name is resolved by DNS over HTTPS through the same signed proxy stream
+  transport as a CONNECT: one `OpenProxyStreamV1` to `8.8.8.8:443` per query, with the same trust,
+  reservation, binding and capability checks. The query goes to Google Public DNS's JSON API
+  (`https://dns.google/resolve`, `type=A`, `edns_client_subnet=0.0.0.0/0`).
+- **TLS.** The SNI and the certificate name are `dns.google`. The certificate is verified only
+  against built-in roots: GTS Root R1, R3 and R4, from Ubuntu's ca-certificates 20260816. dns.google
+  chains to R4 through WE2. The platform verifier is never used, since on Windows and macOS it may
+  fetch certificates over the host's own network. Any other CA fails closed.
+- **What is refused.**
+  - Names: local and special names (`.local`, `.localhost`, `.internal`, `.home.arpa`, `.onion`,
+    `.invalid`, `.test`), and labels outside `a-z0-9-`.
+  - Responses: a redirect, any status other than 200, a body over 64 KiB, a DNS status other than
+    0, a truncated answer, or a question that does not match.
+  - Aliases: more than eight CNAMEs, a loop, or a name that has an alias and also has a second
+    CNAME or any address record (of either family, well formed or not).
+
+  Only a public IPv4 answer counts, by the controller's own test. Answers the mint would refuse (the
+  probe sources) are skipped, so that a later allowed one is taken. There is no cache and no
+  fallback.
+- **The CONNECT.** The resolved address is dialed like any IPv4 destination: the destination
+  policy and the signed capability still decide. Ports 53 and 853 are refused before resolution.
+- **The query's stream.** It is closed before the CONNECT. After an answer, and only while the
+  listener runs, the resolver waits up to 3 s for the runtime process to exit; a client that leaves
+  meanwhile does not shorten the wait. The helper releases the
+  slot on its own, without acknowledging it, so with seven other streams running, a domain CONNECT
+  may occasionally get `LAB_BUSY`.
+- **Privacy.** Google sees the queried names, coming from the VPN's address, without the client
+  subnet.

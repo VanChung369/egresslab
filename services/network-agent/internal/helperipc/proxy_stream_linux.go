@@ -152,7 +152,7 @@ func (l *LabLifecycle) joinProxyPlane(ctx context.Context, r *proxyRequest, k pr
 		}
 	}
 
-	plane, created, err := l.joinProxyPlaneLocked(ctx, r)
+	plane, created, err := l.joinProxyPlaneLocked(ctx, r, k.uid)
 	l.mu.Unlock()
 
 	// Started after the unlock, so its first window does not find the lock taken.
@@ -163,7 +163,7 @@ func (l *LabLifecycle) joinProxyPlane(ctx context.Context, r *proxyRequest, k pr
 	return plane, err
 }
 
-func (l *LabLifecycle) joinProxyPlaneLocked(ctx context.Context, r *proxyRequest) (*proxyPlane, bool, error) {
+func (l *LabLifecycle) joinProxyPlaneLocked(ctx context.Context, r *proxyRequest, uid uint32) (*proxyPlane, bool, error) {
 	reservationID := r.req.Intent.ReservationID
 	p := l.preparedLease
 
@@ -185,6 +185,8 @@ func (l *LabLifecycle) joinProxyPlaneLocked(ctx context.Context, r *proxyRequest
 	}
 
 	plane := newProxyPlane(ctx, p.info.ProfileID, reservationID)
+	plane.uid = uid
+
 	if !plane.submit(r) {
 		return nil, false, errLabBusy
 	}

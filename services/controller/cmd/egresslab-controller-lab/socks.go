@@ -70,7 +70,8 @@ func (s *session) serveSocksWithAuthority(reservationID, portArg string, authori
 		}
 	}
 
-	if _, err := authority.Lookup(reservationID); err != nil {
+	hold, err := authority.Lookup(reservationID)
+	if err != nil {
 		return reservationCommandError(err)
 	}
 
@@ -177,6 +178,13 @@ func (s *session) serveSocksWithAuthority(reservationID, portArg string, authori
 		return streams.OpenProxyStream(ctx, capability)
 	}
 
+	// DNS goes through dial too: the same trust, reservation, binding and signed capability checks.
+	// Answers the mint would refuse (the probe sources, say) are skipped; the port is checked before
+	// resolution and again by the mint.
+	resolve := socks5.NewIsolatedResolver(dial, func(ip netip.Addr) bool {
+		return control.ValidLabProxyDestination(netip.AddrPortFrom(ip, 443), hold.IdentIPv4)
+	})
+
 	slot := make(chan struct{}, socksMaxClients)
 	waiting := make(chan struct{}, socksMaxWaiting)
 
@@ -230,7 +238,7 @@ func (s *session) serveSocksWithAuthority(reservationID, portArg string, authori
 
 			defer func() { <-slot }()
 
-			if err := socks5.ServeConn(ctx, conn, username, password, dial); err != nil {
+			if err := socks5.ServeConnWithResolver(ctx, conn, username, password, dial, resolve); err != nil {
 				fmt.Fprintln(os.Stderr, "serve-socks:", err)
 			}
 		}()

@@ -103,7 +103,8 @@ func TestManagedStickyIPLifecycle(t *testing.T) {
 				t.Fatalf("stable IP verification failed: %+v %v", second, err)
 			}
 
-			// Both sources agree on another address: consensus passes, the sticky gate refuses.
+			// Both sources would agree on another address; the first one already differs from the pin,
+			// so the second is not asked.
 			observedIP = "8.8.8.8"
 
 			if uncertain {
@@ -123,7 +124,7 @@ func TestManagedStickyIPLifecycle(t *testing.T) {
 				t.Fatal("sticky violation replaced the original pin")
 			}
 
-			if window.open || window.opened != 6 || len(window.closed) != 6 {
+			if window.open || window.opened != 5 || len(window.closed) != 5 {
 				t.Fatal("firewall not resealed after the sticky violation")
 			}
 
@@ -133,7 +134,7 @@ func TestManagedStickyIPLifecycle(t *testing.T) {
 				}
 
 				if _, err := b.ProbeConfiguredMulti(ctx, vpnTestNS); !errors.Is(err, ErrManagedTunnelUncertain) ||
-					window.opened != 6 {
+					window.opened != 5 {
 					t.Fatalf("faulted tunnel probed again: %v", err)
 				}
 
@@ -284,7 +285,8 @@ func TestManagedStickyIPFailureAfterPin(t *testing.T) {
 				t.Fatalf("failed verification returned evidence: %+v %v", result, err)
 			}
 
-			if mode == "source disagreement" && !errors.Is(err, ErrManagedProbeIPMismatch) {
+			// The disagreeing source differs from the pin, which ends the attempt there.
+			if mode == "source disagreement" && !errors.Is(err, ErrManagedStickyIPChanged) {
 				t.Fatalf("wrong consensus failure: %v", err)
 			}
 

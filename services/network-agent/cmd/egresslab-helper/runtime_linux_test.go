@@ -97,3 +97,15 @@ func TestTunnelBackendOffersTrafficWindow(t *testing.T) {
 		t.Fatal("tunnel backend lost WithTrafficWindow")
 	}
 }
+
+// The monitor finds the traffic overlay the same way; without it, streams would pause at every check.
+func TestTunnelBackendOffersMonitorOverlay(t *testing.T) {
+	var backend any = tunnelBackend{}
+
+	if _, ok := backend.(interface {
+		ProbeConfiguredMultiForGenerationWithOverlay(context.Context, string, string,
+			helperipc.MonitorTrafficOverlay) (helperipc.MultiProbeObservation, error)
+	}); !ok {
+		t.Fatal("tunnel backend does not offer the monitor's traffic overlay")
+	}
+}

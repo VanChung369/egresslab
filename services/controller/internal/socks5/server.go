@@ -1,6 +1,7 @@
 // Package socks5 serves one SOCKS5 CONNECT (RFC 1928) with username/password authentication
-// (RFC 1929), IPv4 destinations only. It never dials: every connection goes through DialFunc, which
-// the trusted runtime transport provides.
+// (RFC 1929), to an IPv4 address or a domain name. It never dials and never asks the host's
+// resolver: every connection, DNS queries included, goes through DialFunc, which the trusted runtime
+// transport provides.
 package socks5
 
 import (
@@ -8,6 +9,7 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -16,7 +18,8 @@ import (
 	"time"
 )
 
-const handshakeTimeout = time.Minute
+// handshakeTimeout bounds the handshake, and since Step 35 again a name's resolution and the dial.
+var handshakeTimeout = time.Minute
 
 // uploadIdleAfterFin bounds a client that keeps its side open after the destination finished.
 var uploadIdleAfterFin = 30 * time.Second
@@ -43,6 +46,14 @@ type DialFunc func(context.Context, netip.AddrPort) (Stream, error)
 
 // ServeConn serves one client and closes it. Domain names, IPv6, BIND and UDP ASSOCIATE are refused.
 func ServeConn(ctx context.Context, client *net.TCPConn, username, password string, dial DialFunc) error {
+	return ServeConnWithResolver(ctx, client, username, password, dial, nil)
+}
+
+// ServeConnWithResolver is ServeConn that also accepts domain names, resolved by resolve; the
+// resolved address then goes through dial like any IPv4 destination. Without resolve, domain names
+// are refused.
+func ServeConnWithResolver(ctx context.Context, client *net.TCPConn, username, password string, dial DialFunc,
+	resolve ResolveFunc) error {
 	defer client.Close()
 
 	stop := context.AfterFunc(ctx, func() { _ = client.Close() })
@@ -68,21 +79,86 @@ func ServeConn(ctx context.Context, client *net.TCPConn, username, password stri
 		return errors.New("unsupported SOCKS5 command")
 	}
 
-	if header[3] != 1 {
+	var ip netip.Addr
+	var domain string
+
+	switch header[3] {
+	case 1: // IPv4
+		var raw [4]byte
+		if _, err := io.ReadFull(client, raw[:]); err != nil {
+			return err
+		}
+
+		ip = netip.AddrFrom4(raw)
+
+	case 3: // domain name
+		if resolve == nil {
+			_ = reply(client, replyAddressNotSupported, netip.AddrPort{})
+			return errors.New("domain resolution unavailable")
+		}
+
+		var length [1]byte
+		if _, err := io.ReadFull(client, length[:]); err != nil {
+			return err
+		}
+
+		if length[0] == 0 {
+			_ = reply(client, replyGeneralFailure, netip.AddrPort{})
+			return errors.New("empty domain")
+		}
+
+		raw := make([]byte, int(length[0]))
+		if _, err := io.ReadFull(client, raw); err != nil {
+			return err
+		}
+
+		domain = string(raw)
+
+	default:
 		_ = reply(client, replyAddressNotSupported, netip.AddrPort{})
-		return errors.New("only IPv4 destinations are supported")
+		return errors.New("only IPv4 destinations and domain names are supported")
 	}
 
-	var address [6]byte
-	if _, err := io.ReadFull(client, address[:]); err != nil {
+	var portBytes [2]byte
+	if _, err := io.ReadFull(client, portBytes[:]); err != nil {
 		return err
 	}
 
-	destination := netip.AddrPortFrom(netip.AddrFrom4([4]byte(address[:4])), binary.BigEndian.Uint16(address[4:]))
-	if destination.Port() == 0 {
+	port := binary.BigEndian.Uint16(portBytes[:])
+
+	// Refused before anything is resolved.
+	if port == 0 || port == 53 || port == 853 {
 		_ = reply(client, replyNotAllowed, netip.AddrPort{})
-		return errors.New("invalid destination")
+		return ErrNotAllowed
 	}
+
+	if domain != "" {
+		// Resolution starts the budget over, so that even a failure still gets its reply out.
+		_ = client.SetDeadline(time.Now().Add(handshakeTimeout))
+
+		resolved, err := resolve(ctx, domain)
+		if err == nil && !resolved.Is4() {
+			err = errDNSNoAnswer
+		}
+
+		if err != nil {
+			code := byte(replyGeneralFailure)
+			if errors.Is(err, ErrNotAllowed) {
+				code = replyNotAllowed
+			}
+
+			_ = reply(client, code, netip.AddrPort{})
+
+			return fmt.Errorf("isolated DNS resolution failed: %w", err)
+		}
+
+		ip = resolved
+
+		// The dial keeps the budget it had without a name to resolve.
+		_ = client.SetDeadline(time.Now().Add(handshakeTimeout))
+	}
+
+	destination := netip.AddrPortFrom(ip, port)
 
 	target, err := dial(ctx, destination)
 	if err != nil {

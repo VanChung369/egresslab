@@ -56,6 +56,7 @@ type harness struct {
 	echo    string
 	done    chan error
 	cancel  context.CancelFunc
+	resolve ResolveFunc // nil: domain names refused, as ServeConn does
 }
 
 func serve(t *testing.T, h *harness) *net.TCPConn {
@@ -95,7 +96,12 @@ func serve(t *testing.T, h *harness) *net.TCPConn {
 			return
 		}
 
-		h.done <- ServeConn(ctx, c, testUser, testPass, dial)
+		if h.resolve == nil {
+			h.done <- ServeConn(ctx, c, testUser, testPass, dial)
+			return
+		}
+
+		h.done <- ServeConnWithResolver(ctx, c, testUser, testPass, dial, h.resolve)
 	}()
 
 	client, err := net.DialTCP("tcp4", nil, l.Addr().(*net.TCPAddr))
