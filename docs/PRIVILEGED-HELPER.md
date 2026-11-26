@@ -1,6 +1,6 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 31D.3d.2 — controller release integration.** A controller CLI signs `CreateLab`,
+Status: **Step 31D.3e — reservation lifecycle on a real tunnel.** A controller CLI signs `CreateLab`,
 `ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`, `ReserveEgressCandidateV1`,
 `PrepareEgressLeaseV1` and `RevokeEgressLeaseV1` and drives the helper's sealed lab, tunnel and diagnostic probes in the Linux
 runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports
@@ -115,8 +115,7 @@ design.
 - A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
-- Journal compaction, the complete lifecycle smoke test (Step 31D.3e), key rotation and authority
-  migration, the multi-runtime collision and recovery tests (Step 31E), and any release of a hold
+- Journal compaction, key rotation and authority migration, the multi-runtime collision and recovery tests (Step 31E), and any release of a hold
   whose helper restarted or whose generation the backend contradicted.
 - Open from earlier steps: egress-IP leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
@@ -1529,9 +1528,9 @@ attempt, `Disconnect`, `DeleteLab`, a reconnect, a failed verification or cleanu
 shutdown drop it, and an expired one is no longer fresh. A candidate is not a global reservation, an
 active lease or permission to send traffic: two helpers can still produce candidates for the same
 address, and the shared authority decides durable ownership afterwards (Steps 31B to 31D.1).
-helperctl sends it since Step 31D.1 and the controller's `reserve-egress` since Step 31D.2, and it
-has not run on a real tunnel; the tests use real Unix sockets and signatures with the fake kernel
-backend.
+helperctl sends it since Step 31D.1 and the controller's `reserve-egress` since Step 31D.2; the tests
+use real Unix sockets and signatures with the fake kernel backend, and it ran on a real tunnel in
+Step 31D.3e (`docs/DEV-LINUX-VM.md`).
 
 ### Shared atomic reservation registry (Step 31B)
 
@@ -1581,8 +1580,8 @@ one `ReserveEgressCandidateV1` for exactly that attempt and validates the receip
 original generation-bound probe; the durable registry then arbitrates ownership across all
 participating runtimes. An unsuccessful global reservation restores no evidence and authorizes no
 application traffic, and candidate freshness and generation identity must be checked again before
-any later lease preparation. Step 31D.2 runs the workflow from `reserve-egress`; the new helperctl
-is not installed in a runtime, and nothing of it has run on a real tunnel.
+any later lease preparation. Step 31D.2 runs the workflow from `reserve-egress`; it first ran on a
+real tunnel in Step 31D.3e.
 
 ### Provisioned reservation authority (Step 31D.2)
 
@@ -1597,8 +1596,8 @@ persists an exclusive IPv4 hold. The helper-local candidate may expire or be dro
 is committed, and no CLI receipt authorizes application networking: a future signed lease
 preparation must revalidate the candidate against the exact tunnel generation, evidence nonce,
 reservation nonce and authority. Holds are not released on expiry, controller exit or tunnel
-teardown, so the command has not been run against a real tunnel: until the release command (Step
-31D.3d.2) a test hold would stay forever. On Windows on 2026-11-25, `-approve init-reservations` provisioned the
+teardown, so the command was not run against a real tunnel until the release command (Step
+31D.3d.2) existed; Step 31D.3e ran it on Lima. On Windows on 2026-11-25, `-approve init-reservations` provisioned the
 per-user authority in `%APPDATA%\EgressLab` with the controller's DPAPI key (the fingerprint pinned
 for the trusted WSL2 runtime), `list-reservations` listed it with no reservations, the 91-byte V2
 journal header carried the SHA-256 of the 210-byte marker, no temporary file was left, and a second
@@ -1644,9 +1643,8 @@ the deadline about to pass; the original evidence deadline is never extended. It
 only when it matches both the signed capability and the durable hold, the evidence timestamps and
 the key fingerprint included. A prepared lease receipt activates no application traffic. A lost,
 rejected or late preparation answers `EGRESS_PREPARATION_UNCONFIRMED`: the durable hold stays,
-nothing is retried or released, and the helper may or may not hold a prepared lease. The new
-helperctl is not installed in a runtime, and the command has not run against a real tunnel, because
-a test hold could not be released yet (Step 31D.3d.2).
+nothing is retried or released, and the helper may or may not hold a prepared lease. The command
+first ran against a real tunnel in Step 31D.3e, once a hold could be released.
 
 ### Generation-bound revocation (Step 31D.3c)
 
@@ -1698,7 +1696,7 @@ contract, not that the runtime carries no other traffic. No durable reservation 
 step, no controller signs a revocation yet (Step 31D.3d.1 pins the eighth golden vector and the
 durable release, Step 31D.3d.2 adds the signer and the command), and application networking stays
 disabled. It is tested with real signatures and a
-real Unix socket on Lima, against the fake kernel backend; no kernel ran it.
+real Unix socket on Lima, against the fake kernel backend, and ran on the real kernel in Step 31D.3e.
 
 ### Durable release admission (Step 31D.3d.1)
 
@@ -1745,5 +1743,5 @@ A release written but not reported is `STATE_UNCERTAIN` as well, also when the r
 (the CLI ignores `SIGPIPE`, so the write fails instead of ending the process), and is never rolled
 back. The
 durable authority never accepts a retirement receipt supplied from outside, and nothing is retried,
-forced or replaced by an unsigned `disconnect`. The command has not run against a real tunnel yet
-(Step 31D.3e); application networking stays disabled.
+forced or replaced by an unsigned `disconnect`. Step 31D.3e ran it against the real tunnel on Lima
+(`docs/DEV-LINUX-VM.md`, "Reservation lifecycle smoke test"); application networking stays disabled.

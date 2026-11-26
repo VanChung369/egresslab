@@ -458,7 +458,7 @@ egresslab-controller-lab -approve probe-egress-multi <profile ID> <namespace>
 
 ### Candidate reservation testing (Step 31A)
 
-`ReserveEgressCandidateV1` is tested with the helper's fake managed tunnel backend, real signatures and real Unix sockets; no client sends it yet, and it does not run against a real tunnel. Development stays in the Windows repository; the Linux-only tests run against the same mounted repository through `wsl.exe`, as a normal user (never root). From PowerShell, in `services\network-agent`:
+`ReserveEgressCandidateV1` is tested with the helper's fake managed tunnel backend, real signatures and real Unix sockets. In Step 31A no client sent it yet; since Step 31D.2 `reserve-egress` does, and Step 31D.3e ran it against the real tunnel on Lima (see "Reservation lifecycle smoke test"). Development stays in the Windows repository; the Linux-only tests run against the same mounted repository through `wsl.exe`, as a normal user (never root). From PowerShell, in `services\network-agent`:
 
 ```powershell
 go test -count=1 -run 'TestCandidate' ./internal/helperauth ./internal/helperipc
@@ -467,6 +467,32 @@ wsl -d Ubuntu-22.04 -- bash -lc 'cd /mnt/d/project/egresslab/services/network-ag
 ```
 
 `-race` needs cgo and a C compiler, which a plain Windows Go install lacks; run it in WSL. Use `bash -lc` there: `wsl --exec go` does not find a Go installed with snap, because `/snap/bin` is set only by a login shell. Do not hand-craft reservation capabilities or open application networking.
+
+### Reservation lifecycle smoke test (Step 31D.3e)
+
+Environment:
+- Host OS: macOS 15.3.2 (arm64), Go 1.25.1, controller key in the login Keychain, default data directory (`~/Library/Application Support/EgressLab`, which is also the authority root).
+- Lima version: 2.3.0 (`vz`, instance `egresslab`).
+- Guest OS and architecture: Ubuntu 24.04.5 LTS, Linux 6.8.0-147-generic, aarch64; iproute2 6.1.0, nftables 1.0.9, wireguard-tools 1.0.20210914.
+- Tested commit: `70c7a6e`, controller and the four Linux binaries built from it (hashes compared after install); VM clock within 0.13 s of the host.
+
+The Mac had no controller key and no authority, so `init-key` and `-approve init-reservations` provisioned them; a profile was created through the controller API, the runtime was trusted, and the WireGuard config was staged through `/dev/shm` and shredded. The helper ran with `-enable-multi-probe` (`PermitMultiProbeV2`, the provisioned ident.me pin) for the whole test and was stopped only once `list-reservations` showed no active hold: the append-only journal keeps every hold and release, and a hold whose helper stopped could not be released.
+
+Results:
+- Initial reservation and preparation: `-approve reserve-egress` succeeded on its first attempt in 3.8 s (no first-probe worker failure this time): state `prepared`, the reservation on generation A, the prepared lease bound to the same reservation and authority, public IPv4 195.242.214.134, `activation_allowed: false`, `network_ready: false`.
+- Duplicate reservation refusal: a second `reserve-egress` answered `EGRESS_RESERVATION_HELD` in the preflight, before anything was signed; the generation and the lab were unchanged, and the helper logged nothing.
+- Durable ownership inspection: a new CLI process listed exactly that hold (journal 897 bytes).
+- Generation retirement and release: after waiting 65 s (the candidate had expired 47 s earlier), `-approve release-egress` released it in 0.5 s; the receipt named generation A and the original helper epoch, with `generation_retired: true`, `state: released`, `network_ready: false`.
+- Kernel cleanup verification: before the release the namespace had no process, `wg0`, a 27 s old handshake, no `egresslab_probe4` set or permit, the sealed output chain and the underlay table; afterwards `verify-lab` said `sealed`, the namespace held only `lo`, the underlay table was gone (only `ip nat` remained in the root namespace), and `list-reservations` was empty (journal 1771 bytes).
+- Reconnection with a new generation: `connect-tunnel` with the same profile, namespace and stage got generation B, different from A.
+- Reservation after release: `reserve-egress` succeeded in 3.4 s with a new reservation ID, the same profile, runtime, helper epoch and namespace, and generation B.
+- Same-address reuse: yes, the provider returned 195.242.214.134 again and it was reserved again.
+- Stale release refusal: `release-egress` of the first reservation answered `EGRESS_RESERVATION_NOT_FOUND` before any helper call; reservation B and generation B stayed.
+- Final recovery scan: after releasing B (journal 3450 bytes: two holds, two releases) and `delete-lab`, `egresslab-lab-recover` found no EgressLab resources.
+
+Afterwards the helper was stopped with SIGTERM and the vault stage revoked. The controller key, the authority marker and journal, `state.json`, `runtimes.json` and `/etc/egresslab/helper-auth.pub` were kept: the journal keeps the history, and the authority has no key rotation. Not run on WSL2 or native Linux, and with one runtime only.
+
+Application networking remained disabled.
 
 ## Security Notes
 
@@ -494,4 +520,4 @@ If DNS returns several addresses, do not take the first one blindly. The provide
 
 ## Next Milestone
 
-Step 31D.3e: the complete reservation lifecycle smoke test on Lima (reserve, prepare, revoke and release against the real tunnel), on top of the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded); a coded worker failure reason in the helper log would explain it. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.
+Step 31E: concurrent collision and recovery tests across runtimes, on top of the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded); a coded worker failure reason in the helper log would explain it. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.
