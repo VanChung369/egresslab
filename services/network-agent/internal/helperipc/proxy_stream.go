@@ -95,12 +95,17 @@ type proxyPlane struct {
 
 	changed chan struct{}
 
-	mu       sync.Mutex
-	closing  bool
-	err      error // why the keeper stopped
-	queue    []*proxyRequest
-	inflight int
-	streams  map[*proxyStreamState]struct{}
+	mu        sync.Mutex
+	closing   bool
+	err       error // why the plane was closed
+	keeperErr error // why its keeper stopped; it outranks err
+	queue     []*proxyRequest
+	inflight  int
+	streams   map[*proxyStreamState]struct{}
+
+	closeOnce  sync.Once
+	closed     chan struct{} // every stream's sockets are closed
+	keeperDone chan struct{}
 }
 
 func newProxyPlane(parent context.Context, profileID, reservationID string) *proxyPlane {
@@ -114,6 +119,8 @@ func newProxyPlane(parent context.Context, profileID, reservationID string) *pro
 		cancel:        cancel,
 		changed:       make(chan struct{}, 1),
 		streams:       make(map[*proxyStreamState]struct{}),
+		closed:        make(chan struct{}),
+		keeperDone:    make(chan struct{}),
 	}
 }
 
@@ -231,7 +238,8 @@ func (p *proxyPlane) retireIfIdle() bool {
 	return true
 }
 
-// close ends every stream; waiting requests see the plane's context end.
+// close ends every stream; waiting requests see the plane's context end. Every caller returns only
+// once the sockets are closed, whichever caller closed them.
 func (p *proxyPlane) close(err error) {
 	p.mu.Lock()
 	p.closing = true
@@ -239,27 +247,60 @@ func (p *proxyPlane) close(err error) {
 	if p.err == nil {
 		p.err = err
 	}
-
-	streams := p.streams
-	p.streams = make(map[*proxyStreamState]struct{})
 	p.mu.Unlock()
 
-	p.cancel()
+	p.closeOnce.Do(func() {
+		p.cancel()
 
-	for s := range streams {
-		s.close()
-	}
+		p.mu.Lock()
+		streams := p.streams
+		p.streams = make(map[*proxyStreamState]struct{})
+		p.mu.Unlock()
+
+		for s := range streams {
+			s.close()
+		}
+
+		close(p.closed)
+	})
+
+	<-p.closed
 }
 
-func (p *proxyPlane) failure() error {
+// stopKeeper ends the plane with the keeper's own reason.
+func (p *proxyPlane) stopKeeper(err error) {
+	p.mu.Lock()
+	p.keeperErr = err
+	p.mu.Unlock()
+
+	p.close(err)
+	close(p.keeperDone)
+}
+
+// failure reports why the plane ended. A window that failed closes the plane through the lifecycle
+// before its keeper can tell why, and the tunnel's cleanup may take long, so it waits for the keeper
+// until deadline; a keeper still stopping then is an uncertain outcome.
+func (p *proxyPlane) failure(deadline time.Time) error {
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+
+	select {
+	case <-p.keeperDone:
+	case <-timer.C:
+		return errLabUncertain
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.err == nil {
+	switch {
+	case p.keeperErr != nil:
+		return p.keeperErr
+	case p.err != nil:
+		return p.err
+	default:
 		return errLabBusy
 	}
-
-	return p.err
 }
 
 // closeProxyStreamsLocked closes every stream before anything retires its generation. The caller
@@ -283,36 +324,31 @@ func (l *LabLifecycle) lockPreemptingProxyStreams(ctx context.Context, authorize
 		return false
 	}
 
-	if plane := l.proxyPlane.Load(); plane != nil {
-		plane.cancel()
-	}
+	// No new plane starts while the release waits, and one that started just before is cancelled too.
+	l.proxyHalt.Add(1)
+	defer l.proxyHalt.Add(-1)
 
-	return l.lockWithin(ctx, proxyPreemptWait)
-}
-
-// lockWithin waits up to wait for the lifecycle lock without preempting anything.
-func (l *LabLifecycle) lockWithin(ctx context.Context, wait time.Duration) bool {
-	if l.mu.TryLock() {
-		return true
-	}
-
-	deadline := time.NewTimer(wait)
+	deadline := time.NewTimer(proxyPreemptWait)
 	defer deadline.Stop()
 
 	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
 
 	for {
+		if plane := l.proxyPlane.Load(); plane != nil {
+			plane.cancel()
+		}
+
+		if l.mu.TryLock() {
+			return true
+		}
+
 		select {
 		case <-ctx.Done():
 			return false
 		case <-deadline.C:
 			return false
 		case <-tick.C:
-		}
-
-		if l.mu.TryLock() {
-			return true
 		}
 	}
 }

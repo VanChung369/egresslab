@@ -384,6 +384,21 @@ func (v *Verifier) Check(capability SignedCapability, expected Intent) error {
 	return v.verify(capability, expected, false)
 }
 
+// ClockSafe reads the clock as an authorization does: false once a wall-clock rollback has been
+// observed. Work authorized earlier checks it again before it acts.
+func (v *Verifier) ClockSafe() bool {
+	if v == nil {
+		return false
+	}
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	_, err := v.checkedTimeLocked()
+
+	return err == nil
+}
+
 func (v *Verifier) verify(capability SignedCapability, expected Intent, consume bool) error {
 	if v == nil ||
 		validateIntent(expected) != nil ||

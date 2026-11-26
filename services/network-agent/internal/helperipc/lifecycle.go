@@ -153,6 +153,7 @@ type LabLifecycle struct {
 	// a release can cancel them. proxyCount counts admitted and waiting streams.
 	proxyPlane atomic.Pointer[proxyPlane]
 	proxyCount atomic.Int32
+	proxyHalt  atomic.Int32 // releases waiting to preempt the streams
 }
 
 func NewLabLifecycle(backend LabBackend) *LabLifecycle {

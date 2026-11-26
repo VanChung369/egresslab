@@ -63,7 +63,8 @@ type proxyDialRecorder struct {
 	namespace   string
 	destination netip.AddrPort
 	err         error
-	hang        bool // never answers before its context ends
+	hang        bool   // never answers before its context ends
+	target      string // instead of the echo server
 }
 
 func (r *proxyDialRecorder) dialer(echo *proxyEcho) ProxyDialer {
@@ -71,8 +72,12 @@ func (r *proxyDialRecorder) dialer(echo *proxyEcho) ProxyDialer {
 		r.mu.Lock()
 		r.calls++
 		r.namespace, r.destination = namespace, destination
-		err, hang := r.err, r.hang
+		err, hang, addr := r.err, r.hang, r.target
 		r.mu.Unlock()
+
+		if addr == "" {
+			addr = echo.addr
+		}
 
 		if hang {
 			<-ctx.Done()
@@ -83,7 +88,7 @@ func (r *proxyDialRecorder) dialer(echo *proxyEcho) ProxyDialer {
 			return nil, err
 		}
 
-		c, err := net.Dial("tcp4", echo.addr)
+		c, err := net.Dial("tcp4", addr)
 		if err != nil {
 			return nil, err
 		}
@@ -452,6 +457,205 @@ func TestProxyStreamFirstRequestsJoin(t *testing.T) {
 
 	if time.Since(started) > 4*time.Second {
 		t.Fatalf("a first request waited %v", time.Since(started))
+	}
+}
+
+// silentServer reads until its client half-closes, then neither sends nor closes.
+func silentServer(t *testing.T) string {
+	t.Helper()
+
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop); _ = l.Close() })
+
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+
+			go func() {
+				defer c.Close()
+				_, _ = io.Copy(io.Discard, c)
+				<-stop
+			}()
+		}
+	}()
+
+	return l.Addr().String()
+}
+
+func (p *proxyFixture) waitStreams(t *testing.T, want int32) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for p.f.labs.proxyCount.Load() != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d streams, want %d", p.f.labs.proxyCount.Load(), want)
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A half-closed client keeps its download; a client that is gone frees its slot, though the
+// destination neither sends nor closes.
+func TestProxyStreamPeerHangup(t *testing.T) {
+	p := newProxyFixture(t, true)
+	p.dials.target = silentServer(t)
+
+	conn, _, err := p.open(t, p.capability(t, testProxyDestination))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	if err := conn.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(time.Second)
+
+	if n := p.f.labs.proxyCount.Load(); n != 1 {
+		t.Fatalf("a half-close ended the stream: %d", n)
+	}
+
+	_ = conn.Close()
+	p.waitStreams(t, 0)
+}
+
+// deafServer accepts and then neither reads nor sends.
+func deafServer(t *testing.T) string {
+	t.Helper()
+
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop); _ = l.Close() })
+
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+
+			go func() {
+				defer c.Close()
+				<-stop
+			}()
+		}
+	}()
+
+	return l.Addr().String()
+}
+
+// A client that leaves while its upload is stuck on a destination that no longer reads still frees
+// its slot.
+func TestProxyStreamHangupDuringUpload(t *testing.T) {
+	p := newProxyFixture(t, true)
+	p.dials.target = deafServer(t)
+
+	conn, _, err := p.open(t, p.capability(t, testProxyDestination))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	go func() {
+		chunk := make([]byte, 64*1024)
+
+		for range 512 {
+			if _, err := conn.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+
+	time.Sleep(time.Second)
+	_ = conn.Close()
+
+	p.waitStreams(t, 0)
+}
+
+// While an authorized release waits for the lock, a new request is refused at once instead of
+// competing for the lock and starting a plane whose window would outlast the release's wait.
+func TestProxyStreamRefusedWhileReleaseWaits(t *testing.T) {
+	p := newProxyFixture(t, true)
+	p.windows.window = 8 * time.Second
+
+	conn, _, err := p.open(t, p.capability(t, testProxyDestination))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	next := p.capability(t, testProxyDestination)
+	plane := p.f.labs.proxyPlane.Load()
+
+	// Between two windows, as a monitor check would.
+	p.f.labs.mu.Lock()
+
+	locked := make(chan bool, 1)
+	go func() { locked <- p.f.labs.lockPreemptingProxyStreams(context.Background(), true) }()
+
+	select {
+	case <-plane.ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the release did not cancel the streams")
+	}
+
+	started := time.Now()
+
+	if _, _, err := p.open(t, next); ErrorCode(err) != CodeLabBusy || time.Since(started) > time.Second {
+		t.Fatalf("a request competed with the release: %v after %v", err, time.Since(started))
+	}
+
+	p.f.labs.mu.Unlock()
+
+	if !<-locked {
+		t.Fatal("the release did not get the lock")
+	}
+
+	p.f.labs.mu.Unlock()
+}
+
+// A plane that ended starts no dial, even before its cancellation reached the dial's context.
+func TestProxyDialAfterPlaneEnded(t *testing.T) {
+	plane := newProxyPlane(context.Background(), "profile", "reservation")
+	plane.cancel()
+
+	dialed := false
+	dial := func(context.Context, string, netip.AddrPort) (*net.TCPConn, error) {
+		dialed = true
+		return nil, errors.New("dialed")
+	}
+
+	r := &proxyRequest{ctx: context.Background(), req: Request{Intent: &helperauth.Intent{}},
+		result: make(chan proxyAdmission, 1)}
+
+	if a := dialProxyStream(context.Background(), time.Now().Add(time.Second), plane, r, testProxyDestination,
+		dial); a.err == nil || dialed {
+		t.Fatal("an ended plane dialed")
+	}
+}
+
+// A waiting request learns why the window failed, not an authorization refusal.
+func TestProxyStreamWindowFailure(t *testing.T) {
+	p := newProxyFixture(t, true)
+	p.windows.err = errors.New("gate failed")
+
+	if _, _, err := p.open(t, p.capability(t, testProxyDestination)); ErrorCode(err) != CodeLabFaulted {
+		t.Fatalf("unexpected result: %v", err)
 	}
 }
 

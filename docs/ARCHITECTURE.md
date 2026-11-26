@@ -201,9 +201,9 @@ Application networking remains disabled until the supervised proxy runtime is im
 A loopback SOCKS5 endpoint on the controller host carries IPv4 TCP streams through the prepared generation of one reservation. Every CONNECT is a signed `OpenProxyStreamV1` for one destination, accepted only by the helper epoch that prepared the reservation and only while its monitoring health is fresh.
 
 - An unprivileged worker opens the socket inside the lab namespace and hands it to the helper (`SCM_RIGHTS`); the socket keeps the namespace's routes, firewall and the proxy user's UID, and no process stays in the namespace.
-- The helper renews kernel-timed traffic windows for the stream, through the monitor's check interval; the gate closes only while the monitor probes. Faults, releases and new tunnels close the stream first.
+- The helper renews kernel-timed traffic windows for its streams, through the monitor's check interval; the gate closes only while the monitor probes. Faults, releases and new tunnels close the streams first.
 - The SOCKS parser never dials; the runtime transport is framed in both directions, since the launcher carries no close signal of its own.
-- One stream per runtime, IPv4 only, no domain names (no safe resolver yet).
+- IPv4 only, no domain names (no safe resolver yet). One stream per runtime in Step 34; several since Step 35.
 
 Application networking as a whole remains disabled.
 
@@ -213,6 +213,7 @@ An explicitly approved `serve-endpoint` command resolves a stored SOCKS5 endpoin
 
 - The listener is pinned to the approved reservation and tunnel generation. For each new CONNECT, minting looks the pinned hold up in the journal once, under the shared read lock, after the helper call; the stored endpoint, the runtime binding and trust are then re-read, and the capability is sent only if they still agree. A released hold, or a later one for the same profile, is refused until a new approved start.
 - Independent endpoints serve different trusted runtimes under one shared reservation authority.
+- Several streams per runtime: the streams of a prepared reservation share one keeper in the helper, which chains the traffic windows while any stream or request remains and admits and dials new streams inside the open window, so a new stream never interrupts the others. At most eight per helper, admitted and waiting together; the listener serves as many clients at once.
 - The HTTP API cannot activate privileged networking: endpoint definitions stay separate from live network authorization, and its start still answers 409.
 
 ### Windows / macOS / Linux

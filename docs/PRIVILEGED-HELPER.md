@@ -1496,7 +1496,7 @@ or permit, the sealed ruleset remained, and `verify-lab` answered `tunnel_config
 | 32 | Continuous egress monitoring of a prepared generation |
 | 33 | Kernel-timed traffic gate (kill-switch) |
 | 34 | SOCKS5 proxy runtime |
-| 35 | Endpoint-to-runtime integration |
+| 35 | Endpoint-to-runtime integration; several streams per runtime |
 
 The states stay separate; none of them is an `active` flag:
 
@@ -1511,7 +1511,7 @@ The states stay separate; none of them is an `active` flag:
 | Monitoring health | a prepared generation's address verified again by the helper (Step 32), for 60 s at most; renews no evidence or authorization |
 | Traffic window | a kernel-timed gate for the proxy user of the prepared generation (Step 33), 10 s at most, on fresh monitoring health; opened again and again by a proxy stream (Step 34) |
 | Proxy stream | one signed IPv4 TCP stream through those windows (Step 34); it ends with the prepared lease |
-| Active lease | the right to use the address as a whole (later steps): more than one stream, DNS and the desktop's control |
+| Active lease | the right to use the address as a whole (later steps): DNS and the desktop's control |
 | Network ready | application traffic allowed |
 
 `EgressCandidateRegistry` and the lease registry of the earlier lab CLIs are not that authority:
@@ -1970,26 +1970,47 @@ runs in the foreground until interrupted and changes no global readiness.
   and no process stays in the namespace, which the monitor's probe requires. A failed dial is a
   SOCKS error with a coded reason in the helper log; it never faults the tunnel, and the helper never
   dials by itself.
-- **Traffic windows.** The stream dials inside a traffic window, then keeps reopening windows (6 s
-  each, 250 ms apart) for as long as it lives, giving way to a due monitor check; the gate closes only
-  while the monitor probes. One stream per helper: a new authorized stream replaces the previous one.
-  A stream lives at most 30 minutes, and ends with the prepared lease: monitoring faults,
-  disconnects, releases and new tunnels close it before anything else.
-- **Preemption.** A stream holds the lifecycle lock through its windows almost continuously. A
-  release or a new stream whose capability already checks out (verified, not yet consumed) cancels
-  the stream and waits up to 5 s for the lock; an unauthorized request never interrupts it. Other
-  operations (verify, disconnect, delete) answer `LAB_BUSY` while a stream runs: stop `serve-socks`
-  or release first.
+- **Traffic windows.** Since Step 35 the streams of the prepared reservation share one keeper. It
+  chains windows (6 s each, 250 ms apart) while any stream or request remains, giving way to a due
+  monitor check; the gate closes only while the monitor probes. A request's capability is consumed
+  on arrival, so the wait for a window cannot outlast it; inside an open window the keeper binds
+  each queued request to the prepared lease (and refuses it if a wall-clock rollback has been seen
+  since) and dials, but only while at least 6 s of the window are
+  left (later requests wait for the next window), and every dial ends 2 s before the window's
+  deadline, so its worker's cleanup never runs the window past it; a late dial may hold the window
+  past 6 s, never past its deadline. A stream's own failure never fails the window. The last stream
+  to end ends the windows. At most eight streams per helper, admitted and waiting together: each
+  keeps one of the helper's sixteen connections, and a ninth is refused with `LAB_BUSY` before its
+  capability is consumed. A client that half-closes keeps its download; while the download runs, one
+  whose connection to the helper is gone entirely (the socket reports a hang-up) ends its stream even
+  if the destination neither sends nor reads, so a stale stream never holds a slot. (Step 34 had one stream per helper, and a new one replaced it.) A stream lives at most
+  30 minutes, and ends with the prepared lease: monitoring faults, disconnects, releases and new
+  tunnels close every stream before anything else.
+- **Preemption.** The keeper holds the lifecycle lock through its windows almost continuously. A new
+  stream joins the running keeper without the lock; with no keeper it waits up to 5 s for the lock (a
+  monitor check), and a first request that meanwhile finds another first request's keeper joins it.
+  A release whose capability already checks out (verified, not yet consumed) cancels the keeper and
+  every stream and waits up to 5 s for the lock; meanwhile new requests are refused with `LAB_BUSY`
+  at once and a plane started just before is cancelled again, so no new stream can take the lock
+  first. An unauthorized request never interrupts them. The
+  windows open on the helper's own context, so cancelling the streams never fails a window or faults
+  the tunnel, and no request is admitted or dialed once they are cancelled. Every caller that closes
+  the streams returns only after all their sockets are closed. A request still waiting when a window
+  fails gets that failure's code (`LAB_FAULTED`, `STATE_UNCERTAIN`), not an authorization refusal;
+  if the tunnel's cleanup is still running when its wait ends, `STATE_UNCERTAIN`.
+  Other operations (verify, disconnect, delete) answer `LAB_BUSY` while streams run:
+  stop the listener or release first.
 - **Transport.** The controller runs `egresslab-helperctl proxy-stream` through the runtime launcher.
   The capability travels in a frame on stdin, the helper's acknowledgement comes back as a frame,
   then both directions are framed (data, FIN, and END from the guest), because neither a killed
   launcher nor a closed stdout crosses `limactl shell`; EOF on stdin closes the stream. A destination
   FIN does not end the upload. A pending request whose client left never dials.
-- **Client handling.** One client is served at a time; up to eight more wait up to 10 s for its slot,
-  the rest are refused. After the destination finished, an idle client is closed after 30 s.
+- **Client handling.** Up to eight clients are served at once (one at a time in Step 34), as many
+  as the helper admits; up to eight more wait up to 10 s for a slot, the rest are refused. After the
+  destination finished, an idle client is closed after 30 s.
 
-Limits of this prototype: one stream per runtime; traffic pauses for a few seconds at each monitor
-check; WSL2 and native Linux have not run it. Application networking as a whole stays disabled.
+Limits of this prototype: traffic pauses for a few seconds at each monitor check; WSL2 and native
+Linux have not run it. Application networking as a whole stays disabled.
 
 ### Endpoint-to-runtime integration (Step 35)
 
@@ -2003,5 +2024,10 @@ minting looks the pinned hold up once, under the journal's shared read lock: a r
 later hold for the profile on the same helper (the binding is then unchanged), is not found
 (`reservation is not held`). Then the endpoint, the binding and the trust record are re-read, and
 the capability is sent only if they still agree (`endpoint binding changed` otherwise: another
-helper epoch, namespace, runtime or key). Both are refused until a new approved start. The controller and the helper did not change
-otherwise. The HTTP API only stores endpoint definitions; its start still answers 409.
+helper epoch, namespace, runtime or key). Both are refused until a new approved start. The HTTP API
+only stores endpoint definitions; its start still answers 409.
+
+Several streams per runtime (Step 35): the helper's streams share one keeper and its traffic windows
+(see Traffic windows and Preemption above), and `serve-socks` and `serve-endpoint` serve up to eight
+clients at once, each CONNECT with its own capability. The IPC protocol, helperctl and the workers
+did not change.

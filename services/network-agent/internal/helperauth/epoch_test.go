@@ -132,11 +132,19 @@ func TestClockRollbackCannotRestoreConsumedNonce(t *testing.T) {
 		t.Fatal("expired nonce was not pruned")
 	}
 
+	if !verifier.ClockSafe() {
+		t.Fatal("a forward clock reported unsafe")
+	}
+
 	// By the wall clock, the original capability now looks valid again.
 	verifier.now = func() time.Time { return now.Add(5 * time.Second) }
 
 	if err := verifier.VerifyAndConsume(token, connectIntent()); !errors.Is(err, ErrAuthorizationClockUnsafe) {
 		t.Fatalf("clock rollback accepted: %v", err)
+	}
+
+	if verifier.ClockSafe() {
+		t.Fatal("a rolled-back clock reported safe")
 	}
 
 	// Moving the clock forward does not clear the fault. A new helper epoch is required.
