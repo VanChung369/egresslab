@@ -412,6 +412,12 @@ func (f *fakeRuntime) ReserveEgressCandidate(
 
 	f.lastCandidate = &receipt
 
+	if f.revocationRecords == nil {
+		f.revocationRecords = make(map[string]*fakeRetirementRecord)
+	}
+
+	f.revocationRecords[receipt.ReservationNonce] = &fakeRetirementRecord{candidate: receipt}
+
 	return receipt, nil
 }
 
@@ -449,7 +455,100 @@ func (f *fakeRuntime) PrepareEgressLease(
 		return control.LabPreparedLeaseInfo{}, labruntime.Errorf(labruntime.CodeAuthorizationDenied, "preparation binding mismatch")
 	}
 
+	record := f.revocationRecords[candidate.ReservationNonce]
+	if record == nil || record.retired {
+		return control.LabPreparedLeaseInfo{}, labruntime.Errorf(labruntime.CodeStateUncertain,
+			"candidate retirement record unavailable")
+	}
+
+	record.binding = capability.Claims.Intent
 	f.lastCandidate = nil
+
+	return receipt, nil
+}
+
+// fakeRetirementRecord mirrors the helper's retirement record (Step 31D.3c) for the CLI tests.
+type fakeRetirementRecord struct {
+	candidate control.LabCandidateInfo
+	binding   control.LabIntent
+	retired   bool
+}
+
+// retireTunnel is a confirmed cleanup: the tunnel slot is free and its generation retired.
+func (f *fakeRuntime) retireTunnel(profileID string) {
+	for _, record := range f.revocationRecords {
+		if record.candidate.ProfileID == profileID && record.candidate.TunnelGeneration == f.tunnelGeneration {
+			record.retired = true
+		}
+	}
+
+	f.tunnelProfile, f.tunnelGeneration = "", ""
+	f.lastCandidate, f.lastMultiProbe = nil, nil
+}
+
+// RevokeEgressLease simulates the helper's revocation for the CLI tests; the real signatures,
+// generation drift and kernel cleanup are the network agent's (Step 31D.3c tests).
+func (f *fakeRuntime) RevokeEgressLease(
+	_ context.Context,
+	profileID, namespace string,
+	capability control.LabCapability,
+) (control.LabRevokedLeaseInfo, error) {
+	f.calls = append(f.calls, control.LabRevokeEgressLeaseOp)
+	f.revokeCalls = append(f.revokeCalls, capability)
+
+	if f.revokeErr != nil {
+		return control.LabRevokedLeaseInfo{}, f.revokeErr
+	}
+
+	intent := capability.Claims.Intent
+
+	record := f.revocationRecords[intent.ReservationNonce]
+	if record == nil {
+		return control.LabRevokedLeaseInfo{}, labruntime.Errorf(labruntime.CodeAuthorizationDenied, "candidate record unavailable")
+	}
+
+	candidate := record.candidate
+
+	binding, err := control.NewLabPrepareEgressLeaseIntent(candidate.ProfileID, candidate.Namespace, candidate.IdentIPv4,
+		candidate.TunnelGeneration, candidate.EvidenceNonce, candidate.ReservationNonce, candidate.RuntimeID,
+		intent.AuthorityID, intent.ReservationID, candidate.IPv4.String())
+	if err != nil {
+		return control.LabRevokedLeaseInfo{}, err
+	}
+
+	expected, err := control.NewLabRevokeEgressLeaseIntent(binding)
+	if err != nil || expected != intent || profileID != candidate.ProfileID || namespace != candidate.Namespace ||
+		candidate.HelperID != f.info.HelperID || candidate.RuntimeID != f.info.RuntimeID ||
+		candidate.PublicKeySHA256 != f.info.PublicKeySHA256 ||
+		(record.binding != (control.LabIntent{}) && record.binding != binding) {
+		return control.LabRevokedLeaseInfo{}, labruntime.Errorf(labruntime.CodeAuthorizationDenied, "revocation binding mismatch")
+	}
+
+	receipt := control.LabRevokedLeaseInfo{
+		Intent:            expected,
+		HelperID:          f.info.HelperID,
+		PublicKeySHA256:   f.info.PublicKeySHA256,
+		RevocationNonce:   capability.Claims.Nonce,
+		GenerationRetired: true,
+	}
+
+	if !receipt.MatchesCapability(capability) {
+		return control.LabRevokedLeaseInfo{}, labruntime.Errorf(labruntime.CodeAuthorizationDenied, "invalid revocation nonce")
+	}
+
+	if !record.retired {
+		if f.tunnelProfile != profileID || f.labs[profileID] != namespace || f.tunnelGeneration != candidate.TunnelGeneration {
+			return control.LabRevokedLeaseInfo{}, labruntime.Errorf(labruntime.CodeStateUncertain, "incorrect tunnel generation")
+		}
+
+		f.retireTunnel(profileID)
+	}
+
+	record.binding = binding
+
+	if f.loseRevocationReceipt {
+		return control.LabRevokedLeaseInfo{}, labruntime.Errorf(labruntime.CodeStateUncertain, "revocation response lost")
+	}
 
 	return receipt, nil
 }

@@ -1,8 +1,8 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 31D.3d.1 — durable release journal.** A controller CLI signs `CreateLab`,
-`ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`, `ReserveEgressCandidateV1` and
-`PrepareEgressLeaseV1` and drives the helper's sealed lab, tunnel and diagnostic probes in the Linux
+Status: **Step 31D.3d.2 — controller release integration.** A controller CLI signs `CreateLab`,
+`ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`, `ReserveEgressCandidateV1`,
+`PrepareEgressLeaseV1` and `RevokeEgressLeaseV1` and drives the helper's sealed lab, tunnel and diagnostic probes in the Linux
 runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports
 inside its labs, resolves a hostname endpoint once and pins it, checks the peer state and the IPv4
 addresses, MTU, rules and routes the kernel reports against the staged config, and stays the source
@@ -18,8 +18,8 @@ reservation as a sealed, generation-bound prepared lease (`PrepareEgressLeaseV1`
 `reserve-egress` signs right after the durable commit, in the same operation; neither a reservation
 nor a prepared lease is an active lease. The helper keeps a bounded retirement record of every
 candidate for its epoch and answers a signed `RevokeEgressLeaseV1` with a receipt only once that
-candidate's tunnel generation is confirmed removed. The authority's journal can record a release of
-a hold backed by such a receipt, but no command signs a revocation or releases a hold yet. Windows (WSL2), Linux and macOS (Lima, Keychain) are
+candidate's tunnel generation is confirmed removed; `release-egress` signs that revocation for a
+durable hold and records the release in the authority's journal. Windows (WSL2), Linux and macOS (Lima, Keychain) are
 verified end to end, except that the multi-source probe has run on WSL2 and Lima only, not on native
 Linux. No lease or proxy traffic exists; the sections from "Typed operations only" on are partly
 design.
@@ -84,8 +84,8 @@ design.
   (`prepare-egress-lease`) and the controller's `reserve-egress` send it (Step 31D.3b).
 - `RevokeEgressLeaseV1` in the same mode: the signed retirement of one candidate's tunnel
   generation, prepared or not, expired or not, with a receipt only after a confirmed cleanup (see
-  "Generation-bound revocation"); helperctl sends it (`revoke-egress-lease`), the controller not
-  yet (Step 31D.3d.2).
+  "Generation-bound revocation"); helperctl sends it (`revoke-egress-lease`), and so does the
+  controller's `release-egress` (Step 31D.3d.2).
 - Controller side (see "Controller and runtimes"):
   - an Ed25519 signer for `CreateLab`, `ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`,
     `ReserveEgressCandidateV1` and `PrepareEgressLeaseV1` (the `PermitMultiProbeV1` signer stays for
@@ -99,8 +99,8 @@ design.
   - signing-key storage per platform;
   - runtime providers that reach the helper from each host OS;
   - `egresslab-controller-lab`, which needs `-approve` for every mutation, including
-    `connect-tunnel`, `disconnect`, `init-reservations` and `reserve-egress` (`list-reservations` is
-    read-only);
+    `connect-tunnel`, `disconnect`, `init-reservations`, `reserve-egress` and `release-egress`
+    (`list-reservations` is read-only);
   - trusted runtimes and persistent profile-to-runtime bindings (see "Trusted runtimes and
     profile bindings").
 - A recovery gate and a kernel compatibility check before `CreateLab` (see "Sealed lab
@@ -115,10 +115,9 @@ design.
 - A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
-- The controller's revocation transport, signer orchestration and release command (Step 31D.3d.2),
-  journal compaction, the complete
-  lifecycle smoke test (Step 31D.3e), key rotation and authority migration, and the multi-runtime
-  collision and recovery tests (Step 31E); no command releases a reservation hold yet.
+- Journal compaction, the complete lifecycle smoke test (Step 31D.3e), key rotation and authority
+  migration, the multi-runtime collision and recovery tests (Step 31E), and any release of a hold
+  whose helper restarted or whose generation the backend contradicted.
 - Open from earlier steps: egress-IP leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
 - DNS for applications in the lab (a session resolver, with filesystem and resolver IPC
@@ -1719,4 +1718,32 @@ someone imports. A timeout, an expired or missing prepared lease or a lost recei
 release; a helper restart loses its retirement records, so a hold of an earlier epoch cannot be
 released yet. The journal keeps every reservation ID and owner after their release. The eighth golden
 vector pins the revocation's bytes in both modules. The revocation transport, its signing
-orchestration and the release command come in Step 31D.3d.2; no hold is released yet.
+orchestration and the release command came in Step 31D.3d.2.
+
+### Controller revocation transport (Step 31D.3d.2)
+
+`egresslab-controller-lab -approve release-egress RESERVATION_ID` takes nothing but the ID: the
+profile, namespace, runtime, helper epoch, generation, address and nonces come from the durable hold
+itself, so the wrong tunnel cannot be named. The controller reads the hold, requires the runtime the
+provider selects to be the hold's trusted runtime, asks that runtime for `HelperInfo` and requires
+the hold's own helper epoch and key, and only then signs one `RevokeEgressLeaseV1`, which helperctl
+receives on stdin (`revoke-egress-lease PROFILE_ID NAMESPACE`). A different helper epoch, after a
+restart, cannot attest the retirement of the original generation, and is refused before anything is
+signed. Release needs no fresh probe evidence and no surviving profile, binding or lab: a lab
+already disconnected or deleted is no obstacle, since the helper kept its retirement record.
+
+The receipt must match the reservation, authority, generation, helper epoch, runtime and revocation
+nonce of the capability sent, and the controller checks it before it opens the journal, then again
+under the journal's lock (see "Durable release admission"). A lost, uncertain or mismatched receipt
+keeps the hold (`EGRESS_REVOCATION_UNCONFIRMED`, with the controller's own advice to keep the helper
+running, since a restart loses its retirement record, and the helper's when it sent one); a newly
+approved `release-egress` signs a fresh capability, and the helper confirms the
+retirement it already recorded without another cleanup. A busy journal, or a hold released by
+another process meanwhile, after a confirmed retirement keeps the hold too
+(`EGRESS_RELEASE_UNCONFIRMED`), and a failed write is `STATE_UNCERTAIN`: inspect `list-reservations`.
+A release written but not reported is `STATE_UNCERTAIN` as well, also when the reader closed stdout
+(the CLI ignores `SIGPIPE`, so the write fails instead of ending the process), and is never rolled
+back. The
+durable authority never accepts a retirement receipt supplied from outside, and nothing is retried,
+forced or replaced by an unsigned `disconnect`. The command has not run against a real tunnel yet
+(Step 31D.3e); application networking stays disabled.

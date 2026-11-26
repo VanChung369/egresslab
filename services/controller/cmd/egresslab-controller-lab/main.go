@@ -1,8 +1,8 @@
 // Command egresslab-controller-lab signs CreateLab, ConnectTunnel, PermitProbe, PermitMultiProbeV2,
-// ReserveEgressCandidateV1 and PrepareEgressLeaseV1 capabilities with the controller key and drives
-// the helper's sealed lab, tunnel and diagnostic probes through the host's Linux runtime (WSL2, Lima
-// or native Linux).
-// It also provisions and uses the per-user egress reservation authority. The helper stays the
+// ReserveEgressCandidateV1, PrepareEgressLeaseV1 and RevokeEgressLeaseV1 capabilities with the
+// controller key and drives the helper's sealed lab, tunnel and diagnostic probes through the host's
+// Linux runtime (WSL2, Lima or native Linux).
+// It also provisions and uses the per-user egress reservation authority, and releases its holds. The helper stays the
 // source of truth for lab and tunnel state. It is a lab tool: -approve is an operator confirmation,
 // not user authentication.
 package main
@@ -37,7 +37,7 @@ type deps struct {
 var approvalRequired = map[string]bool{
 	"create-lab": true, "delete-lab": true, "trust-runtime": true, "untrust-runtime": true, "unbind-profile": true,
 	"connect-tunnel": true, "disconnect": true, "probe-egress": true, "probe-egress-multi": true,
-	"init-reservations": true, "reserve-egress": true,
+	"init-reservations": true, "reserve-egress": true, "release-egress": true,
 }
 
 func main() {
@@ -63,6 +63,8 @@ type session struct {
 }
 
 func run(argv []string, d deps) error {
+	reportBrokenStdout()
+
 	flags := flag.NewFlagSet("egresslab-controller-lab", flag.ContinueOnError)
 	kind := flags.String("runtime", "auto", "network runtime: auto, wsl, lima, native or remote")
 	distro := flags.String("wsl-distro", "", "WSL distribution (required to trust a WSL runtime)")
@@ -180,17 +182,24 @@ func run(argv []string, d deps) error {
 		}{LabMultiProbeInfo: observation}
 	case "reserve-egress":
 		result, err = s.reserveEgress(args[1], args[2])
+	case "release-egress":
+		result, err = s.releaseEgress(args[1])
 	}
 
 	if err != nil {
 		return err
 	}
 
-	// The hold is durable before its receipt is written; a lost receipt must not read as a refusal.
+	// The hold, or its release, is durable before the receipt is written; a lost receipt must not
+	// read as a refusal, and nothing is rolled back.
 	if err := s.print(result); err != nil {
-		if args[0] == "reserve-egress" {
+		switch args[0] {
+		case "reserve-egress":
 			return labruntime.Errorf(labruntime.CodeStateUncertain,
 				"reservation committed but its receipt was not written; run list-reservations: "+err.Error())
+		case "release-egress":
+			return labruntime.Errorf(labruntime.CodeStateUncertain,
+				"release committed but its receipt was not written; run list-reservations: "+err.Error())
 		}
 
 		return err
@@ -216,6 +225,10 @@ func checkArgs(args []string) error {
 	case "verify-lab", "delete-lab", "disconnect", "probe-egress", "probe-egress-multi", "multi-probe-target",
 		"reserve-egress":
 		if len(args) == 3 && control.ValidProfileID(args[1]) && control.ValidLabNamespace(args[2]) {
+			return nil
+		}
+	case "release-egress":
+		if len(args) == 2 && control.ValidReservationID(args[1]) {
 			return nil
 		}
 	case "connect-tunnel":
@@ -615,5 +628,6 @@ func usageError() error {
 		"  create-lab PROFILE_ID | verify-lab PROFILE_ID NAMESPACE | delete-lab PROFILE_ID NAMESPACE\n" +
 		"  stage-info PROFILE_ID | connect-tunnel PROFILE_ID NAMESPACE STAGE_ID | disconnect PROFILE_ID NAMESPACE\n" +
 		"  probe-egress PROFILE_ID NAMESPACE | probe-egress-multi PROFILE_ID NAMESPACE\n" +
-		"  multi-probe-target PROFILE_ID NAMESPACE | reserve-egress PROFILE_ID NAMESPACE")
+		"  multi-probe-target PROFILE_ID NAMESPACE | reserve-egress PROFILE_ID NAMESPACE\n" +
+		"  release-egress RESERVATION_ID")
 }

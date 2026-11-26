@@ -38,7 +38,24 @@ const (
 	codeReservationExpired           = "EGRESS_CANDIDATE_EXPIRED"
 	codeReservationInvalid           = "INVALID_EGRESS_CANDIDATE"
 	codeLeasePreparationUnconfirmed  = "EGRESS_PREPARATION_UNCONFIRMED"
+
+	codeReservationNotFound           = "EGRESS_RESERVATION_NOT_FOUND"
+	codeReservationOwnerRetired       = "EGRESS_GENERATION_RETIRED"
+	codeReservationReleaseInvalid     = "INVALID_EGRESS_RELEASE"
+	codeLeaseRevocationUnconfirmed    = "EGRESS_REVOCATION_UNCONFIRMED"
+	codeReservationReleaseUnconfirmed = "EGRESS_RELEASE_UNCONFIRMED"
 )
+
+// reservationReleaseCommandResult is diagnostic: the released hold and the retirement behind it.
+type reservationReleaseCommandResult struct {
+	AuthorityID string `json:"authority_id"`
+
+	control.ReleasedEgressResult
+
+	State             string `json:"state"`
+	ActivationAllowed bool   `json:"activation_allowed"`
+	NetworkReady      bool   `json:"network_ready"`
+}
 
 // reservationCommandError maps the authority's errors to stable codes and keeps coded runtime and
 // helper errors. An uncertain or committed-expired outcome stays STATE_UNCERTAIN, never "expired":
@@ -56,6 +73,12 @@ func reservationCommandError(err error) error {
 		code = codeLeasePreparationUnconfirmed
 	case errors.Is(err, control.ErrReservationStateUncertain), errors.Is(err, control.ErrReservationCommittedExpired):
 		code = labruntime.CodeStateUncertain
+	// After the revocation was sent: list-reservations tells whether the hold stays, and a newly
+	// approved release can confirm the retirement.
+	case errors.Is(err, control.ErrReservationReleaseUnconfirmed):
+		code = codeReservationReleaseUnconfirmed
+	case errors.Is(err, control.ErrLeaseRevocationUnconfirmed):
+		code = codeLeaseRevocationUnconfirmed
 	case errors.Is(err, control.ErrReservationBusy):
 		code = codeReservationBusy
 	case errors.Is(err, control.ErrReservationAuthorityExists):
@@ -64,6 +87,13 @@ func reservationCommandError(err error) error {
 		code = codeReservationAuthorityMismatch
 	case errors.Is(err, control.ErrReservationJournalCorrupt):
 		code = codeReservationJournalCorrupt
+	// After corruption: a damaged journal names a retired owner or a missing hold as its cause.
+	case errors.Is(err, control.ErrReservationReleaseInvalid):
+		code = codeReservationReleaseInvalid
+	case errors.Is(err, control.ErrReservationNotFound):
+		code = codeReservationNotFound
+	case errors.Is(err, control.ErrReservationOwnerRetired):
+		code = codeReservationOwnerRetired
 	case errors.Is(err, control.ErrReservationIPCollision):
 		code = codeReservationCollision
 	case errors.Is(err, control.ErrReservationOwnerHeld), errors.Is(err, control.ErrReservationProfileHeld):
@@ -226,5 +256,37 @@ func (s *session) reserveEgress(profileID, namespace string) (reservationCommand
 		Reservation:   result.Reservation,
 		PreparedLease: result.PreparedLease,
 		State:         "prepared",
+	}, nil
+}
+
+// releaseEgress revokes the exact generation of one durable hold and releases its address. It needs
+// the runtime that holds it, selected by the provider, and that runtime's original helper epoch, but
+// no surviving profile, binding or lab: a deleted lab is no proof of retirement, nor an obstacle.
+func (s *session) releaseEgress(reservationID string) (reservationReleaseCommandResult, error) {
+	authority, keys, err := s.openReservationAuthority()
+	if err != nil {
+		return reservationReleaseCommandResult{}, err
+	}
+
+	state, err := control.LoadRuntimeState(s.dataDir)
+	if err != nil {
+		return reservationReleaseCommandResult{}, err
+	}
+
+	rt, exists := state.RuntimeFor(s.provider.Kind(), s.provider.Target())
+	if !exists {
+		return reservationReleaseCommandResult{}, labruntime.Errorf(labruntime.CodeRuntimeUntrusted,
+			"selected runtime is not trusted")
+	}
+
+	result, err := authority.ReleaseEgress(s.ctx, reservationID, s.provider.Transport(), keys, rt)
+	if err != nil {
+		return reservationReleaseCommandResult{}, reservationCommandError(err)
+	}
+
+	return reservationReleaseCommandResult{
+		AuthorityID:          authority.Info().ID,
+		ReleasedEgressResult: result,
+		State:                "released",
 	}, nil
 }

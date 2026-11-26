@@ -71,6 +71,11 @@ type HelperTransport interface {
 		profileID, namespace string,
 		capability control.LabCapability,
 	) (control.LabPreparedLeaseInfo, error)
+	RevokeEgressLease(
+		ctx context.Context,
+		profileID, namespace string,
+		capability control.LabCapability,
+	) (control.LabRevokedLeaseInfo, error)
 }
 
 type Options struct {

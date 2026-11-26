@@ -43,6 +43,7 @@ type helperResponse struct {
 	MultiProbeTarget *control.LabMultiProbeTarget  `json:"multi_probe_target,omitempty"`
 	Candidate        *control.LabCandidateInfo     `json:"candidate,omitempty"`
 	PreparedLease    *control.LabPreparedLeaseInfo `json:"prepared_lease,omitempty"`
+	RevokedLease     *control.LabRevokedLeaseInfo  `json:"revoked_lease,omitempty"`
 }
 
 type limitedBuffer struct {
@@ -136,7 +137,7 @@ func decodeStrict(data []byte) (helperResponse, error) {
 // Matched like encoding/json matches field names, case-insensitively.
 var metadataKeys = []string{
 	"helper_info", "lab", "labs", "stage", "probe", "multi_probe", "multi_probe_policy", "multi_probe_target",
-	"candidate", "prepared_lease",
+	"candidate", "prepared_lease", "revoked_lease",
 }
 
 func hasMetadataKey(data []byte) bool {
@@ -163,7 +164,7 @@ func decodeFailure(data []byte) (error, bool) {
 		resp.Version != 1 || resp.OK || resp.NetworkReady || resp.Error == "" ||
 		resp.Info != nil || resp.Lab != nil || resp.Labs != nil || resp.Stage != nil || resp.Probe != nil ||
 		resp.MultiProbe != nil || resp.MultiProbePolicy != nil || resp.MultiProbeTarget != nil ||
-		resp.Candidate != nil || resp.PreparedLease != nil {
+		resp.Candidate != nil || resp.PreparedLease != nil || resp.RevokedLease != nil {
 		return nil, false
 	}
 
@@ -244,10 +245,18 @@ func decodeResponse(data []byte, expected string) (helperResponse, error) {
 		return helperResponse{}, errors.New("invalid prepared lease metadata")
 	}
 
+	if (expected == control.LabRevokeEgressLeaseOp) != (resp.RevokedLease != nil) {
+		return helperResponse{}, errors.New("unexpected revoked lease metadata")
+	}
+
+	if resp.RevokedLease != nil && !resp.RevokedLease.Valid() {
+		return helperResponse{}, errors.New("invalid revoked lease metadata")
+	}
+
 	switch expected {
 	case "HelperInfo", "Ping", "StageInfo", "PermitProbe", control.LabMultiProbePolicyOp, control.LabMultiProbeOp,
 		control.LabMultiProbeV2Op, control.LabMultiProbeTargetOp, control.LabReserveEgressCandidateOp,
-		control.LabPrepareEgressLeaseOp:
+		control.LabPrepareEgressLeaseOp, control.LabRevokeEgressLeaseOp:
 		if resp.Lab != nil || resp.Labs != nil {
 			return helperResponse{}, errors.New("unexpected lab metadata")
 		}

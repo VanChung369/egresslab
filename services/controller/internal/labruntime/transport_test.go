@@ -388,6 +388,48 @@ func TestFakeHelperctl(t *testing.T) {
 
 		raw, _ := json.Marshal(receipt)
 		respond(control.LabPrepareEgressLeaseOp, extra+`,"prepared_lease":`+string(raw))
+	case "revoke-egress-lease":
+		var capability control.LabCapability
+		data, err := io.ReadAll(os.Stdin)
+		receipt := testRevokedLeaseReceipt(t)
+
+		if err != nil || len(args) != 3 || args[1] != testProfile || args[2] != testNamespace ||
+			json.Unmarshal(data, &capability) != nil || !receipt.MatchesCapability(capability) {
+			fail("invalid revocation request")
+		}
+
+		extra := ""
+
+		switch mode {
+		case "revoke-disabled":
+			failWith(CodeOperationDisabled, "operation not enabled")
+		case "revoke-denied":
+			failWith(CodeAuthorizationDenied, "authorization denied")
+		case "revoke-uncertain":
+			failWith(CodeStateUncertain, "revocation not confirmed; keep the helper running")
+		case "revoke-missing":
+			respond(control.LabRevokeEgressLeaseOp, "")
+		case "revoke-not-retired":
+			receipt.GenerationRetired = false
+		case "revoke-wrong-nonce":
+			receipt.RevocationNonce = strings.Repeat("f", 32)
+		case "revoke-wrong-generation":
+			receipt.Intent.TunnelGeneration = "tunnelgen_ffffffffffffffffffffffffffffffff"
+		case "revoke-with-lab":
+			extra = lab(control.LabSealed)
+		case "revoke-failure-with-null":
+			fmt.Printf(`{"version":1,"operation":"","ok":false,"network_ready":false,"code":%q,"error":"x","revoked_lease":null}`,
+				CodeStateUncertain)
+			os.Exit(1)
+		case "revoke-failure-with-receipt":
+			raw, _ := json.Marshal(receipt)
+			fmt.Printf(`{"version":1,"operation":"","ok":false,"network_ready":false,"code":%q,"error":"x","revoked_lease":%s}`,
+				CodeAuthorizationDenied, raw)
+			os.Exit(1)
+		}
+
+		raw, _ := json.Marshal(receipt)
+		respond(control.LabRevokeEgressLeaseOp, extra+`,"revoked_lease":`+string(raw))
 	case "disconnect":
 		if mode == "faulted" {
 			respond("Disconnect", lab(control.LabFaulted))
@@ -426,6 +468,31 @@ func testPreparedLeaseReceipt() control.LabPreparedLeaseInfo {
 		AuthorityID:      "authority_0123456789abcdef0123456789abcdef",
 		ReservationID:    "reservation_0123456789abcdef0123456789abcdef",
 		PreparationNonce: "aabbccddeeff00112233445566778899",
+	}
+}
+
+func testRevokedLeaseReceipt(t *testing.T) control.LabRevokedLeaseInfo {
+	t.Helper()
+
+	p := testPreparedLeaseReceipt()
+
+	binding, err := control.NewLabPrepareEgressLeaseIntent(p.ProfileID, p.Namespace, p.IdentIPv4, p.TunnelGeneration,
+		p.EvidenceNonce, p.ReservationNonce, p.RuntimeID, p.AuthorityID, p.ReservationID, p.IPv4.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	intent, err := control.NewLabRevokeEgressLeaseIntent(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return control.LabRevokedLeaseInfo{
+		Intent:            intent,
+		HelperID:          p.HelperID,
+		PublicKeySHA256:   p.PublicKeySHA256,
+		RevocationNonce:   "0123456789abcdef0123456789abcdef",
+		GenerationRetired: true,
 	}
 }
 
@@ -1215,5 +1282,130 @@ func TestPreparedLeaseResponseMetadata(t *testing.T) {
 	unsolicited, _ := json.Marshal(helperResponse{Version: 1, Operation: "Ping", OK: true, PreparedLease: &p})
 	if _, err := decodeResponse(unsolicited, "Ping"); err == nil {
 		t.Fatal("unsolicited prepared lease accepted")
+	}
+}
+
+func TestRevokedLeaseTransport(t *testing.T) {
+	receipt := testRevokedLeaseReceipt(t)
+	if !receipt.Valid() {
+		t.Fatal("invalid revocation receipt fixture")
+	}
+
+	capability := control.LabCapability{Claims: control.LabClaims{Version: 1, Intent: receipt.Intent,
+		HelperID: receipt.HelperID, Nonce: receipt.RevocationNonce}}
+
+	ctx := context.Background()
+	fake := &fakeLauncher{mode: "ok"}
+	tr := newCommandProvider(fake).Transport()
+
+	result, err := tr.RevokeEgressLease(ctx, testProfile, testNamespace, capability)
+	if err != nil || !result.MatchesCapability(capability) || len(fake.calls) != 1 {
+		t.Fatalf("valid revocation failed: %+v %v", result, err)
+	}
+
+	if strings.Join(fake.calls[0], " ") != "revoke-egress-lease "+testProfile+" "+testNamespace {
+		t.Fatalf("unexpected helperctl arguments: %v", fake.calls[0])
+	}
+
+	for name, call := range map[string]func() error{
+		"preparation capability": func() error {
+			wrong := capability
+			wrong.Claims.Intent.Operation = control.LabPrepareEgressLeaseOp
+			_, err := tr.RevokeEgressLease(ctx, testProfile, testNamespace, wrong)
+			return err
+		},
+		"another profile": func() error {
+			_, err := tr.RevokeEgressLease(ctx, "profile_ffffffffffffffff", testNamespace, capability)
+			return err
+		},
+		"another namespace": func() error {
+			_, err := tr.RevokeEgressLease(ctx, testProfile, "egresslab-lab-ffffffffffffffff", capability)
+			return err
+		},
+	} {
+		if err := call(); ErrorCode(err) != CodeInvalidRequest || len(fake.calls) != 1 {
+			t.Fatalf("%s reached the launcher: %v", name, err)
+		}
+	}
+
+	for mode, want := range map[string]string{
+		"revoke-disabled":             CodeOperationDisabled,
+		"revoke-denied":               CodeAuthorizationDenied,
+		"revoke-uncertain":            CodeStateUncertain,
+		"revoke-missing":              CodeStateUncertain,
+		"revoke-not-retired":          CodeStateUncertain,
+		"revoke-wrong-nonce":          CodeStateUncertain,
+		"revoke-wrong-generation":     CodeStateUncertain,
+		"revoke-with-lab":             CodeStateUncertain,
+		"revoke-failure-with-null":    CodeStateUncertain,
+		"revoke-failure-with-receipt": CodeStateUncertain,
+		"crash":                       CodeStateUncertain,
+	} {
+		t.Run(mode, func(t *testing.T) {
+			f := &fakeLauncher{mode: mode}
+
+			result, err := newCommandProvider(f).Transport().RevokeEgressLease(ctx, testProfile, testNamespace, capability)
+			if err == nil || ErrorCode(err) != want || result.Valid() || len(f.calls) != 1 {
+				t.Fatalf("invalid response accepted or misclassified: %+v %v", result, err)
+			}
+		})
+	}
+
+	// The helper's own recovery advice survives the mapping to STATE_UNCERTAIN.
+	_, err = newCommandProvider(&fakeLauncher{mode: "revoke-uncertain"}).Transport().RevokeEgressLease(ctx, testProfile,
+		testNamespace, capability)
+	if !strings.Contains(err.Error(), "keep the helper running") {
+		t.Fatalf("the helper's advice was dropped: %v", err)
+	}
+}
+
+func TestRevokedLeaseResponseMetadata(t *testing.T) {
+	receipt := testRevokedLeaseReceipt(t)
+	valid := helperResponse{Version: 1, Operation: control.LabRevokeEgressLeaseOp, OK: true, RevokedLease: &receipt}
+
+	raw, _ := json.Marshal(valid)
+	if _, err := decodeResponse(raw, control.LabRevokeEgressLeaseOp); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, mutate := range map[string]func(*helperResponse){
+		"network ready":   func(r *helperResponse) { r.NetworkReady = true },
+		"missing receipt": func(r *helperResponse) { r.RevokedLease = nil },
+		"not retired": func(r *helperResponse) {
+			bad := receipt
+			bad.GenerationRetired = false
+			r.RevokedLease = &bad
+		},
+		"extra preparation": func(r *helperResponse) {
+			p := testPreparedLeaseReceipt()
+			r.PreparedLease = &p
+		},
+		"with lab": func(r *helperResponse) {
+			r.Lab = &control.LabInfo{ProfileID: testProfile, Namespace: testNamespace, State: control.LabSealed}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := valid
+			mutate(&bad)
+
+			raw, _ := json.Marshal(bad)
+			if _, err := decodeResponse(raw, control.LabRevokeEgressLeaseOp); err == nil {
+				t.Fatal("invalid revocation metadata accepted")
+			}
+		})
+	}
+
+	unsolicited := valid
+	unsolicited.Operation = "Ping"
+
+	raw, _ = json.Marshal(unsolicited)
+	if _, err := decodeResponse(raw, "Ping"); err == nil {
+		t.Fatal("unsolicited retirement receipt accepted")
+	}
+
+	failure := `{"version":1,"operation":"","ok":false,"network_ready":false,"code":"AUTHORIZATION_DENIED","error":"x",` +
+		`"Revoked_Lease":null}`
+	if _, ok := decodeFailure([]byte(failure)); ok {
+		t.Fatal("failure document with a receipt key accepted")
 	}
 }

@@ -93,6 +93,11 @@ type fakeRuntime struct {
 	lastCandidate *control.LabCandidateInfo
 	prepareCalls  []control.LabCapability
 	prepareErr    error
+
+	revocationRecords     map[string]*fakeRetirementRecord
+	revokeCalls           []control.LabCapability
+	revokeErr             error
+	loseRevocationReceipt bool
 }
 
 func (f *fakeRuntime) HelperInfo(context.Context) (control.LabHelperInfo, error) {
@@ -144,7 +149,7 @@ func (f *fakeRuntime) lab(op, p, n, state string) (control.LabInfo, error) {
 		delete(f.labs, p)
 
 		if f.tunnelProfile == p {
-			f.tunnelProfile, f.tunnelGeneration = "", ""
+			f.retireTunnel(p)
 		}
 
 		if f.afterChange != nil {
@@ -202,7 +207,7 @@ func (f *fakeRuntime) ConnectTunnel(_ context.Context, profileID, namespace, sta
 func (f *fakeRuntime) Disconnect(_ context.Context, p, n string) (control.LabInfo, error) {
 	lab, err := f.lab("Disconnect", p, n, control.LabSealed)
 	if err == nil && f.tunnelProfile == p {
-		f.tunnelProfile, f.tunnelGeneration = "", ""
+		f.retireTunnel(p)
 	}
 
 	return lab, err

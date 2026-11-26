@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -375,5 +376,211 @@ func TestControllerPreparationUnconfirmed(t *testing.T) {
 
 	if len(a.prepareCalls) != 1 {
 		t.Fatal("the existing hold triggered another preparation")
+	}
+}
+
+func setupReleaseCLI(t *testing.T) (*harness, *fakeRuntime, string) {
+	t.Helper()
+
+	h := newHarness(t)
+	h.now = time.Now
+
+	h.mustRun("-approve", "init-reservations")
+	rt := setupReservationLab(t, h, "Ubuntu-A", h.profile.ID)
+	h.mustRun("-approve", "-wsl-distro", "Ubuntu-A", "reserve-egress", h.profile.ID, labNS)
+
+	listed := reservationList(t, h)
+	if len(listed.Reservations) != 1 {
+		t.Fatal("reservation fixture missing")
+	}
+
+	return h, rt, listed.Reservations[0].ID
+}
+
+func releaseCommand(distro, id string) []string {
+	return []string{"-approve", "-wsl-distro", distro, "release-egress", id}
+}
+
+func TestControllerReleaseEgress(t *testing.T) {
+	h, a, id := setupReleaseCLI(t)
+
+	if err := h.run("-wsl-distro", "Ubuntu-A", "release-egress", id); err == nil ||
+		!strings.Contains(err.Error(), "requires -approve") {
+		t.Fatal("an unapproved release accepted")
+	}
+
+	before := h.keys.signs
+	h.mustRun(releaseCommand("Ubuntu-A", id)...)
+
+	var result reservationReleaseCommandResult
+	if err := json.Unmarshal(h.out.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+
+	if result.State != "released" || result.Reservation.ID != id || !result.RevokedLease.GenerationRetired ||
+		result.RevokedLease.Intent.ReservationID != id || result.ReleasedAt.IsZero() || result.ActivationAllowed ||
+		result.NetworkReady || len(a.revokeCalls) != 1 || h.keys.signs != before+1 || a.tunnelProfile != "" ||
+		a.tunnelGeneration != "" || !strings.Contains(h.out.String(), `"network_ready": false`) {
+		t.Fatalf("incorrect CLI release result: %s", h.out.String())
+	}
+
+	if listed := reservationList(t, h); len(listed.Reservations) != 0 {
+		t.Fatal("a released reservation remains held")
+	}
+
+	h.requireCode(codeReservationNotFound, releaseCommand("Ubuntu-A", id)...)
+
+	if len(a.revokeCalls) != 1 {
+		t.Fatal("an old release reached the helper again")
+	}
+}
+
+func TestControllerReleaseWrongEpoch(t *testing.T) {
+	h, a, id := setupReleaseCLI(t)
+	before := h.keys.signs
+
+	// A helper restart: the same runtime, another epoch.
+	a.info.HelperID = "helper_ffffffffffffffffffffffffffffffff"
+
+	h.requireCode(codeReservationReleaseInvalid, releaseCommand("Ubuntu-A", id)...)
+
+	if len(a.revokeCalls) != 0 || h.keys.signs != before {
+		t.Fatal("a foreign helper epoch received authorization")
+	}
+
+	if listed := reservationList(t, h); len(listed.Reservations) != 1 {
+		t.Fatal("a helper restart released ownership")
+	}
+}
+
+// The helper retired the generation, but its receipt was lost: the hold stays, and a newly approved
+// release confirms the retirement with a new capability.
+func TestControllerReleaseLostRevocationReceipt(t *testing.T) {
+	h, a, id := setupReleaseCLI(t)
+
+	a.loseRevocationReceipt = true
+	h.requireCode(codeLeaseRevocationUnconfirmed, releaseCommand("Ubuntu-A", id)...)
+
+	if a.tunnelGeneration != "" || len(a.revokeCalls) != 1 {
+		t.Fatal("incorrect simulated retirement")
+	}
+
+	if listed := reservationList(t, h); len(listed.Reservations) != 1 {
+		t.Fatal("a lost retirement receipt released ownership")
+	}
+
+	firstNonce := a.revokeCalls[0].Claims.Nonce
+	a.loseRevocationReceipt = false
+
+	h.mustRun(releaseCommand("Ubuntu-A", id)...)
+
+	if len(a.revokeCalls) != 2 || a.revokeCalls[1].Claims.Nonce == firstNonce {
+		t.Fatal("the confirmation reused old authorization")
+	}
+
+	if listed := reservationList(t, h); len(listed.Reservations) != 0 {
+		t.Fatal("a confirmed retirement was not released")
+	}
+}
+
+func TestControllerReleaseLostOutput(t *testing.T) {
+	h, _, id := setupReleaseCLI(t)
+
+	h.stdout = failingWriter{}
+	h.requireCode(labruntime.CodeStateUncertain, releaseCommand("Ubuntu-A", id)...)
+	h.stdout = nil
+
+	if listed := reservationList(t, h); len(listed.Reservations) != 0 {
+		t.Fatal("a committed release was rolled back")
+	}
+}
+
+// A lab that is already gone is no obstacle: the helper kept the retirement record.
+func TestControllerReleaseAfterCleanup(t *testing.T) {
+	for name, cleanup := range map[string][][]string{
+		"disconnect": {{"-approve", "-wsl-distro", "Ubuntu-A", "disconnect", "", labNS}},
+		"delete and unbind": {
+			{"-approve", "-wsl-distro", "Ubuntu-A", "delete-lab", "", labNS},
+			{"-approve", "-wsl-distro", "Ubuntu-A", "unbind-profile", ""},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, a, id := setupReleaseCLI(t)
+
+			for _, args := range cleanup {
+				args = slices.Clone(args)
+				args[slices.Index(args, "")] = h.profile.ID
+				h.mustRun(args...)
+			}
+
+			if a.tunnelGeneration != "" {
+				t.Fatal("the cleanup left the tunnel")
+			}
+
+			h.mustRun(releaseCommand("Ubuntu-A", id)...)
+
+			if listed := reservationList(t, h); len(listed.Reservations) != 0 || len(a.revokeCalls) != 1 {
+				t.Fatal("a retired generation of a removed lab was not released")
+			}
+		})
+	}
+}
+
+func TestControllerReleaseWrongRuntime(t *testing.T) {
+	h, a, id := setupReleaseCLI(t)
+	b := h.runtimes["Ubuntu-B"]
+
+	h.mustRun("-approve", "-wsl-distro", "Ubuntu-B", "trust-runtime")
+
+	calls, signs := len(b.calls), h.keys.signs
+
+	h.requireCode(codeReservationReleaseInvalid, releaseCommand("Ubuntu-B", id)...)
+	h.requireCode(labruntime.CodeRuntimeUntrusted, releaseCommand("Ubuntu-C", id)...)
+
+	if len(b.calls) != calls || len(a.revokeCalls) != 0 || h.keys.signs != signs {
+		t.Fatal("another runtime was contacted or signed for")
+	}
+
+	if listed := reservationList(t, h); len(listed.Reservations) != 1 {
+		t.Fatal("a refused release lost ownership")
+	}
+}
+
+func TestControllerReleaseArguments(t *testing.T) {
+	h := newHarness(t)
+
+	for _, args := range [][]string{
+		{"-approve", "release-egress"},
+		{"-approve", "release-egress", "reservation_1"},
+		{"-approve", "release-egress", "8.8.4.4"},
+		{"-approve", "release-egress", "reservation_0123456789abcdef0123456789abcdef", "extra"},
+	} {
+		if err := h.run(args...); err == nil || !strings.Contains(err.Error(), "usage") {
+			t.Fatalf("invalid arguments accepted: %v: %v", args, err)
+		}
+	}
+
+	if h.reached != 0 {
+		t.Fatal("invalid arguments reached a runtime")
+	}
+}
+
+// After the retirement, an uncertain write outranks every other cause, and a refusal of the commit
+// is not a refusal of the revocation.
+func TestReleaseErrorCodes(t *testing.T) {
+	for want, err := range map[string]error{
+		labruntime.CodeStateUncertain: errors.Join(control.ErrReservationReleaseUnconfirmed,
+			control.ErrReservationStateUncertain),
+		codeReservationReleaseUnconfirmed: errors.Join(control.ErrReservationReleaseUnconfirmed, control.ErrReservationBusy),
+		codeLeaseRevocationUnconfirmed: errors.Join(control.ErrLeaseRevocationUnconfirmed,
+			control.ErrReservationReleaseInvalid),
+		codeReservationReleaseInvalid: control.ErrReservationReleaseInvalid,
+		codeReservationNotFound:       control.ErrReservationNotFound,
+		codeReservationOwnerRetired:   control.ErrReservationOwnerRetired,
+		codeReservationJournalCorrupt: errors.Join(control.ErrReservationJournalCorrupt, control.ErrReservationOwnerRetired),
+	} {
+		if got := labruntime.ErrorCode(reservationCommandError(err)); got != want {
+			t.Errorf("%v: got %s, want %s", err, got, want)
+		}
 	}
 }

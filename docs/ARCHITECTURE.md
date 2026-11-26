@@ -93,7 +93,7 @@ The reservation authority lives in a fixed per-user configuration directory, `os
 - `init-reservations` and `list-reservations` are local and never reach a runtime. `-approve reserve-egress PROFILE_ID NAMESPACE` opens the authority first, then checks the trusted runtime, the profile's binding and the helper's configured lab, and runs one signed verification, candidate consumption and durable commit (Step 31D.1), followed since Step 31D.3b by the signed lease preparation; it takes no address, path or override arguments. Errors map to stable controller codes (`RESERVATION_AUTHORITY_UNAVAILABLE`, `RESERVATION_BUSY`, `EGRESS_IP_COLLISION`, `EGRESS_RESERVATION_HELD` and others); an uncertain or committed-expired outcome, or a receipt that could not be written after the commit, stays `STATE_UNCERTAIN`.
 - A reservation does not activate a lease, a proxy endpoint or application networking, and changes no profile, endpoint or binding; its output says `activation_allowed: false` and `network_ready: false`.
 
-The authority covers cooperating controller processes of one OS user that share the configuration root on a supported local filesystem; the deletion or rollback of all authority files is outside the guarantee boundary. No hold is released yet: a real `reserve-egress` keeps its address for good until the release command (Step 31D.3d.2). Key rotation and authority migration remain pending.
+The authority covers cooperating controller processes of one OS user that share the configuration root on a supported local filesystem; the deletion or rollback of all authority files is outside the guarantee boundary. No hold is released yet: a real `reserve-egress` keeps its address for good until `release-egress` (Step 31D.3d.2) releases it. Key rotation and authority migration remain pending.
 
 ### Prepared egress leases (Step 31D.3a)
 
@@ -113,7 +113,7 @@ A durable reservation is exclusive address ownership at the controller. A prepar
 - The helper's receipt must match the signed capability and the durable hold, the original evidence timestamps and the key fingerprint included, which the signed intent does not carry.
 - Any failure after the durable commit, whether signing, expiry, a refusal, a lost response or a mismatched receipt, keeps the address held and returns `EGRESS_PREPARATION_UNCONFIRMED`. That does not prove the helper made no prepared lease. Nothing is retried, released or activated.
 
-Application networking stays disabled. With no release command yet, a cooperating controller cannot free the hold between the journal check and the submission; release must also revoke outstanding preparations (Step 31D.3d, with the helper's revocation of Step 31D.3c).
+Application networking stays disabled. A cooperating controller can release the hold between the journal check and the submission only through `release-egress`, which revokes the generation first (Step 31D.3d.2): a preparation that arrives later finds no candidate.
 
 ### Generation retirement (Step 31D.3c)
 
@@ -134,7 +134,16 @@ The authority's append-only journal records releases as well as holds, on the sa
 - At most 1024 holds are active and 4096 reservations exist in a journal's history, with room reserved for one release frame per historical hold (at most 8192 frames): a full history refuses new holds, already in the preflight, never a release.
 - Existing V2 journals stay readable; a controller older than this step refuses a journal with a release record, so do not downgrade after the first release.
 
-Journal compaction, migrating an authority between hosts (a Windows authority is not a macOS one) and recovery after lost helper retirement records remain pending; the release command comes in Step 31D.3d.2, and no application traffic is allowed.
+Journal compaction, migrating an authority between hosts (a Windows authority is not a macOS one) and recovery after lost helper retirement records remain pending; the release command came in Step 31D.3d.2, and no application traffic is allowed.
+
+### Controller release integration (Step 31D.3d.2)
+
+`release-egress RESERVATION_ID` needs operator approval and nothing but the ID. The controller loads the exact current hold and requires its original trusted runtime, helper epoch and pinned controller key; it signs one `RevokeEgressLeaseV1` and validates the trusted runtime's retirement receipt, then commits the release, reloading the journal under its exclusive lock before appending and flushing the release frame. No lock is held while the helper cleans up.
+
+- Release depends on neither fresh probe evidence nor a surviving profile binding or lab.
+- An uncertain revocation keeps durable ownership; an uncertain persistence outcome requires inspecting the journal.
+- No automatic retry, forced release or fallback to an unsigned disconnect exists. A hold whose helper restarted, or whose generation the backend contradicted, cannot be released by any command yet.
+- Application networking remains disabled.
 
 ### Windows / macOS / Linux
 
