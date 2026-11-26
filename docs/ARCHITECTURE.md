@@ -175,6 +175,16 @@ An explicitly approved `recover-egress` operation may release an orphaned reserv
 
 Application networking remains disabled. The recovery ran on Lima through a real helper crash and guest reboot (`docs/DEV-LINUX-VM.md`).
 
+### Continuous egress monitoring (Step 32)
+
+The privileged helper periodically verifies the public IPv4 address of a prepared generation, about every 20 s, with the existing mandatory multi-source verification policy. A successful observation renews monitoring health, not the original preparation evidence.
+
+- Address drift, invalid observations, generation changes and verification failures fault the tunnel and invalidate its local authorization.
+- Durable ownership remains held until a confirmed release or reboot-bound recovery.
+- Monitoring runs independently of the controller CLI and stops with the helper lifecycle; while a check runs, other lifecycle operations answer `LAB_BUSY`.
+
+Application networking remains disabled. Polling does not guarantee instantaneous detection of public address changes.
+
 ### Windows / macOS / Linux
 
 The Go control plane can run natively on Windows and macOS.

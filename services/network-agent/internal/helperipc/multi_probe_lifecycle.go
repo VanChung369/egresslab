@@ -109,6 +109,16 @@ func validMultiProbeInfo(info *MultiProbeInfo, intent *helperauth.Intent) bool {
 		return false
 	}
 
+	return validMultiProbeObservation(info, intent)
+}
+
+// validMultiProbeObservation checks the attempt itself: timestamps, handshake, the two sources and
+// their consensus. It needs no capability, so the helper's own monitor reuses it.
+func validMultiProbeObservation(info *MultiProbeInfo, intent *helperauth.Intent) bool {
+	if info == nil || intent == nil || !helperauth.ValidPublicProbeIPv4(info.IPv4) {
+		return false
+	}
+
 	if info.StartedAt.Unix() <= 0 || info.FinishedAt.Unix() <= 0 || info.ObservedAt.Unix() <= 0 ||
 		info.HandshakeAt.Unix() <= 0 ||
 		info.FinishedAt.Before(info.StartedAt) ||

@@ -606,6 +606,32 @@ Limitations:
 
 Application networking remained disabled.
 
+### Continuous egress monitoring smoke test (Step 32)
+
+Environment:
+- Host OS: macOS 15.3.2 (arm64), Go 1.25.1; tested commit `195919a` with this step's changes.
+- Lima instance: `egresslab` (runtime A; Ubuntu 24.04.5, kernel 6.8.0-147-generic, arm64) with the first config staged for `profile_98e0aaeb5ef3564c`. Only the helper was replaced (sha256 `f7a25348…`, `-trimpath`, `CGO_ENABLED=0`); the controller CLI, helperctl and probe worker are the Step 31E.3 builds.
+
+Tests:
+- macOS: `go vet` (darwin, linux), `go test -race ./...`, `go test -race -count=50 -run '^TestEgressMonitor'` and `go build` (darwin, linux) passed.
+- Linux (the cross-compiled test binaries of `internal/agent` with its test data and sources, `internal/helperipc` and the helper, run as the normal user): passed, and `-count=50` of `^TestEgressMonitor` passed.
+- The monitor tests cover a renewal that leaves the original evidence, receipt and reservable state untouched; a busy lifecycle (no probe, no renewal); a changed address, a source disagreement, a failed probe, a wrong or drifted generation, a changed policy and expired health, each faulting the lab and dropping the prepared lease, with the generation retired (and `release-egress` confirmable) only after a confirmed, uncontradicted cleanup; an old monitor leaving a new generation alone; and a stalled log sink. Drift is covered only by the fake backend.
+
+Real run:
+- Before: no hold, no helper, and the stage revoked in Step 31E.3, so the config was staged again.
+- The helper started at 14:16:49 (guest time). `reserve-egress`, 10 s after `connect-tunnel`, prepared 195.242.214.134 as `reservation_94ec6ade…` on `tunnelgen_bf491829…` (14:17:17 to 14:17:21); the original evidence was observed at 14:17:19 and the prepared lease expired at 14:18:18.
+- Monitor: `Egress monitor healthy` at 14:17:44, 14:18:07, 14:18:31, 14:18:54, 14:19:18, 14:19:41 and 14:20:04, every 23 to 24 s, all with the same reservation, generation and address; four of them after the original evidence had expired. No monitor fault occurred.
+- At 14:19:41, right after a healthy line: `verify-lab` answered `tunnel_configured`, `list-reservations` showed the same reservation, address, generation and helper epoch, `multi-probe-target` the same generation, and `network_ready` stayed `false`.
+- At 14:20:04, right after a healthy line, `-approve release-egress` released it with a normal `RevokeEgressLeaseV1` receipt (`generation_retired: true`); no `LAB_BUSY` occurred. Journal: 17066 to 18747 bytes.
+- After: `delete-lab`, no labs, `egresslab-lab-recover` found nothing; no healthy line followed the release through 14:21:04 (more than two intervals); the helper then stopped cleanly and the vault stage was revoked.
+
+Limitations:
+- The monitor loop and its start and stop wiring are covered only by this run; drift only by the fake backend.
+- No probe failed, so the new worker reason codes were not observed.
+- While a monitor probe runs, release and disconnect answer `LAB_BUSY` and must be approved again; teardown has no priority.
+
+Application networking remained disabled.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
@@ -632,4 +658,4 @@ If DNS returns several addresses, do not take the first one blindly. The provide
 
 ## Next Milestone
 
-Step 32, on top of the reboot-bound reservation recovery verified on Lima through a real helper crash and guest reboot (Step 31E.3), the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting; in Step 31E.3 both reservations, 10 s after `connect-tunnel`, succeeded at the first attempt); a coded worker failure reason in the helper log would explain it. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.
+Step 33, on top of the continuous egress monitoring of prepared generations verified on Lima (Step 32), the reboot-bound reservation recovery verified on Lima through a real helper crash and guest reboot (Step 31E.3), the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting; in Step 31E.3 both reservations, 10 s after `connect-tunnel`, succeeded at the first attempt); since Step 32 a failed worker names a coded reason in the helper's error, but no failure has recurred since, so the cause is still unknown. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.

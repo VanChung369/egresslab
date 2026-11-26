@@ -41,3 +41,23 @@ func TestVerifyProbeBinary(t *testing.T) {
 		t.Fatalf("root-owned system binary refused: %v", err)
 	}
 }
+
+func TestManagedProbeFailureReason(t *testing.T) {
+	for stderr, want := range map[string]string{
+		"HTTPS probe failed\n":                      "HTTPS_REQUEST_FAILED",
+		"probe must not run as root\n":              "WORKER_PRIVILEGE_CHECK_FAILED",
+		"probe must have no supplementary groups\n": "WORKER_PRIVILEGE_CHECK_FAILED",
+		"unexpected probe privileges\n":             "WORKER_PRIVILEGE_CHECK_FAILED",
+		"incomplete probe privilege information\n":  "WORKER_PRIVILEGE_CHECK_FAILED",
+		"cannot inspect probe privileges\n":         "WORKER_STATUS_UNAVAILABLE",
+		"invalid probe arguments\n":                 "WORKER_INVALID_REQUEST",
+		"unknown probe source\n":                    "WORKER_INVALID_REQUEST",
+		"invalid probe destination\n":               "WORKER_INVALID_REQUEST",
+		"":                                          "WORKER_EXECUTION_FAILED",
+		"secret token=abc\n":                        "WORKER_EXECUTION_FAILED",
+	} {
+		if got := managedProbeFailureReason(stderr); got != want {
+			t.Fatalf("%q: got %s, want %s", stderr, got, want)
+		}
+	}
+}

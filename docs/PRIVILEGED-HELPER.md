@@ -1,6 +1,6 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 31E.3 — reboot-bound reservation recovery.** A controller CLI signs `CreateLab`,
+Status: **Step 32 — continuous egress monitoring.** A controller CLI signs `CreateLab`,
 `ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`, `ReserveEgressCandidateV1`,
 `PrepareEgressLeaseV1`, `RevokeEgressLeaseV1` and `RecoverRetiredGenerationV1` and drives the helper's sealed lab, tunnel and diagnostic probes in the Linux
 runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports
@@ -21,7 +21,9 @@ candidate for its epoch and answers a signed `RevokeEgressLeaseV1` with a receip
 candidate's tunnel generation is confirmed removed; `release-egress` signs that revocation for a
 durable hold and records the release in the authority's journal. After a helper crash and a reboot
 of the Linux guest, `recover-egress` has a later helper epoch attest, from its boot-bound witnesses,
-that the reboot ended the original generation (`RecoverRetiredGenerationV1`). Windows (WSL2), Linux and macOS (Lima, Keychain) are
+that the reboot ended the original generation (`RecoverRetiredGenerationV1`). While a lease is
+prepared, the helper re-verifies its generation's address with the same two sources about every 20 s;
+drift or a failed check faults and removes the tunnel, and the durable hold stays. Windows (WSL2), Linux and macOS (Lima, Keychain) are
 verified end to end, except that the multi-source probe has run on WSL2 and Lima only, not on native
 Linux. No lease or proxy traffic exists; the sections from "Typed operations only" on are partly
 design.
@@ -1484,6 +1486,7 @@ or permit, the sealed ruleset remained, and `verify-lab` answered `tunnel_config
 | 31E.2 | Concurrent reservation and release races |
 | 31E.3a | Persistent helper epoch witness |
 | 31E.3 | Reboot-bound reservation recovery |
+| 32 | Continuous egress monitoring of a prepared generation |
 
 The states stay separate; none of them is an `active` flag:
 
@@ -1495,7 +1498,8 @@ The states stay separate; none of them is an `active` flag:
 | Global reservation | an address held exclusively by the shared authority (Steps 31B, 31C) |
 | Prepared lease | a reservation bound by the helper to its tunnel generation (Step 31D.3a); not active |
 | Retired generation | a candidate's tunnel generation whose removal the helper confirmed (Step 31D.3c), for its epoch only |
-| Active lease | the right to use the address, which also needs continuous monitoring, the kill-switch and data-plane enforcement (later steps) |
+| Monitoring health | a prepared generation's address verified again by the helper (Step 32), for 60 s at most; renews no evidence or authorization |
+| Active lease | the right to use the address, which also needs the kill-switch and data-plane enforcement (later steps) on top of the monitoring |
 | Network ready | application traffic allowed |
 
 `EgressCandidateRegistry` and the lease registry of the earlier lab CLIs are not that authority:
@@ -1847,3 +1851,45 @@ approved command, never a fallback when `release-egress` fails:
 VM cloning, snapshot rollback and untrusted root administration are outside the guarantee.
 Application networking remains disabled. Step 31E.3 ran it on Lima through a real helper crash and
 guest reboot (`docs/DEV-LINUX-VM.md`, "Crash and reboot recovery smoke test").
+
+### Continuous egress monitoring (Step 32)
+
+A provider can change the public address while the WireGuard tunnel stays up. A helper started with
+`-enable-multi-probe` therefore runs a monitor, owned by its startup, that re-verifies the prepared
+lease's exact tunnel generation:
+
+| Setting | Value |
+|---|---|
+| Interval | 20 s, earlier when the health would expire within one probe budget |
+| Probe budget | 30 s, never past the current health deadline |
+| Tick | 1 s (a due check only; no probe) |
+| Policy | the mandatory V2 policy: Cloudflare and the ident.me pin, unanimous |
+
+- The monitor mints no capability and creates no evidence, candidate or authorization. It reuses the
+  backend's generation-bound probe and the same observation checks as a signed attempt (timestamps,
+  handshake, both sources and their consensus), split out of the capability check
+  (`validMultiProbeObservation`), and checks the generation before and after the probe.
+- A success renews only the prepared generation's monitoring health, at most 60 s after its oldest
+  source observation. The original evidence and the prepared receipt keep their own deadline and
+  are never renewed: a receipt never becomes a new authorization.
+- A changed address, a disagreement between the sources, a probe failure, a changed generation or
+  policy, or expired health faults the lab, drops its local authorization and cleans up the tunnel.
+  A confirmed cleanup retires the generation in the existing retirement record, so `release-egress`
+  then releases the hold; a failed cleanup, or a generation the backend contradicted, retires
+  nothing, and the hold stays. The durable hold always stays with the controller; nothing reserves
+  a new address.
+- The monitor takes the lifecycle lock with `TryLock`: a busy lifecycle skips the check and renews
+  nothing, and health that expired meanwhile faults the tunnel at the next check. While a monitor
+  probe runs (a few seconds in every check), other lifecycle operations answer `LAB_BUSY`, release
+  and disconnect included; the controller does not retry, so the operator approves the command
+  again. Teardown has no priority over a running probe.
+- Its log lines go through a bounded queue: a stalled log sink drops lines rather than stop the
+  monitor or the helper's shutdown, which stops the monitor before closing the labs and the vault.
+- A failed probe worker now names a fixed reason in the helper's error (`HTTPS_REQUEST_FAILED`,
+  `WORKER_PRIVILEGE_CHECK_FAILED`, `WORKER_STATUS_UNAVAILABLE`, `WORKER_INVALID_REQUEST`,
+  `WORKER_EXECUTION_FAILED`); its raw stderr is never logged.
+
+Polling cannot detect an address change instantly, and a preparation that lands close to its
+evidence deadline leaves the first check little time, so it may fault. The controller, the journal
+and the IPC protocol did not change. Application networking remains disabled; kernel-level
+enforcement and the right to open application traffic belong to Steps 33 and 34.

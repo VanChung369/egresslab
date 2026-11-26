@@ -20,10 +20,11 @@ type PreparedLeaseInfo struct {
 }
 
 // preparedEgressLease keeps the candidate's original evidence, and with it the monotonic deadline:
-// preparation never makes the evidence younger.
+// preparation never makes the evidence younger. The monitor renews only its own health.
 type preparedEgressLease struct {
 	info     PreparedLeaseInfo
 	evidence verifiedMultiProbeEvidence
+	monitor  egressMonitorHealth
 }
 
 func (p *preparedEgressLease) fresh(now time.Time) bool {
@@ -252,7 +253,15 @@ func (l *LabLifecycle) prepareEgressLease(
 		return PreparedLeaseInfo{}, errEvidenceUnavailable
 	}
 
-	l.preparedLease = &preparedEgressLease{info: result, evidence: candidate.evidence}
+	l.preparedLease = &preparedEgressLease{
+		info:     result,
+		evidence: candidate.evidence,
+		monitor: egressMonitorHealth{
+			observedAt: candidate.evidence.observedAt,
+			checkedAt:  candidate.evidence.recordedAt,
+			expiresAt:  candidate.evidence.expiresAt,
+		},
+	}
 
 	return result, nil
 }

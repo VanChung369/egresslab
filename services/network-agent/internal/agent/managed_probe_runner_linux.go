@@ -6,12 +6,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
+	"fmt"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -59,6 +60,24 @@ func (b *boundedProbeOutput) Write(data []byte) (int, error) {
 	}
 
 	return b.buf.Write(data)
+}
+
+// managedProbeFailureReason maps the worker's fixed error lines to codes; its raw stderr never
+// reaches the helper log.
+func managedProbeFailureReason(stderr string) string {
+	switch strings.TrimSpace(stderr) {
+	case "HTTPS probe failed":
+		return "HTTPS_REQUEST_FAILED"
+	case "probe must not run as root", "probe must have no supplementary groups", "unexpected probe privileges",
+		"incomplete probe privilege information":
+		return "WORKER_PRIVILEGE_CHECK_FAILED"
+	case "cannot inspect probe privileges":
+		return "WORKER_STATUS_UNAVAILABLE"
+	case "invalid probe arguments", "unknown probe source", "invalid probe destination":
+		return "WORKER_INVALID_REQUEST"
+	default:
+		return "WORKER_EXECUTION_FAILED"
+	}
 }
 
 type managedProbeProcessRunner func(ctx context.Context, namespace string, workerArgs ...string) ([]byte, error)
@@ -121,12 +140,16 @@ func newSystemManagedProbeProcessRunner(uid, gid int) (managedProbeProcessRunner
 		cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/nonexistent", "LANG=C", "LC_ALL=C"}
 		cmd.WaitDelay = time.Second
 
-		var output boundedProbeOutput
+		var output, stderr boundedProbeOutput
 		cmd.Stdout = &output
-		cmd.Stderr = io.Discard
+		cmd.Stderr = &stderr
 
 		if err := cmd.Run(); err != nil {
-			return nil, ErrManagedProbeFailed
+			if ctx.Err() != nil {
+				return nil, errors.Join(ErrManagedProbeFailed, ctx.Err())
+			}
+
+			return nil, fmt.Errorf("%w: %s", ErrManagedProbeFailed, managedProbeFailureReason(stderr.buf.String()))
 		}
 
 		if err := ctx.Err(); err != nil {

@@ -303,6 +303,22 @@ func run(
 		}
 	}
 
+	// The monitor stops before the labs close and the vault is released.
+	var stopMonitor context.CancelFunc
+	var monitorDone chan struct{}
+
+	if enableMultiProbe {
+		var monitorCtx context.Context
+
+		monitorCtx, stopMonitor = context.WithCancel(ctx)
+		monitorDone = make(chan struct{})
+
+		go func() {
+			defer close(monitorDone)
+			labs.RunEgressMonitor(monitorCtx)
+		}()
+	}
+
 	log.Printf("EgressLab helper listening on %s (UID %d; %s)", helperipc.SocketPath, uid, mode)
 
 	err = helperipc.ServeWith(ctx, listener, uint32(uid), helperipc.ServerOptions{
@@ -313,6 +329,11 @@ func run(
 		ReadStage:         readStage,
 		ReadEpochRecovery: readEpochRecovery,
 	})
+
+	if stopMonitor != nil {
+		stopMonitor()
+		<-monitorDone
+	}
 
 	// Labs that cannot be deleted stay, with their markers, for egresslab-lab-recover.
 	if labs != nil {
