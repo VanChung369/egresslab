@@ -62,6 +62,11 @@ func (l *LabLifecycle) connectTunnelLocked(
 		return LabInfo{}, errTunnelSlotBusy
 	}
 
+	// A candidate-bearing generation still in the slot must be retired first.
+	if l.candidateGeneration != "" {
+		return LabInfo{}, errLabUncertain
+	}
+
 	if err := v.VerifyAndConsume(*capability, intent); err != nil {
 		return LabInfo{}, fmt.Errorf("%w: %w", errLabAuthorization, err)
 	}
@@ -97,9 +102,10 @@ func (l *LabLifecycle) connectTunnelLocked(
 }
 
 // clearTunnelLocked releases the tunnel slot if lab holds it. A failed cleanup faults the lab and
-// keeps the slot. The caller must hold l.mu.
+// keeps the slot. Only a confirmed cleanup retires the slot's candidate-bearing generation, and
+// not when the backend names another generation. The caller must hold l.mu.
 func (l *LabLifecycle) clearTunnelLocked(ctx context.Context, lab LabInfo) error {
-	// Before the cleanup, whatever its outcome.
+	// Before the cleanup, whatever its outcome; dropping authorization proves no cleanup.
 	l.invalidateEvidenceLocked(lab.ProfileID)
 
 	if l.tunnelProfile != lab.ProfileID {
@@ -110,6 +116,19 @@ func (l *LabLifecycle) clearTunnelLocked(ctx context.Context, lab LabInfo) error
 		return errLabUncertain
 	}
 
+	generation := l.candidateGeneration
+	proofAllowed := true
+
+	// A removed or faulted tunnel has no readable generation; that alone does not refuse proof, but
+	// a contradiction seen now or by any earlier read does.
+	if generation != "" {
+		if l.generationProbes != nil {
+			_, _ = l.currentGenerationLocked(lab.Namespace)
+		}
+
+		proofAllowed = l.generationProbes != nil && !l.candidateGenerationContradicted
+	}
+
 	if err := l.tunnels.CleanupStage(ctx, lab.Namespace); err != nil {
 		lab.State = LabFaulted
 		l.labs[lab.ProfileID] = lab
@@ -117,7 +136,20 @@ func (l *LabLifecycle) clearTunnelLocked(ctx context.Context, lab LabInfo) error
 		return fmt.Errorf("%w: tunnel cleanup: %w", errLabUncertain, err)
 	}
 
+	if generation != "" && proofAllowed {
+		l.markCandidateGenerationRetiredLocked(lab, generation)
+	}
+
 	l.tunnelProfile = ""
+	l.candidateGeneration = ""
+	l.candidateGenerationContradicted = false
+
+	if !proofAllowed {
+		lab.State = LabFaulted
+		l.labs[lab.ProfileID] = lab
+
+		return fmt.Errorf("%w: contradictory tunnel generation", errLabUncertain)
+	}
 
 	return nil
 }

@@ -98,9 +98,9 @@ func operationResponseTimeout(operation string) time.Duration {
 		return probeResponseTimeout
 	}
 
-	// A reservation or preparation may run a full tunnel verification and its cleanup.
+	// A reservation, preparation or revocation may run a full tunnel verification or cleanup.
 	if isLifecycleOp(operation) || operation == helperauth.OpReserveEgressCandidate ||
-		operation == helperauth.OpPrepareEgressLease {
+		operation == helperauth.OpPrepareEgressLease || operation == helperauth.OpRevokeEgressLease {
 		return lifecycleResponseTimeout
 	}
 

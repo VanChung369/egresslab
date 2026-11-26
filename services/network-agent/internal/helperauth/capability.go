@@ -41,6 +41,10 @@ const (
 	// authorizes no application traffic.
 	OpPrepareEgressLease = "PrepareEgressLeaseV1"
 
+	// OpRevokeEgressLease names the same reservation as a preparation but only retires its tunnel
+	// generation.
+	OpRevokeEgressLease = "RevokeEgressLeaseV1"
+
 	// The helper picks the namespace, so a CreateLab intent signs "namespace":"".
 	OpCreateLab = "CreateLab"
 
@@ -78,7 +82,7 @@ type Intent struct {
 	TunnelGeneration string `json:"tunnel_generation,omitempty"`
 	EvidenceNonce    string `json:"evidence_nonce,omitempty"` // the consumed V2 attempt's nonce
 
-	// PrepareEgressLeaseV1 only.
+	// PrepareEgressLeaseV1 and RevokeEgressLeaseV1 only.
 	ReservationNonce string `json:"reservation_nonce,omitempty"` // the ReserveEgressCandidateV1 attempt's nonce
 	RuntimeID        string `json:"runtime_id,omitempty"`
 	AuthorityID      string `json:"authority_id,omitempty"`
@@ -125,22 +129,23 @@ func validateIntent(in Intent) error {
 		return ErrInvalidCapability
 	}
 
-	// Only V2, the reservation that consumes it and the preparation that consumes the reservation
-	// may carry a tunnel generation; only the last two an evidence reference, and only the
-	// preparation the lease fields.
+	// Only V2, the reservation that consumes it, and the preparation and revocation of that
+	// reservation may carry a tunnel generation; only the last three an evidence reference, and only
+	// the last two the lease fields.
 	switch in.Operation {
-	case OpPermitMultiProbeV2, OpReserveEgressCandidate, OpPrepareEgressLease:
+	case OpPermitMultiProbeV2, OpReserveEgressCandidate, OpPrepareEgressLease, OpRevokeEgressLease:
 	default:
 		if in.TunnelGeneration != "" {
 			return ErrInvalidCapability
 		}
 	}
 
-	if in.Operation != OpReserveEgressCandidate && in.Operation != OpPrepareEgressLease && in.EvidenceNonce != "" {
+	if in.Operation != OpReserveEgressCandidate && in.Operation != OpPrepareEgressLease &&
+		in.Operation != OpRevokeEgressLease && in.EvidenceNonce != "" {
 		return ErrInvalidCapability
 	}
 
-	if in.Operation != OpPrepareEgressLease && in.HasLeaseFields() {
+	if in.Operation != OpPrepareEgressLease && in.Operation != OpRevokeEgressLease && in.HasLeaseFields() {
 		return ErrInvalidCapability
 	}
 
@@ -188,7 +193,7 @@ func validateIntent(in Intent) error {
 			return ErrInvalidCapability
 		}
 
-	case OpPrepareEgressLease:
+	case OpPrepareEgressLease, OpRevokeEgressLease:
 		if !validPrepareLeaseFields(in) {
 			return ErrInvalidCapability
 		}

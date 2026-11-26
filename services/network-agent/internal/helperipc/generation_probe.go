@@ -142,7 +142,7 @@ func (l *LabLifecycle) readMultiProbeTarget(
 		return MultiProbeTargetInfo{}, errLabUncertain
 	}
 
-	generation, err := l.generationProbes.CurrentTunnelGeneration(lab.Namespace)
+	generation, err := l.currentGenerationLocked(lab.Namespace)
 	if err != nil {
 		return MultiProbeTargetInfo{}, errLabUncertain
 	}

@@ -67,6 +67,7 @@ type Response struct {
 	MultiProbeTarget *MultiProbeTargetInfo `json:"multi_probe_target,omitempty"`
 	Candidate        *CandidateInfo        `json:"candidate,omitempty"`
 	PreparedLease    *PreparedLeaseInfo    `json:"prepared_lease,omitempty"`
+	RevokedLease     *RevokedLeaseInfo     `json:"revoked_lease,omitempty"`
 }
 
 var ErrInvalidFrame = errors.New("invalid helper IPC frame")
@@ -249,6 +250,10 @@ func callRequest(ctx context.Context, socketPath string, req Request) (Response,
 
 	if !validPreparedLeaseResponse(req, resp, receivedAt) {
 		return Response{}, errors.New("invalid or expired prepared lease response")
+	}
+
+	if !validRevokedLeaseResponse(req, resp) {
+		return Response{}, errors.New("invalid revoked lease response")
 	}
 
 	// The attempt must lie between writing this request and reading its answer.

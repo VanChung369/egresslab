@@ -188,6 +188,10 @@ func handle(ctx context.Context, conn *net.UnixConn, allowedUID uint32, opts Ser
 	}
 }
 
+// A restart would lose the retirement record, so the generic advice to restart does not apply.
+const revocationUncertainMessage = "revocation not confirmed; keep the helper running, since a restart loses " +
+	"the retirement record: inspect list-labs and recover-scan, then confirm with a new signed revocation"
+
 func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 	resp := Response{Version: Version, NetworkReady: false}
 
@@ -385,6 +389,36 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 		// network_ready stays false: a prepared lease opens nothing.
 		resp.OK = true
 		resp.PreparedLease = &lease
+
+	case helperauth.OpRevokeEgressLease:
+		if labs == nil || labs.generationProbes == nil || v == nil {
+			return refuse(CodeOperationDisabled, "operation not enabled")
+		}
+
+		if ctx.Err() != nil {
+			return refuse(CodeRuntimeUnavailable, "helper is shutting down")
+		}
+
+		// Shutdown waits for the bounded cleanup, like the lifecycle operations.
+		revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lifecycleTimeout)
+		receipt, err := labs.revokeEgressLease(revokeCtx, req, v, opts.RuntimeID)
+		cancel()
+
+		if err != nil {
+			code := labCode(err)
+			if code != CodeAuthorizationDenied {
+				log.Printf("egress lease revocation: %s: %v", code, err)
+			}
+
+			if code == CodeStateUncertain {
+				return refuse(code, revocationUncertainMessage)
+			}
+
+			return refuse(code, labMessages[code])
+		}
+
+		resp.OK = true
+		resp.RevokedLease = &receipt
 
 	case helperauth.OpPermitProbe:
 		if labs == nil || labs.probes == nil || labs.multiProbes != nil {

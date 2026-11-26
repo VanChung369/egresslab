@@ -182,7 +182,7 @@ func (l *LabLifecycle) reserveEgressCandidate(
 		return CandidateInfo{}, errLabUncertain
 	}
 
-	generation, err := l.generationProbes.CurrentTunnelGeneration(lab.Namespace)
+	generation, err := l.currentGenerationLocked(lab.Namespace)
 	if err != nil {
 		return CandidateInfo{}, errLabUncertain
 	}
@@ -194,6 +194,10 @@ func (l *LabLifecycle) reserveEgressCandidate(
 	// A reservation is its own signed attempt, never the probe's capability again.
 	if req.Capability.Claims.Nonce == evidence.nonce {
 		return CandidateInfo{}, errLabAuthorization
+	}
+
+	if err := l.canTrackCandidateLocked(generation, req.Capability.Claims.Nonce); err != nil {
+		return CandidateInfo{}, err
 	}
 
 	if ctx.Err() != nil {
@@ -227,7 +231,7 @@ func (l *LabLifecycle) reserveEgressCandidate(
 	}
 
 	// The tunnel verified; it must still be the generation the evidence names.
-	current, err := l.generationProbes.CurrentTunnelGeneration(lab.Namespace)
+	current, err := l.currentGenerationLocked(lab.Namespace)
 	if err == nil && current != generation {
 		err = errors.New("tunnel generation changed during the reservation")
 	}
@@ -271,6 +275,11 @@ func (l *LabLifecycle) reserveEgressCandidate(
 
 	if !evidence.fresh(time.Now()) || verifyCtx.Err() != nil {
 		return CandidateInfo{}, errEvidenceUnavailable
+	}
+
+	// Every candidate receipt has its retirement record.
+	if err := l.rememberCandidateLocked(result); err != nil {
+		return CandidateInfo{}, err
 	}
 
 	l.localCandidate = &localEgressCandidate{info: result, evidence: *evidence}

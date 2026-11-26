@@ -158,6 +158,12 @@ func (l *LabLifecycle) prepareEgressLease(
 		return PreparedLeaseInfo{}, errLabAuthorization
 	}
 
+	record := l.candidateRetirements[candidate.info.ReservationNonce]
+	if record == nil || record.retired || record.candidate != candidate.info ||
+		!record.bindingMatches(requested.AuthorityID, requested.ReservationID) {
+		return PreparedLeaseInfo{}, errLabUncertain
+	}
+
 	policy, err := l.multiProbePolicyLocked(v, runtimeID)
 	if err != nil {
 		return PreparedLeaseInfo{}, err
@@ -167,8 +173,8 @@ func (l *LabLifecycle) prepareEgressLease(
 		return PreparedLeaseInfo{}, errLabUncertain
 	}
 
-	generation, err := l.generationProbes.CurrentTunnelGeneration(lab.Namespace)
-	if err != nil {
+	generation, err := l.currentGenerationLocked(lab.Namespace)
+	if err != nil || l.candidateGenerationContradicted {
 		return PreparedLeaseInfo{}, errLabUncertain
 	}
 
@@ -194,6 +200,10 @@ func (l *LabLifecycle) prepareEgressLease(
 		return PreparedLeaseInfo{}, fmt.Errorf("%w: %w", errLabAuthorization, err)
 	}
 
+	// Bound on acceptance, so a failed verification or a lost receipt still names the reservation.
+	record.bind(expected.AuthorityID, expected.ReservationID)
+	record.preparationNonce = nonce
+
 	// The consumption point: from here, no failure or timeout restores the candidate.
 	l.localCandidate = nil
 	l.verifiedEvidence = nil
@@ -211,7 +221,7 @@ func (l *LabLifecycle) prepareEgressLease(
 		return PreparedLeaseInfo{}, err
 	}
 
-	current, err := l.generationProbes.CurrentTunnelGeneration(lab.Namespace)
+	current, err := l.currentGenerationLocked(lab.Namespace)
 	if err == nil && current != generation {
 		err = errors.New("tunnel generation changed during lease preparation")
 	}

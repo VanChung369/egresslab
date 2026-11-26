@@ -125,7 +125,7 @@ func TestPeerIdentityAndReadOnlyOperations(t *testing.T) {
 
 	// Send mutations directly; Call refuses them on the client side too.
 	for _, op := range []string{"CreateLab", "ConnectTunnel", "PermitProbe", "PermitMultiProbeV1", "PermitMultiProbeV2",
-		"RecoverClean"} {
+		"ReserveEgressCandidateV1", "PrepareEgressLeaseV1", "RevokeEgressLeaseV1", "RecoverClean"} {
 		denied := rawExchange(t, socket, []byte(`{"version":1,"operation":"`+op+`"}`))
 
 		if denied.OK || denied.Error != "operation not enabled" || denied.Operation != op || denied.NetworkReady {

@@ -317,3 +317,71 @@ func TestPrepareLeaseCommand(t *testing.T) {
 		t.Fatalf("command did not reach the test socket: %v", err)
 	}
 }
+
+func TestRevokeLeaseCommand(t *testing.T) {
+	profile := "profile_0123456789abcdef"
+	namespace := "egresslab-lab-0123456789abcdef"
+	args := []string{"revoke-egress-lease", profile, namespace}
+
+	for _, bad := range [][]string{
+		{"revoke-egress-lease"},
+		{"revoke-egress-lease", profile},
+		{"revoke-egress-lease", profile, "../default"},
+		{"revoke-egress-lease", "invalid-profile", namespace},
+		{"revoke-egress-lease", profile, namespace, "reservation_0123456789abcdef0123456789abcdef"},
+	} {
+		var out bytes.Buffer
+
+		if err := run(bad, strings.NewReader(validCapability), &out); err == nil || !strings.Contains(err.Error(), "usage") ||
+			out.Len() != 0 {
+			t.Fatalf("invalid revocation arguments accepted: %v %v", bad, err)
+		}
+	}
+
+	preparation, err := helperauth.NewPrepareEgressLeaseIntent(profile, namespace, "9.9.9.9",
+		"tunnelgen_0123456789abcdef0123456789abcdef", "ffeeddccbbaa99887766554433221100",
+		"aabbccddeeff00112233445566778899", "runtime_0123456789abcdef0123456789abcdef",
+		"authority_0123456789abcdef0123456789abcdef", "reservation_0123456789abcdef0123456789abcdef", "8.8.4.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	revocation, err := helperauth.NewRevokeEgressLeaseIntent(preparation)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	encode := func(intent helperauth.Intent) string {
+		payload, err := json.Marshal(helperauth.SignedCapability{
+			Claims:    helperauth.Claims{Version: 1, Intent: intent},
+			Signature: "test-only",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return string(payload)
+	}
+
+	foreign := revocation
+	foreign.Namespace = "egresslab-lab-ffffffffffffffff"
+
+	// Refused before any socket is touched, a preparation capability included.
+	for _, input := range []string{"", "{}{}", validCapability, encode(preparation), encode(foreign)} {
+		var out bytes.Buffer
+
+		if err := run(args, strings.NewReader(input), &out); helperipc.ErrorCode(err) != helperipc.CodeInvalidRequest ||
+			out.Len() != 0 {
+			t.Fatalf("invalid revocation input accepted: %v", err)
+		}
+	}
+
+	previous := socketPath
+	socketPath = filepath.Join(t.TempDir(), "missing.sock")
+	t.Cleanup(func() { socketPath = previous })
+
+	var out bytes.Buffer
+	if err := run(args, strings.NewReader(encode(revocation)), &out); helperipc.ErrorCode(err) != helperipc.CodeRuntimeUnavailable {
+		t.Fatalf("command did not reach the test socket: %v", err)
+	}
+}

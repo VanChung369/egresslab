@@ -1,6 +1,6 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 31D.3b — controller lease preparation.** A controller CLI signs `CreateLab`,
+Status: **Step 31D.3c — generation-bound revocation in the helper.** A controller CLI signs `CreateLab`,
 `ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`, `ReserveEgressCandidateV1` and
 `PrepareEgressLeaseV1` and drives the helper's sealed lab, tunnel and diagnostic probes in the Linux
 runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports
@@ -16,7 +16,10 @@ candidate and the durable reservation, which `reserve-egress` runs against an ex
 per-user authority (`init-reservations`). The helper can also bind its candidate to such a durable
 reservation as a sealed, generation-bound prepared lease (`PrepareEgressLeaseV1`), which
 `reserve-egress` signs right after the durable commit, in the same operation; neither a reservation
-nor a prepared lease is an active lease. Windows (WSL2), Linux and macOS (Lima, Keychain) are
+nor a prepared lease is an active lease. The helper keeps a bounded retirement record of every
+candidate for its epoch and answers a signed `RevokeEgressLeaseV1` with a receipt only once that
+candidate's tunnel generation is confirmed removed; no controller signs one yet, and no hold is
+released. Windows (WSL2), Linux and macOS (Lima, Keychain) are
 verified end to end, except that the multi-source probe has run on WSL2 and Lima only, not on native
 Linux. No lease or proxy traffic exists; the sections from "Typed operations only" on are partly
 design.
@@ -79,6 +82,10 @@ design.
 - `PrepareEgressLeaseV1` in the same mode: that candidate bound once to a controller-signed durable
   reservation as a prepared lease, which opens nothing (see "Egress candidates"); helperctl
   (`prepare-egress-lease`) and the controller's `reserve-egress` send it (Step 31D.3b).
+- `RevokeEgressLeaseV1` in the same mode: the signed retirement of one candidate's tunnel
+  generation, prepared or not, expired or not, with a receipt only after a confirmed cleanup (see
+  "Generation-bound revocation"); helperctl sends it (`revoke-egress-lease`), the controller not
+  yet (Step 31D.3d).
 - Controller side (see "Controller and runtimes"):
   - an Ed25519 signer for `CreateLab`, `ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`,
     `ReserveEgressCandidateV1` and `PrepareEgressLeaseV1` (the `PermitMultiProbeV1` signer stays for
@@ -107,7 +114,7 @@ design.
 - A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
-- Generation-bound revocation (Step 31D.3c), durable release records (Step 31D.3d), the complete
+- The controller's revocation signer and durable release records (Step 31D.3d), the complete
   lifecycle smoke test (Step 31D.3e), key rotation and authority migration, and the multi-runtime
   collision and recovery tests (Step 31E); no reservation hold is ever released yet.
 - Open from earlier steps: egress-IP leases across runtimes; a kill-switch independent of the controller; refusing to delete a
@@ -170,13 +177,15 @@ design.
   `HelperInfo`, the `AuthorizeCheck` dry-run and, with the lifecycle flag, `ListLabs`,
   `CreateLab`, `VerifyLab` and `DeleteLab`, plus `StageInfo` with `-enable-vault` and
   `ConnectTunnel` and `Disconnect` with `-enable-tunnel`, `PermitProbe` with `-enable-probe`, and
-  `MultiProbePolicy`, `MultiProbeTarget`, `PermitMultiProbeV2` and `ReserveEgressCandidateV1` with
-  `-enable-multi-probe` (`TestPeerRejection`, `TestPeerIdentityAndReadOnlyOperations`,
+  `MultiProbePolicy`, `MultiProbeTarget`, `PermitMultiProbeV2`, `ReserveEgressCandidateV1`,
+  `PrepareEgressLeaseV1` and `RevokeEgressLeaseV1` with `-enable-multi-probe` (`TestPeerRejection`, `TestPeerIdentityAndReadOnlyOperations`,
   `TestMutationWithValidCapabilityIsRefused`, `TestLabLifecycleIPCRefusals`, `TestListLabsRefusals`,
   `TestStageInfoIPC`, `TestSignedTunnelIPC`, `TestTunnelOperationsDisabledWithoutBackend`,
   `TestSignedProbeIPC`, `TestProbeDisabledOverIPC`, `TestMultiProbePolicyIPC`,
   `TestGenerationProbeIPC`, `TestGenerationProbeDisabledOverIPC`, `TestCandidateReservationIPC`,
-  `TestCandidateReservationDisabledWithoutGenerations`).
+  `TestCandidateReservationDisabledWithoutGenerations`, `TestPreparedLeaseIPC`,
+  `TestPreparedLeaseIPCDisabledWithoutGenerations`, `TestRevokedLeaseIPC`,
+  `TestRevocationDisabledWithoutGenerationsOverIPC`).
 
 Changing any of these needs the helper below first.
 
@@ -215,6 +224,9 @@ The helper exposes a fixed set of operations, never a command line:
 `MultiProbeTarget{profile_id, namespace}` (read-only),
 `ReserveEgressCandidateV1{profile_id, namespace, probe_ipv4, tunnel_generation, evidence_nonce}`
 (consumes one verified V2 attempt),
+`PrepareEgressLeaseV1{…, reservation_nonce, runtime_id, authority_id, reservation_id, egress_ipv4}`
+(binds that candidate to a durable reservation),
+`RevokeEgressLeaseV1{the same fields}` (retires that candidate's tunnel generation),
 `VerifyLab`, `Disconnect`, `DeleteLab`, `RecoverScan`, `RecoverClean`.
 
 Every argument is validated with the existing patterns: `egresslab-lab-<16 hex>`,
@@ -224,8 +236,8 @@ Every argument is validated with the existing patterns: `egresslab-lab-<16 hex>`
 ## Authorization
 
 `CreateLab`, each operation that opens traffic (`ConnectTunnel`, `PermitProbe`,
-`PermitMultiProbeV1`, `PermitMultiProbeV2`) and `ReserveEgressCandidateV1` need a capability that
-the controller mints. Implemented format, version 1:
+`PermitMultiProbeV1`, `PermitMultiProbeV2`), `ReserveEgressCandidateV1`, `PrepareEgressLeaseV1` and
+`RevokeEgressLeaseV1` need a capability that the controller mints. Implemented format, version 1:
 
 ```text
 claims = {"version":1,
@@ -233,8 +245,10 @@ claims = {"version":1,
                     "namespace":"egresslab-lab-<16 hex>",  ("" for CreateLab)
                     "stage_id":"wgstage_<32 hex>"          (ConnectTunnel only)
                     "probe_ipv4":"<dotted IPv4>",          (PermitProbe, PermitMultiProbeV1, V2, Reserve...)
-                    "tunnel_generation":"tunnelgen_<32 hex>",  (PermitMultiProbeV2, ReserveEgressCandidateV1)
-                    "evidence_nonce":"<32 hex>"},          (ReserveEgressCandidateV1 only)
+                    "tunnel_generation":"tunnelgen_<32 hex>",  (PermitMultiProbeV2 and the three below)
+                    "evidence_nonce":"<32 hex>",           (ReserveEgressCandidateV1, Prepare..., Revoke...)
+                    "reservation_nonce", "runtime_id", "authority_id", "reservation_id",
+                    "egress_ipv4"},                        (PrepareEgressLeaseV1, RevokeEgressLeaseV1 only)
           "helper_id":"helper_<32 hex>", "nonce":"<32 hex>",
           "issued_at":<unix s>, "not_after":<unix s, at most issued_at + 30>}
 
@@ -315,7 +329,8 @@ helper leave it unused.
 - **Seal fails:** the helper deletes the namespace. If that fails too, the lab stays tracked as
   faulted and creation is blocked for the rest of the process.
 - **Create fails:** creation is blocked as well, because the kernel state may be uncertain. Later
-  creates get `STATE_UNCERTAIN`; check `egresslab-lab-recover`, then restart the helper.
+  creates get `STATE_UNCERTAIN`; check `egresslab-lab-recover`, then restart the helper (which loses
+  the egress retirement records of Step 31D.3c).
 - **`VerifyLab`** re-reads the topology, the firewall (session baseline and intended policy) and
   the IPv6 switches. Any difference marks the lab faulted. It never repairs, and a faulted lab is
   never restored; only `DeleteLab` clears it.
@@ -550,7 +565,7 @@ Every refusal carries a `code`. Clients act on it; the message is for people. On
 | `FIREWALL_DRIFT` / `LAB_FAULTED` | the lab no longer matches (firewall / topology, or already faulted); delete it |
 | `RECOVERY_REQUIRED` | leftover lab resources block creation |
 | `KERNEL_INCOMPATIBLE` | new namespaces would get extra devices |
-| `STATE_UNCERTAIN` | a create, tunnel connect or cleanup may have left kernel state behind; delete the lab, or check recovery and restart the helper |
+| `STATE_UNCERTAIN` | a create, tunnel connect or cleanup may have left kernel state behind; delete the lab, or check recovery before restarting the helper, which loses the egress retirement records (a revocation's answer says to keep it running) |
 | `STAGE_NOT_FOUND` | the vault holds no such stage for the profile (`StageInfo`, `ConnectTunnel`); the lab is untouched |
 | `EVIDENCE_UNAVAILABLE` | no fresh, unconsumed V2 evidence matches the reservation (none, expired or already consumed) |
 | `INTERNAL` | anything else; details are in the helper log |
@@ -1465,6 +1480,7 @@ The states stay separate; none of them is an `active` flag:
 | Local candidate | that evidence, consumed once, bound to its tunnel generation (Step 31A) |
 | Global reservation | an address held exclusively by the shared authority (Steps 31B, 31C) |
 | Prepared lease | a reservation bound by the helper to its tunnel generation (Step 31D.3a); not active |
+| Retired generation | a candidate's tunnel generation whose removal the helper confirmed (Step 31D.3c), for its epoch only |
 | Active lease | the right to use the address, which also needs continuous monitoring, the kill-switch and data-plane enforcement (later steps) |
 | Network ready | application traffic allowed |
 
@@ -1629,3 +1645,52 @@ rejected or late preparation answers `EGRESS_PREPARATION_UNCONFIRMED`: the durab
 nothing is retried or released, and the helper may or may not hold a prepared lease. The new
 helperctl is not installed in a runtime, and the command has not run against a real tunnel, because
 a test hold could not be released yet (Step 31D.3d).
+
+### Generation-bound revocation (Step 31D.3c)
+
+Dropping the local candidate or prepared lease proves no cleanup: `invalidateEvidenceLocked` runs
+before the kernel cleanup, whatever its outcome. The helper therefore keeps a retirement record for
+every candidate receipt it returns, created under the lifecycle lock before the receipt and kept
+apart from the candidate's and the lease's freshness: the original candidate (profile, namespace,
+generation, runtime, helper epoch, key fingerprint, address and nonces), the authority and
+reservation bound by the first accepted preparation or revocation (never changed afterwards), the
+preparation nonce, and whether the generation is retired. It holds no capability or key. At most
+1024 records exist per helper epoch; at the limit a new candidate is refused (`LAB_LIMIT`, before
+its evidence is consumed), and nothing is evicted or expired, because an old record may still back
+a durable hold. A helper restart loses them all, and a missing record never implies retirement.
+
+A record is retired only when `CleanupStage` of the managed tunnel backend succeeded for the slot
+that tracked its generation; the backend clears its active tunnel only after the WireGuard link is
+confirmed gone and the underlay table deleted. If the backend names another generation than the
+one the slot tracks, at any read while the slot holds it, the contradiction is remembered until the
+slot is released: a faulted tunnel that later names no generation cannot turn it into proof, and no
+new candidate or preparation is accepted on that generation. The cleanup still runs but proves
+nothing: the lab is faulted and the answer is `STATE_UNCERTAIN`, also
+for `DeleteLab` (a second `DeleteLab` removes the namespace). A failed
+cleanup proves nothing either and keeps the slot. A connect is refused while the slot still tracks
+a candidate-bearing generation.
+
+`RevokeEgressLeaseV1` carries the same fields as `PrepareEgressLeaseV1` with its own operation, so
+no preparation capability can serve as a revocation. The helper rebuilds every network field from
+the retained record and needs no fresh evidence: an expired or never-prepared candidate, or one
+whose preparation failed or lost its response, can be revoked. Unless the record is already
+retired, the slot must still track exactly that generation, in a configured or faulted lab; a
+configured tunnel whose generation cannot be read, or a backend naming another generation, is
+`STATE_UNCERTAIN`, before the capability is consumed. The signed capability is then consumed, and
+the helper disconnects the tunnel (`Disconnect`'s cleanup, ignoring `blockCreation`, which only
+stops new resources). A record that is already retired is confirmed without touching the slot, so
+a late revocation of generation A never disconnects a newer generation B. The receipt
+(`revoked_lease`) names the signed intent, the helper epoch, the key fingerprint and the revocation
+nonce, with `generation_retired: true` and no deadline. A replayed capability is refused; a fresh
+signed one confirms the same retirement without another cleanup, which is how a lost receipt is
+recovered. A revocation answering `STATE_UNCERTAIN` says to keep the helper running, unlike the other
+operations: a restart loses the records, while the same epoch can still confirm the retirement with
+a new signed revocation once `list-labs` and `recover-scan` show the cause. helperctl sends it with `revoke-egress-lease PROFILE_ID NAMESPACE` and the capability on
+stdin only; there is no unsigned revocation by reservation ID, and `disconnect` stays an emergency
+cleanup that releases nothing durable.
+
+The receipt proves the retirement of one managed generation within the helper backend's cleanup
+contract, not that the runtime carries no other traffic. No durable reservation is released in this
+step, no controller signs a revocation yet (Step 31D.3d adds the signer, the eighth golden vector and
+the release), and application networking stays disabled. It is tested with real signatures and a
+real Unix socket on Lima, against the fake kernel backend; no kernel ran it.

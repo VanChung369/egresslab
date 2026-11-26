@@ -57,7 +57,7 @@ The unique-IP invariant needs one authority across runtimes: two Linux runtimes,
 - Four indexes (owner, public IPv4, profile and reservation ID) change together; validation, the collision checks and publication run under one mutex, so requests through one registry instance never hold the same address twice, and an existing hold is never overwritten or evicted.
 - Expiry ends eligibility for activation, not the hold: an address is released only once a later lifecycle confirms its owner can no longer use it, and no release exists yet.
 
-The registry alone is in memory and coordinates one process; Step 31C puts it behind a durable journal shared by controller processes. The signed reservation workflow (Step 31D.1) and the provisioned authority with its CLI commands (Step 31D.2) build on it; the HTTP API does not reach it. Lease preparation (Steps 31D.3a and 31D.3b) builds on it too; revocation and release (Steps 31D.3c and 31D.3d) and collision and recovery tests (Step 31E) come later; no application traffic is allowed.
+The registry alone is in memory and coordinates one process; Step 31C puts it behind a durable journal shared by controller processes. The signed reservation workflow (Step 31D.1) and the provisioned authority with its CLI commands (Step 31D.2) build on it; the HTTP API does not reach it. Lease preparation (Steps 31D.3a and 31D.3b) and the helper's generation-bound revocation (Step 31D.3c) build on it too; the controller's revocation and release (Step 31D.3d) and collision and recovery tests (Step 31E) come later; no application traffic is allowed.
 
 ### Durable reservation authority (Step 31C)
 
@@ -102,7 +102,7 @@ A durable reservation is exclusive address ownership at the controller. A prepar
 - Neither state authorizes application networking. An active lease also needs continuous monitoring, the kill-switch and data-plane enforcement (later steps).
 - The prepared lease is single-use and keeps the original evidence deadline; it never refreshes itself, changes the address or moves to another generation.
 - The helper cannot read the controller's journal, so the controller must sign a preparation only after its durable commit (Step 31D.3b), within the same approved operation; a reservation read back from disk is not fresh evidence.
-- The controller must never release durable ownership because a prepared lease expired or disappeared from helper memory. A future revocation (Step 31D.3c) must stop stale signed operations from recreating authorization after the address is released (Step 31D.3d).
+- The controller must never release durable ownership because a prepared lease expired or disappeared from helper memory. The helper's revocation (Step 31D.3c) retires the generation, so stale signed operations cannot recreate authorization; release (Step 31D.3d) must rely on it.
 
 ### Controller lease preparation (Step 31D.3b)
 
@@ -113,7 +113,15 @@ A durable reservation is exclusive address ownership at the controller. A prepar
 - The helper's receipt must match the signed capability and the durable hold, the original evidence timestamps and the key fingerprint included, which the signed intent does not carry.
 - Any failure after the durable commit, whether signing, expiry, a refusal, a lost response or a mismatched receipt, keeps the address held and returns `EGRESS_PREPARATION_UNCONFIRMED`. That does not prove the helper made no prepared lease. Nothing is retried, released or activated.
 
-Application networking stays disabled. With no release yet, a cooperating controller cannot free the hold between the journal check and the submission; release must also revoke outstanding preparations (Steps 31D.3c and 31D.3d).
+Application networking stays disabled. With no release yet, a cooperating controller cannot free the hold between the journal check and the submission; release must also revoke outstanding preparations (Step 31D.3d, with the helper's revocation of Step 31D.3c).
+
+### Generation retirement (Step 31D.3c)
+
+Durable address ownership must outlive the invalidation of local authorization and an uncertain cleanup.
+
+- A reservation may be released only through a future authority transaction (Step 31D.3d) backed by a confirmed retirement of its exact managed tunnel generation: the helper's `RevokeEgressLeaseV1` receipt, checked against the authority, reservation, runtime, helper epoch and the signed revocation attempt, never a receipt a user supplies.
+- Expiry, a missing prepared lease and a controller process exit are not release proofs.
+- The retirement records live in one helper epoch and do not authorize a release after an unverified runtime recovery.
 
 ### Windows / macOS / Linux
 

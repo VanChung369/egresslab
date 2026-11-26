@@ -183,7 +183,7 @@ func olderHelperDisabled(req Request, resp Response) bool {
 		resp.Operation == "" && resp.Code == CodeOperationDisabled &&
 		len(resp.Items) == 0 && resp.Info == nil && resp.Lab == nil && len(resp.Labs) == 0 &&
 		resp.Stage == nil && resp.Probe == nil && resp.MultiProbe == nil && resp.MultiProbePolicy == nil &&
-		resp.MultiProbeTarget == nil && resp.Candidate == nil && resp.PreparedLease == nil
+		resp.MultiProbeTarget == nil && resp.Candidate == nil && resp.PreparedLease == nil && resp.RevokedLease == nil
 }
 
 func validMultiProbeResponse(req Request, resp Response) bool {
@@ -266,7 +266,7 @@ func (l *LabLifecycle) executeMultiProbe(
 	var expected helperauth.Intent
 
 	if generationBound {
-		generation, readErr := l.generationProbes.CurrentTunnelGeneration(lab.Namespace)
+		generation, readErr := l.currentGenerationLocked(lab.Namespace)
 		if readErr != nil {
 			return MultiProbeInfo{}, errLabUncertain
 		}

@@ -94,7 +94,7 @@ var labMessages = map[string]string{
 	CodeRuntimeUnavailable:  "lab lifecycle unavailable",
 	CodeKernelIncompatible:  "kernel adds devices to new namespaces; see the helper log",
 	CodeRecoveryRequired:    "leftover lab resources; run egresslab-lab-recover",
-	CodeStateUncertain:      "kernel state uncertain; check recovery and restart the helper",
+	CodeStateUncertain:      "kernel state uncertain; check recovery before restarting the helper, which loses egress retirement records",
 	CodeFirewallDrift:       "lab firewall drifted; delete the lab",
 	CodeLabFaulted:          "lab is faulted; delete the lab",
 	CodeInternal:            "lab operation failed",
@@ -138,6 +138,13 @@ type LabLifecycle struct {
 	verifiedEvidence *verifiedMultiProbeEvidence  // the last checked V2 attempt, if still valid
 	localCandidate   *localEgressCandidate        // the evidence one reservation consumed; not a lease
 	preparedLease    *preparedEgressLease         // that candidate bound to a durable reservation; not active
+
+	// Kept apart from the expiring authorization above, for this helper epoch.
+	candidateRetirements map[string]*candidateRetirementRecord // by candidate reservation nonce
+	candidateGeneration  string                                // the tracked tunnel's candidate-bearing generation
+
+	// The backend once named another generation for it: no later cleanup proves its retirement.
+	candidateGenerationContradicted bool
 }
 
 func NewLabLifecycle(backend LabBackend) *LabLifecycle {

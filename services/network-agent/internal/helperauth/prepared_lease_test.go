@@ -160,3 +160,72 @@ func TestPrepareEgressLeaseSigningMessageGolden(t *testing.T) {
 		t.Fatalf("lease signature mismatch: %s", token.Signature)
 	}
 }
+
+func TestRevokeLeaseCapabilityBinding(t *testing.T) {
+	preparation := testPrepareLeaseIntent(t)
+
+	revocation, err := NewRevokeEgressLeaseIntent(preparation)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !ValidRevokeEgressLeaseIntent(revocation) || ValidRevokeEgressLeaseIntent(preparation) {
+		t.Fatal("operation identities are not distinct")
+	}
+
+	if _, err := NewRevokeEgressLeaseIntent(revocation); !errors.Is(err, ErrInvalidCapability) {
+		t.Fatal("revocation built from a revocation")
+	}
+
+	token, verifier, _ := testToken(t, revocation, time.Unix(1795500000, 0))
+
+	requireInvalid(t, verifier.VerifyAndConsume(token, preparation), "revocation as preparation")
+
+	tampered := token
+	tampered.Claims.Intent = preparation
+	requireInvalid(t, verifier.VerifyAndConsume(tampered, preparation), "tampered revocation")
+
+	if err := verifier.VerifyAndConsume(token, revocation); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := verifier.VerifyAndConsume(token, revocation); !errors.Is(err, ErrCapabilityReplay) {
+		t.Fatalf("revocation replay accepted: %v", err)
+	}
+}
+
+func TestRevokeLeaseIntentPolicy(t *testing.T) {
+	binding := testPrepareLeaseIntent(t)
+
+	for name, mutate := range map[string]func(*Intent){
+		"no authority":          func(i *Intent) { i.AuthorityID = "" },
+		"no reservation":        func(i *Intent) { i.ReservationID = "" },
+		"no generation":         func(i *Intent) { i.TunnelGeneration = "" },
+		"no candidate nonce":    func(i *Intent) { i.ReservationNonce = "" },
+		"candidate is evidence": func(i *Intent) { i.ReservationNonce = i.EvidenceNonce },
+		"no runtime":            func(i *Intent) { i.RuntimeID = "" },
+		"private address":       func(i *Intent) { i.EgressIPv4 = "10.0.0.1" },
+		"stage":                 func(i *Intent) { i.StageID = "wgstage_0123456789abcdef0123456789abcdef" },
+	} {
+		bad := binding
+		mutate(&bad)
+
+		if _, err := NewRevokeEgressLeaseIntent(bad); !errors.Is(err, ErrInvalidCapability) {
+			t.Errorf("%s: invalid revocation intent accepted", name)
+		}
+
+		bad.Operation = OpRevokeEgressLease
+		if ValidRevokeEgressLeaseIntent(bad) {
+			t.Errorf("%s: invalid revocation intent valid", name)
+		}
+	}
+
+	for _, op := range []string{OpReserveEgressCandidate, OpPermitMultiProbeV2, OpRevokeEgressLease} {
+		other := binding
+		other.Operation = op
+
+		if _, err := NewRevokeEgressLeaseIntent(other); !errors.Is(err, ErrInvalidCapability) {
+			t.Errorf("revocation built from %s", op)
+		}
+	}
+}
