@@ -144,14 +144,22 @@ func verifyManagedProbePolicy(data []byte, requireActive bool) (probeRuleHandles
 	return verifyManagedProbePolicyFor(data, requireActive, netip.MustParseAddr(managedProbeIP))
 }
 
-// verifyManagedProbePolicyFor takes exactly the window's three objects (the set for destination
-// and the two permits, each permit last in its chain) out of a readback, and requires everything
-// left to be the sealed policy. It returns the permits' handles for a targeted removal.
+// verifyManagedProbePolicyFor verifies the probe window for destination (see verifyTimedWindowPolicy).
 func verifyManagedProbePolicyFor(data []byte, requireActive bool, destination netip.Addr) (probeRuleHandles, error) {
 	if _, err := parseCandidateIPv4(destination.String()); err != nil {
 		return probeRuleHandles{}, ErrProbePolicyDrift
 	}
 
+	return verifyTimedWindowPolicy(data, expectedProbeRules, func(raw []byte) error {
+		return verifyManagedProbeSetFor(raw, requireActive, destination)
+	})
+}
+
+// verifyTimedWindowPolicy takes exactly one timed window (its set, checked by verifySet, and the two
+// permits in expectedRules, each last in its chain) out of a readback, and requires everything left
+// to be the sealed policy. It returns the permits' handles for a targeted removal.
+func verifyTimedWindowPolicy(data []byte, expectedRules map[string]string, verifySet func([]byte) error) (
+	probeRuleHandles, error) {
 	var doc struct {
 		Nftables []map[string]json.RawMessage `json:"nftables"`
 	}
@@ -172,7 +180,7 @@ func verifyManagedProbePolicyFor(data []byte, requireActive bool, destination ne
 		}
 
 		if raw, exists := object["set"]; exists {
-			if setSeen || verifyManagedProbeSetFor(raw, requireActive, destination) != nil {
+			if setSeen || verifySet(raw) != nil {
 				return handles, ErrProbePolicyDrift
 			}
 
@@ -199,7 +207,7 @@ func verifyManagedProbePolicyFor(data []byte, requireActive bool, destination ne
 				return handles, ErrProbePolicyDrift
 			}
 
-			if expected, known := expectedProbeRules[rule.Chain]; known && expr == expected {
+			if expected, known := expectedRules[rule.Chain]; known && expr == expected {
 				if decodeProbeJSON(raw, &rule) != nil || rule.Family != "inet" || rule.Table != labNFTTable ||
 					rule.Handle == 0 || permitSeen[rule.Chain] {
 					return handles, ErrProbePolicyDrift

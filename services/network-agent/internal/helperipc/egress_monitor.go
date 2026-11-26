@@ -59,9 +59,19 @@ func (h egressMonitorHealth) fresh(now time.Time) bool {
 	return age >= 0 && age < verifiedProbeEvidenceTTL
 }
 
-// due: every interval, and earlier when the health would expire within one probe budget.
+// nextDue: one interval after the last check, or earlier when the health would expire within one
+// probe budget.
+func (h egressMonitorHealth) nextDue() time.Time {
+	next := h.checkedAt.Add(egressMonitorInterval)
+	if renewal := h.expiresAt.Add(-egressMonitorBudget); renewal.Before(next) {
+		next = renewal
+	}
+
+	return next
+}
+
 func (h egressMonitorHealth) due(now time.Time) bool {
-	return !now.Before(h.checkedAt.Add(egressMonitorInterval)) || !now.Add(egressMonitorBudget).Before(h.expiresAt)
+	return !now.Before(h.nextDue())
 }
 
 // faultMonitoredTunnelLocked faults the lab and removes its tunnel. Only a confirmed cleanup retires

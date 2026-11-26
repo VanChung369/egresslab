@@ -3,11 +3,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/VanChung369/egresslab/services/network-agent/internal/agent"
 	"github.com/VanChung369/egresslab/services/network-agent/internal/helperipc"
@@ -80,5 +83,17 @@ func TestClassifyLabError(t *testing.T) {
 
 	if classifyLabError(nil) != nil {
 		t.Error("nil became an error")
+	}
+}
+
+// The lifecycle finds the data-plane gate on the generation backend by its method set alone.
+func TestTunnelBackendOffersTrafficWindow(t *testing.T) {
+	var backend any = tunnelBackend{}
+
+	if _, ok := backend.(interface {
+		WithTrafficWindow(context.Context, string, string, netip.Addr, uint32, time.Time,
+			func(context.Context) error) error
+	}); !ok {
+		t.Fatal("tunnel backend lost WithTrafficWindow")
 	}
 }

@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/VanChung369/egresslab/services/network-agent/internal/agent"
 	"github.com/VanChung369/egresslab/services/network-agent/internal/helperipc"
@@ -182,6 +184,23 @@ func adaptMultiProbeObservation(
 	}
 
 	return observation, nil
+}
+
+// WithTrafficWindow maps the agent's refusal before opening onto the lifecycle's retryable one.
+func (b tunnelBackend) WithTrafficWindow(
+	ctx context.Context,
+	namespace, generation string,
+	expectedIP netip.Addr,
+	uid uint32,
+	healthUntil time.Time,
+	run func(context.Context) error,
+) error {
+	err := b.ManagedTunnelBackend.WithTrafficWindow(ctx, namespace, generation, expectedIP, uid, healthUntil, run)
+	if errors.Is(err, agent.ErrTrafficGateTooLate) {
+		return fmt.Errorf("%w: %w", helperipc.ErrTrafficWindowTooLate, err)
+	}
+
+	return err
 }
 
 func (b tunnelBackend) ConnectStage(ctx context.Context, profileID, namespace, stageID string) error {

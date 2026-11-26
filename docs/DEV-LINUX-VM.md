@@ -632,6 +632,42 @@ Limitations:
 
 Application networking remained disabled.
 
+### Kernel traffic gate test (Step 33)
+
+Environment:
+- Host OS: macOS 15.3.2 (arm64), Go 1.25.1; tested commit `7356812` with this step's changes.
+- Lima instance: `egresslab` (Ubuntu 24.04.5, kernel 6.8.0-147-generic, arm64, nft 1.0.9). No VPN, reservation or managed lab was used, and no managed namespace's firewall was touched; the helper was not reinstalled. The dedicated user `egresslab-proxy` (UID 997) was created with `useradd --system --user-group --no-create-home --shell /usr/sbin/nologin`.
+
+Tests:
+- macOS: `go vet` (darwin, linux), `go test -race ./...`, `-race -count=20` of the gate and window tests, and `go build` (darwin, linux) passed.
+- Linux (the cross-compiled test binaries of `internal/agent` with its test data and sources, `internal/helperipc` and the helper, run as the normal user): passed, including `TestManagedTrafficGateRealCapture` and `TestTunnelBackendOffersTrafficWindow` (the helper's backend wrapper exposes the gate to the lifecycle).
+
+Real kernel run (two throwaway namespaces joined by a veth pair, the client side named `wg0`, 192.0.2.1 and 192.0.2.2, no default route, so no Internet): the client namespace got exactly `sealLabRules` and the script of `managedTrafficRules(997)`, both written out by the code; a TCP and UDP echo server ran in the peer namespace, and the clients ran through `setpriv` with no supplementary groups.
+
+| Test | Result |
+|---|---|
+| Gate not open, proxy UID, TCP | blocked (timeout) |
+| Gate active, proxy UID, TCP | allowed (echo) |
+| Gate active, another UID (999), TCP | blocked |
+| Gate active, root, TCP | blocked |
+| Gate active, IPv6 TCP | blocked |
+| Gate active, UDP | blocked (`EPERM`) |
+| Gate active, TCP 53 and 853 | blocked |
+| New connection 10.4 s after opening | blocked |
+| Connection established while active | after expiry, data the server pushed never arrived, and data the client sent never reached the server |
+| Stale flow: UID 999 connected through a temporary unmarked permit (like a probe window), removed before the gate opened | data the server pushed while the gate was open never arrived |
+| Gate removed by its handles | no gate object left; the ruleset was byte-identical to the sealed one before the gate; still blocked |
+
+- Review found that the first input permit (any established TCP on `wg0`) also admitted flows opened before the gate. With that permit, the stale-flow row failed: the push **arrived**. The permits now mark admitted connections (`ct mark set`) and accept only marked replies; with them, every row above passed. The first permit passed every other row in two earlier runs.
+- The readbacks of the final run while active, after expiry and after removal are the test data `nft-lab-traffic-active.json`, `nft-lab-traffic-expired.json` and `nft-lab-traffic-closed.json`; nft 1.0.9 printed the permits exactly in the expected canonical form (the UID and the mark as numbers, the mark statement as `mangle`), and the expired set had no `elem`. The temporary permits of the stale-flow test used handles 13 and 14, so the gate's are 15 and 16.
+- After: both namespaces deleted, and `egresslab-lab-recover` found nothing.
+
+Limitations:
+- The gate ran with the code's scripts but not through `WithTrafficWindow` on a live managed tunnel: no caller exists yet, and its open, verify and close sequence is covered by the fake kernel with the real captures.
+- No helper crash or hang was simulated while a gate was open; the expiry itself is the kernel's and was observed.
+
+Application networking remained disabled.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
@@ -658,4 +694,4 @@ If DNS returns several addresses, do not take the first one blindly. The provide
 
 ## Next Milestone
 
-Step 33, on top of the continuous egress monitoring of prepared generations verified on Lima (Step 32), the reboot-bound reservation recovery verified on Lima through a real helper crash and guest reboot (Step 31E.3), the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting; in Step 31E.3 both reservations, 10 s after `connect-tunnel`, succeeded at the first attempt); since Step 32 a failed worker names a coded reason in the helper's error, but no failure has recurred since, so the cause is still unknown. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.
+Step 34, on top of the kernel-timed traffic gate verified in throwaway namespaces on Lima (Step 33), the continuous egress monitoring of prepared generations verified on Lima (Step 32), the reboot-bound reservation recovery verified on Lima through a real helper crash and guest reboot (Step 31E.3), the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting; in Step 31E.3 both reservations, 10 s after `connect-tunnel`, succeeded at the first attempt); since Step 32 a failed worker names a coded reason in the helper's error, but no failure has recurred since, so the cause is still unknown. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.

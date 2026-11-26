@@ -185,6 +185,17 @@ The privileged helper periodically verifies the public IPv4 address of a prepare
 
 Application networking remains disabled. Polling does not guarantee instantaneous detection of public address changes.
 
+### Kernel-timed traffic enforcement (Step 33)
+
+Managed traffic windows require an exact prepared reservation, tunnel generation and fresh monitoring health. The namespace firewall permits only IPv4 TCP over the approved interface, with outbound sockets bound to a dedicated UID.
+
+- Both directions depend on a kernel-expiring set (10 s). No unconditional established-connection permit survives the timeout, and only replies of connections the proxy permit admitted (a conntrack mark) come back.
+- A window never runs past the next monitor check and leaves time to close; a refusal before opening is retryable, any other failure faults the tunnel.
+- Traffic windows are not persisted as firewall baselines. Closing a window must restore and verify the sealed policy.
+- The primitive is not exposed through IPC.
+
+Application networking remains disabled until the supervised proxy runtime is implemented.
+
 ### Windows / macOS / Linux
 
 The Go control plane can run natively on Windows and macOS.

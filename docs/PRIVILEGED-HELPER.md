@@ -1,6 +1,6 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 32 — continuous egress monitoring.** A controller CLI signs `CreateLab`,
+Status: **Step 33 — kernel-timed traffic gate.** A controller CLI signs `CreateLab`,
 `ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`, `ReserveEgressCandidateV1`,
 `PrepareEgressLeaseV1`, `RevokeEgressLeaseV1` and `RecoverRetiredGenerationV1` and drives the helper's sealed lab, tunnel and diagnostic probes in the Linux
 runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports
@@ -23,7 +23,9 @@ durable hold and records the release in the authority's journal. After a helper 
 of the Linux guest, `recover-egress` has a later helper epoch attest, from its boot-bound witnesses,
 that the reboot ended the original generation (`RecoverRetiredGenerationV1`). While a lease is
 prepared, the helper re-verifies its generation's address with the same two sources about every 20 s;
-drift or a failed check faults and removes the tunnel, and the durable hold stays. Windows (WSL2), Linux and macOS (Lima, Keychain) are
+drift or a failed check faults and removes the tunnel, and the durable hold stays. An internal,
+kernel-timed traffic gate for the future proxy's dedicated UID is built and tested, but nothing
+opens it yet. Windows (WSL2), Linux and macOS (Lima, Keychain) are
 verified end to end, except that the multi-source probe has run on WSL2 and Lima only, not on native
 Linux. No lease or proxy traffic exists; the sections from "Typed operations only" on are partly
 design.
@@ -1487,6 +1489,7 @@ or permit, the sealed ruleset remained, and `verify-lab` answered `tunnel_config
 | 31E.3a | Persistent helper epoch witness |
 | 31E.3 | Reboot-bound reservation recovery |
 | 32 | Continuous egress monitoring of a prepared generation |
+| 33 | Kernel-timed traffic gate (kill-switch) |
 
 The states stay separate; none of them is an `active` flag:
 
@@ -1499,7 +1502,8 @@ The states stay separate; none of them is an `active` flag:
 | Prepared lease | a reservation bound by the helper to its tunnel generation (Step 31D.3a); not active |
 | Retired generation | a candidate's tunnel generation whose removal the helper confirmed (Step 31D.3c), for its epoch only |
 | Monitoring health | a prepared generation's address verified again by the helper (Step 32), for 60 s at most; renews no evidence or authorization |
-| Active lease | the right to use the address, which also needs the kill-switch and data-plane enforcement (later steps) on top of the monitoring |
+| Traffic window | a kernel-timed gate for one trusted worker of the prepared generation (Step 33), 10 s at most, on fresh monitoring health; not reachable through IPC yet |
+| Active lease | the right to use the address: the supervised proxy runtime (later steps) on top of the monitoring and the traffic gate |
 | Network ready | application traffic allowed |
 
 `EgressCandidateRegistry` and the lease registry of the earlier lab CLIs are not that authority:
@@ -1893,3 +1897,47 @@ Polling cannot detect an address change instantly, and a preparation that lands 
 evidence deadline leaves the first check little time, so it may fault. The controller, the journal
 and the IPC protocol did not change. Application networking remains disabled; kernel-level
 enforcement and the right to open application traffic belong to Steps 33 and 34.
+
+### Kernel-timed traffic gate (Step 33)
+
+A hung or crashed helper cannot be trusted to close network access, so the expiry lives in the
+kernel. The data-plane gate reuses the probe window's design (Step 29) with a different set:
+
+| Object | Content |
+|---|---|
+| `egresslab_app4` | a one-element `ifname` set holding `"wg0"`, `timeout 10s`, expired by the kernel |
+| output permit | `meta nfproto ipv4 oifname @egresslab_app4 meta skuid UID meta l4proto tcp ct mark set MARK accept` |
+| input permit | `meta nfproto ipv4 iifname @egresslab_app4 meta l4proto tcp ct state established ct mark MARK accept` |
+
+- Both permits match through the set, so neither direction survives the element: there is no
+  unconditional "established" accept, and an open connection stops passing data in either
+  direction when the element expires. The sealed IPv6 drop and DNS drops (53, 853) still come
+  first, and UDP, other UIDs and root stay closed by the drop policies.
+- The output permit marks the connections it admits (`MARK` is `0x65676c01`; no other lab rule sets
+  a mark), and only replies of marked connections come back. A flow admitted earlier, such as a
+  probe's connection still in conntrack, gets nothing through an open gate.
+- The UID is the dedicated proxy user (`egresslab-proxy`), from trusted local provisioning; never
+  from an application or an IPC request.
+- One shared verifier (`verifyTimedWindowPolicy`) checks any timed window: exactly its set and two
+  permits, each last in its chain, and the sealed policy for everything else. The gate's permits
+  are compared with the canonical form nft 1.0.9 printed (real captures in
+  `testdata/nft-lab-traffic-*.json`); another rendering is refused.
+- `withTrafficGateLocked` opens the gate only while the health it rests on outlasts the whole kernel
+  timeout and a 2 s close budget (otherwise it refuses before writing anything), verifies the active
+  gate on a readback, runs the worker with a deadline 1 s before the element can expire, and always closes the gate with its own context:
+  only the verified objects are deleted, and the sealed policy is required afterwards. An
+  unconfirmed close marks the namespace drifted. The gate is never recorded as a session baseline,
+  so a Reconcile cannot bring it back after a crash.
+- `ManagedTunnelBackend.WithTrafficWindow` requires the exact namespace, tunnel generation and
+  sticky address of a configured, unfaulted tunnel, a verified tunnel and an idle namespace before
+  and after the window (probe and traffic windows never overlap). `LabLifecycle.
+  WithPreparedTrafficWindow` adds the exact prepared reservation and fresh monitoring health, gives
+  way to a due monitor check (`LAB_BUSY`), and never runs past the next check as the monitor computes
+  it (20 s after the last check, or 30 s before the health expires, whichever comes first); it needs
+  more than 14 s of that left. A refusal before anything opened is `LAB_BUSY` and leaves the tunnel;
+  any other failed window faults the tunnel, and the durable hold stays.
+- So a window can start only in the first few seconds after a monitor check, and lasts at most 9 s.
+  The data plane of the next steps has to live with that cadence or change it.
+- No IPC operation, listener or worker calls it yet; application networking remains disabled
+  until the supervised proxy runtime exists. The controller, the journal and the signed protocol
+  did not change.
