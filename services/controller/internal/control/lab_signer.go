@@ -72,6 +72,9 @@ type LabIntent struct {
 	AuthorityID      string `json:"authority_id,omitempty"`
 	ReservationID    string `json:"reservation_id,omitempty"`
 	EgressIPv4       string `json:"egress_ipv4,omitempty"`
+
+	// RecoverRetiredGenerationV1 only, last as in helperauth.Intent.
+	OriginalHelperID string `json:"original_helper_id,omitempty"`
 }
 
 type LabClaims struct {

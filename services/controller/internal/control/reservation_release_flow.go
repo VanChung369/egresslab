@@ -18,6 +18,9 @@ var (
 const releaseRecoveryAdvice = "check list-reservations; if the reservation is still listed, keep the helper " +
 	"running (a restart loses its retirement record) and confirm with a newly approved release-egress"
 
+const rebootRecoveryAdvice = "check list-reservations; recovery requires the original epoch witness and a " +
+	"confirmed guest kernel reboot"
+
 // LeaseRevocationTransport is all a release needs from the runtime: no probe, candidate or tunnel.
 type LeaseRevocationTransport interface {
 	HelperInfo(ctx context.Context) (LabHelperInfo, error)
@@ -85,13 +88,32 @@ func (a *ReservationAuthority) ReleaseEgress(ctx context.Context, reservationID 
 	return a.releaseEgressAt(ctx, reservationID, transport, signer, rt, time.Now)
 }
 
-// releaseEgressAt never holds the journal lock across the runtime call. Every failure before the
-// receipt keeps the hold untouched; a lost receipt or a busy journal after the retirement keeps it
-// too, and a newly approved release confirms the retirement with a fresh capability. Nothing is
-// retried, forced or replaced by an unsigned disconnect.
+// RecoverEgress releases a hold whose original helper epoch is gone: a later epoch of the same
+// runtime and key attests, from its boot-bound witnesses, that a kernel reboot ended the original
+// generation. It is never a fallback for a failed release.
+func (a *ReservationAuthority) RecoverEgress(ctx context.Context, reservationID string,
+	transport LeaseRevocationTransport, signer LabSigner, rt TrustedRuntime) (ReleasedEgressResult, error) {
+	return a.retireEgressAt(ctx, reservationID, transport, signer, rt, time.Now, true)
+}
+
 func (a *ReservationAuthority) releaseEgressAt(ctx context.Context, reservationID string,
 	transport LeaseRevocationTransport, signer LabSigner, rt TrustedRuntime, now func() time.Time) (
 	ReleasedEgressResult, error) {
+	return a.retireEgressAt(ctx, reservationID, transport, signer, rt, now, false)
+}
+
+// retireEgressAt never holds the journal lock across the runtime call. Every failure before the
+// receipt keeps the hold untouched; a lost receipt or a busy journal after the retirement keeps it
+// too, and a newly approved command confirms the retirement with a fresh capability. Nothing is
+// retried, forced or replaced by an unsigned disconnect.
+func (a *ReservationAuthority) retireEgressAt(ctx context.Context, reservationID string,
+	transport LeaseRevocationTransport, signer LabSigner, rt TrustedRuntime, now func() time.Time,
+	recovering bool) (ReleasedEgressResult, error) {
+	advice := releaseRecoveryAdvice
+	if recovering {
+		advice = rebootRecoveryAdvice
+	}
+
 	if ctx == nil || transport == nil || signer == nil || now == nil {
 		return ReleasedEgressResult{}, ErrReservationUnavailable
 	}
@@ -130,19 +152,32 @@ func (a *ReservationAuthority) releaseEgressAt(ctx context.Context, reservationI
 		return ReleasedEgressResult{}, err
 	}
 
-	// Phase 2: the original helper epoch.
+	// Phase 2: the original helper epoch, or for a recovery a later one of the same runtime and key.
 	helper, err := transport.HelperInfo(ctx)
 	if err != nil {
 		return ReleasedEgressResult{}, err
 	}
 
-	if !releaseHelperMatchesHold(hold, helper) {
+	if recovering {
+		if !helper.Valid() || !helper.AuthorizationConfigured || helper.RuntimeID != hold.Owner.RuntimeID ||
+			helper.PublicKeySHA256 != hold.PublicKeySHA256 || helper.HelperID == hold.Owner.HelperEpoch {
+			return ReleasedEgressResult{}, fmt.Errorf(
+				"%w: recovery requires a later helper epoch of the original runtime; the original epoch uses release-egress",
+				ErrReservationReleaseInvalid)
+		}
+	} else if !releaseHelperMatchesHold(hold, helper) {
 		return ReleasedEgressResult{}, fmt.Errorf("%w: the original helper epoch is required", ErrReservationReleaseInvalid)
 	}
 
 	intent, err := revokeIntentFromHold(a.info, hold)
 	if err != nil {
 		return ReleasedEgressResult{}, err
+	}
+
+	if recovering {
+		if intent, err = NewLabRecoverRetiredGenerationIntent(intent, hold.Owner.HelperEpoch); err != nil {
+			return ReleasedEgressResult{}, err
+		}
 	}
 
 	// Phase 3: one new signed revocation.
@@ -178,7 +213,7 @@ func (a *ReservationAuthority) releaseEgressAt(ctx context.Context, reservationI
 
 	if err != nil {
 		return ReleasedEgressResult{}, fmt.Errorf("%w: reservation %s: %s: %w", ErrLeaseRevocationUnconfirmed, hold.ID,
-			releaseRecoveryAdvice, err)
+			advice, err)
 	}
 
 	admission := releaseAdmission{
@@ -197,14 +232,14 @@ func (a *ReservationAuthority) releaseEgressAt(ctx context.Context, reservationI
 	// against the hold it reloads under the lock.
 	if err := validateReleaseAdmission(a.info, admission, receivedAt); err != nil {
 		return ReleasedEgressResult{}, fmt.Errorf("%w: reservation %s: %s: %w", ErrLeaseRevocationUnconfirmed, hold.ID,
-			releaseRecoveryAdvice, err)
+			advice, err)
 	}
 
 	// Phase 5: the durable release.
 	record, err := releaseDurableEgressJournal(ctx, journal, admission, now)
 	if err != nil {
 		return ReleasedEgressResult{}, fmt.Errorf("%w: reservation %s: %s: %w", ErrReservationReleaseUnconfirmed, hold.ID,
-			releaseRecoveryAdvice, err)
+			advice, err)
 	}
 
 	return ReleasedEgressResult{Reservation: hold, RevokedLease: record.Receipt, ReleasedAt: record.ReleasedAt}, nil

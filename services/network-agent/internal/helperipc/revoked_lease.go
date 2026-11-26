@@ -117,12 +117,16 @@ type RevokedLeaseInfo struct {
 	PublicKeySHA256   string `json:"public_key_sha256"`
 	RevocationNonce   string `json:"revocation_nonce"`
 	GenerationRetired bool   `json:"generation_retired"`
+
+	// RecoverRetiredGenerationV1 only: the kernel boots of the original and the recovering epoch.
+	OriginalBootID string `json:"original_boot_id,omitempty"`
+	CurrentBootID  string `json:"current_boot_id,omitempty"`
 }
 
 func (r *RevokedLeaseInfo) valid() bool {
 	if r == nil ||
 		!r.GenerationRetired ||
-		!helperauth.ValidRevokeEgressLeaseIntent(r.Intent) ||
+		!helperauth.ValidRetirementIntent(r.Intent) ||
 		!helperauth.ValidCapabilityNonce(r.RevocationNonce) ||
 		r.RevocationNonce == r.Intent.EvidenceNonce ||
 		r.RevocationNonce == r.Intent.ReservationNonce {
@@ -136,7 +140,7 @@ func (r *RevokedLeaseInfo) valid() bool {
 		RuntimeID:               r.Intent.RuntimeID,
 	}
 
-	return identity.valid()
+	return identity.valid() && r.validRecoveryBoundary()
 }
 
 // matchesCapability binds the receipt to the request structurally; the helper verified the
@@ -309,15 +313,19 @@ func (l *LabLifecycle) revokeEgressLease(
 }
 
 func validRevokedLeaseResponse(req Request, resp Response) bool {
-	if req.Operation != helperauth.OpRevokeEgressLease || !resp.OK {
+	if (req.Operation != helperauth.OpRevokeEgressLease && req.Operation != helperauth.OpRecoverRetiredGeneration) ||
+		!resp.OK {
 		return resp.RevokedLease == nil
 	}
 
-	return !resp.NetworkReady && resp.RevokedLease.matchesCapability(req.Intent, req.Capability)
+	return !resp.NetworkReady &&
+		req.Intent != nil &&
+		req.Intent.Operation == req.Operation &&
+		resp.RevokedLease.matchesCapability(req.Intent, req.Capability)
 }
 
-// RevokeEgressLease submits one signed revocation for the lab and durable reservation it names. It
-// releases no durable reservation.
+// RevokeEgressLease submits one signed revocation, or reboot-bound recovery, for the lab and durable
+// reservation it names. It releases no durable reservation.
 func RevokeEgressLease(
 	ctx context.Context,
 	socketPath, profileID, namespace string,
@@ -325,7 +333,7 @@ func RevokeEgressLease(
 ) (Response, error) {
 	signed := capability.Claims.Intent
 
-	if !helperauth.ValidRevokeEgressLeaseIntent(signed) || signed.ProfileID != profileID || signed.Namespace != namespace {
+	if !helperauth.ValidRetirementIntent(signed) || signed.ProfileID != profileID || signed.Namespace != namespace {
 		return Response{}, &Error{Code: CodeInvalidRequest, Message: "invalid lease revocation capability"}
 	}
 

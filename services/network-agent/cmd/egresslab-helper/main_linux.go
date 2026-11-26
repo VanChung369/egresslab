@@ -294,14 +294,24 @@ func run(
 		log.Printf("Runtime ID: %s", runtimeID)
 	}
 
+	// Only an epoch whose own witness is committed answers a reboot-bound recovery.
+	var readEpochRecovery helperipc.EpochRecoveryReader
+
+	if enableMultiProbe {
+		readEpochRecovery = func(originalID, currentID, runtimeID, fingerprint string) (string, string, error) {
+			return readEpochRecoveryLocked(managedLayout, originalID, currentID, runtimeID, fingerprint)
+		}
+	}
+
 	log.Printf("EgressLab helper listening on %s (UID %d; %s)", helperipc.SocketPath, uid, mode)
 
 	err = helperipc.ServeWith(ctx, listener, uint32(uid), helperipc.ServerOptions{
-		Scan:      scanRecovery,
-		Verifier:  verifier,
-		Labs:      labs,
-		RuntimeID: runtimeID,
-		ReadStage: readStage,
+		Scan:              scanRecovery,
+		Verifier:          verifier,
+		Labs:              labs,
+		RuntimeID:         runtimeID,
+		ReadStage:         readStage,
+		ReadEpochRecovery: readEpochRecovery,
 	})
 
 	// Labs that cannot be deleted stay, with their markers, for egresslab-lab-recover.

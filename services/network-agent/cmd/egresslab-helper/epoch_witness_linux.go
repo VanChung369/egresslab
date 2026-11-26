@@ -327,3 +327,54 @@ func registerHelperEpochLocked(layout vaultLayout, runtimeID, helperID, fingerpr
 		PublicKeySHA256: fingerprint,
 	})
 }
+
+// verifyEpochRecovery proves that the original epoch belonged to an earlier kernel boot of the same
+// runtime and key than the current one, which runs on the current kernel.
+func verifyEpochRecovery(ledger epochWitnessLedger, originalID, currentID, runtimeID, fingerprint,
+	kernelBootID string) (string, string, error) {
+	if !ledger.valid() || !validWitnessBootID(kernelBootID) || originalID == currentID {
+		return "", "", errors.New("invalid recovery identity")
+	}
+
+	original, originalExists := ledger.find(originalID)
+	current, currentExists := ledger.find(currentID)
+
+	if !originalExists || !currentExists {
+		return "", "", errors.New("helper epoch witness missing")
+	}
+
+	if ledger.Entries[len(ledger.Entries)-1] != current {
+		return "", "", errors.New("current epoch is not the latest witness")
+	}
+
+	if original.RuntimeID != runtimeID || current.RuntimeID != runtimeID ||
+		original.PublicKeySHA256 != fingerprint || current.PublicKeySHA256 != fingerprint {
+		return "", "", errors.New("epoch witness identity mismatch")
+	}
+
+	if current.BootID != kernelBootID {
+		return "", "", errors.New("current kernel boot mismatch")
+	}
+
+	if original.BootID == current.BootID {
+		return "", "", errors.New("kernel reboot not established")
+	}
+
+	return original.BootID, current.BootID, nil
+}
+
+// readEpochRecoveryLocked runs in the helper, which holds the vault lock for its lifetime.
+func readEpochRecoveryLocked(layout vaultLayout, originalID, currentID, runtimeID, fingerprint string) (
+	string, string, error) {
+	ledger, err := readEpochWitnessLedger(layout)
+	if err != nil {
+		return "", "", err
+	}
+
+	bootID, err := readKernelBootID()
+	if err != nil {
+		return "", "", err
+	}
+
+	return verifyEpochRecovery(ledger, originalID, currentID, runtimeID, fingerprint, bootID)
+}

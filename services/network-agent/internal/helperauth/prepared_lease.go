@@ -14,7 +14,7 @@ var (
 // HasLeaseFields lets every other operation refuse lease authorization metadata.
 func (in Intent) HasLeaseFields() bool {
 	return in.ReservationNonce != "" || in.RuntimeID != "" || in.AuthorityID != "" || in.ReservationID != "" ||
-		in.EgressIPv4 != ""
+		in.EgressIPv4 != "" || in.OriginalHelperID != ""
 }
 
 func validPrepareLeaseFields(in Intent) bool {

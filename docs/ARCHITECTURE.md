@@ -57,7 +57,7 @@ The unique-IP invariant needs one authority across runtimes: two Linux runtimes,
 - Four indexes (owner, public IPv4, profile and reservation ID) change together; validation, the collision checks and publication run under one mutex, so requests through one registry instance never hold the same address twice, and an existing hold is never overwritten or evicted.
 - Expiry ends eligibility for activation, not the hold: an address is released only once a confirmed retirement of its owner's generation is committed to the journal (Step 31D.3d.1).
 
-The registry alone is in memory and coordinates one process; Step 31C puts it behind a durable journal shared by controller processes. The signed reservation workflow (Step 31D.1) and the provisioned authority with its CLI commands (Step 31D.2) build on it; the HTTP API does not reach it. Lease preparation (Steps 31D.3a and 31D.3b) and the helper's generation-bound revocation (Step 31D.3c) build on it too; the controller's revocation and release (Step 31D.3d) and collision and recovery tests (Step 31E) come later; no application traffic is allowed.
+The registry alone is in memory and coordinates one process; Step 31C puts it behind a durable journal shared by controller processes. The signed reservation workflow (Step 31D.1) and the provisioned authority with its CLI commands (Step 31D.2) build on it; the HTTP API does not reach it. Lease preparation (Steps 31D.3a and 31D.3b) and the helper's generation-bound revocation (Step 31D.3c) build on it too; the controller's revocation and release (Step 31D.3d), the collision and race tests (Steps 31E.1 and 31E.2) and the reboot-bound recovery (Step 31E.3) followed; no application traffic is allowed.
 
 ### Durable reservation authority (Step 31C)
 
@@ -142,7 +142,7 @@ Journal compaction, migrating an authority between hosts (a Windows authority is
 
 - Release depends on neither fresh probe evidence nor a surviving profile binding or lab.
 - An uncertain revocation keeps durable ownership; an uncertain persistence outcome requires inspecting the journal.
-- No automatic retry, forced release or fallback to an unsigned disconnect exists. A hold whose helper restarted, or whose generation the backend contradicted, cannot be released by any command yet.
+- No automatic retry, forced release or fallback to an unsigned disconnect exists. A hold whose helper crashed is released only by the reboot-bound recovery below; one whose helper restarted within the same kernel boot, or whose generation the backend contradicted, cannot be released by any command.
 - Application networking remains disabled.
 
 The whole lifecycle (reserve, prepare, revoke, release, reconnect, reserve the same address again) ran on Lima against the real WireGuard tunnel in Step 31D.3e (`docs/DEV-LINUX-VM.md`). Step 31E.1 ran it on two Lima runtimes sharing the controller key and the authority: the second runtime's reservation of an address the first one held answered `EGRESS_IP_COLLISION` with the journal unchanged, and succeeded once the first runtime released it.
@@ -161,8 +161,19 @@ The provisioned V2 authority is exercised through independent operating-system p
 A helper process restart does not prove that its managed kernel resources are gone. Persistent epoch witnesses record the Linux kernel boot to which each multi-probe helper lifetime belonged, in a root-owned, checksummed ledger in the managed vault, committed before the helper serves any request. A future recovery operation may use a trusted kernel reboot boundary to attest the retirement of an older generation.
 
 - Missing witnesses, same-boot restarts and identity mismatches cannot authorize recovery.
-- A witness authorizes nothing by itself; no hold can be released across helper epochs yet.
+- A witness authorizes nothing by itself; only the signed recovery below uses it.
 - VM cloning, snapshot rollback and untrusted runtime administration are outside this recovery guarantee.
+
+### Reboot-bound reservation recovery (Step 31E.3)
+
+An explicitly approved `recover-egress` operation may release an orphaned reservation only after the trusted runtime confirms a kernel reboot. Recovery requires persistent witnesses for the original and current helper epochs, the same runtime identity and controller key, and distinct kernel boot IDs. The helper answers the signed `RecoverRetiredGenerationV1` with a receipt naming both boots; the existing durable release transaction validates and commits it, and journal replay checks it again.
+
+- Same-boot restarts, missing witnesses, invalid identities and uncertain persistence fail closed.
+- Normal revocation remains bound to the original helper epoch. Recovery is never an automatic fallback.
+- A journal holding a recovery release cannot be read by a controller built before this step; all controllers sharing the authority are upgraded first.
+- VM cloning, snapshot rollback and untrusted root administration are outside the guarantee.
+
+Application networking remains disabled. The recovery ran on Lima through a real helper crash and guest reboot (`docs/DEV-LINUX-VM.md`).
 
 ### Windows / macOS / Linux
 

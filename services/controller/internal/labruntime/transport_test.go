@@ -1409,3 +1409,55 @@ func TestRevokedLeaseResponseMetadata(t *testing.T) {
 		t.Fatal("failure document with a receipt key accepted")
 	}
 }
+
+func TestRecoveredGenerationResponseMetadata(t *testing.T) {
+	receipt := testRevokedLeaseReceipt(t)
+
+	intent, err := control.NewLabRecoverRetiredGenerationIntent(receipt.Intent, "helper_ffffffffffffffffffffffffffffffff")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	receipt.Intent = intent
+	receipt.OriginalBootID = "11111111-2222-4333-8444-555555555555"
+	receipt.CurrentBootID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+	response := helperResponse{
+		Version:      1,
+		Operation:    control.LabRecoverRetiredGenerationOp,
+		OK:           true,
+		RevokedLease: &receipt,
+	}
+
+	raw, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := decodeResponse(raw, control.LabRecoverRetiredGenerationOp); err != nil {
+		t.Fatal(err)
+	}
+
+	response.Operation = control.LabRevokeEgressLeaseOp
+
+	raw, err = json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := decodeResponse(raw, control.LabRevokeEgressLeaseOp); err == nil {
+		t.Fatal("recovery receipt accepted as normal revocation")
+	}
+
+	response.Operation = control.LabRecoverRetiredGenerationOp
+	receipt.CurrentBootID = receipt.OriginalBootID
+
+	raw, err = json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := decodeResponse(raw, control.LabRecoverRetiredGenerationOp); err == nil {
+		t.Fatal("same-boot recovery receipt accepted")
+	}
+}

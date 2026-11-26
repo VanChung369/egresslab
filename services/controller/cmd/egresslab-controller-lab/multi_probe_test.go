@@ -493,14 +493,18 @@ func (f *fakeRuntime) RevokeEgressLease(
 	profileID, namespace string,
 	capability control.LabCapability,
 ) (control.LabRevokedLeaseInfo, error) {
-	f.calls = append(f.calls, control.LabRevokeEgressLeaseOp)
+	intent := capability.Claims.Intent
+
+	f.calls = append(f.calls, intent.Operation)
 	f.revokeCalls = append(f.revokeCalls, capability)
 
 	if f.revokeErr != nil {
 		return control.LabRevokedLeaseInfo{}, f.revokeErr
 	}
 
-	intent := capability.Claims.Intent
+	if intent.Operation == control.LabRecoverRetiredGenerationOp {
+		return f.recoverRetiredGeneration(capability)
+	}
 
 	record := f.revocationRecords[intent.ReservationNonce]
 	if record == nil {
@@ -551,4 +555,29 @@ func (f *fakeRuntime) RevokeEgressLease(
 	}
 
 	return receipt, nil
+}
+
+// recoverRetiredGeneration simulates the helper's witness proof: the original epoch is gone and a
+// reboot happened only when rebootBoots is set.
+func (f *fakeRuntime) recoverRetiredGeneration(capability control.LabCapability) (control.LabRevokedLeaseInfo, error) {
+	intent := capability.Claims.Intent
+
+	if !control.ValidLabRecoverRetiredGenerationIntent(intent) || intent.OriginalHelperID == f.info.HelperID ||
+		intent.RuntimeID != f.info.RuntimeID || capability.Claims.HelperID != f.info.HelperID {
+		return control.LabRevokedLeaseInfo{}, labruntime.Errorf(labruntime.CodeAuthorizationDenied, "recovery binding mismatch")
+	}
+
+	if f.rebootBoots == [2]string{} {
+		return control.LabRevokedLeaseInfo{}, labruntime.Errorf(labruntime.CodeAuthorizationDenied, "authorization denied")
+	}
+
+	return control.LabRevokedLeaseInfo{
+		Intent:            intent,
+		HelperID:          f.info.HelperID,
+		PublicKeySHA256:   f.info.PublicKeySHA256,
+		RevocationNonce:   capability.Claims.Nonce,
+		GenerationRetired: true,
+		OriginalBootID:    f.rebootBoots[0],
+		CurrentBootID:     f.rebootBoots[1],
+	}, nil
 }

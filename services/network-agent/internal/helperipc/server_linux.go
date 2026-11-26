@@ -37,6 +37,8 @@ type ServerOptions struct {
 	Labs      *LabLifecycle
 	RuntimeID string
 	ReadStage StageReader
+
+	ReadEpochRecovery EpochRecoveryReader
 }
 
 // Serve answers local, single-request connections until ctx is cancelled, without
@@ -77,6 +79,10 @@ func ServeWith(ctx context.Context, listener *net.UnixListener, allowedUID uint3
 
 	if opts.RuntimeID != "" && !ValidRuntimeID(opts.RuntimeID) {
 		return errors.New("invalid runtime ID")
+	}
+
+	if opts.ReadEpochRecovery != nil && (opts.Verifier == nil || opts.RuntimeID == "") {
+		return errors.New("reboot recovery requires authorization and a runtime identity")
 	}
 
 	if listener == nil || allowedUID == 0 {
@@ -413,6 +419,22 @@ func respond(ctx context.Context, req Request, opts ServerOptions) Response {
 			if code == CodeStateUncertain {
 				return refuse(code, revocationUncertainMessage)
 			}
+
+			return refuse(code, labMessages[code])
+		}
+
+		resp.OK = true
+		resp.RevokedLease = &receipt
+
+	case helperauth.OpRecoverRetiredGeneration:
+		if opts.ReadEpochRecovery == nil || v == nil {
+			return refuse(CodeOperationDisabled, "reboot recovery not enabled")
+		}
+
+		receipt, err := recoverRetiredGeneration(ctx, req, v, opts.RuntimeID, opts.ReadEpochRecovery)
+		if err != nil {
+			code := labCode(err)
+			log.Printf("generation recovery: %s: %v", code, err)
 
 			return refuse(code, labMessages[code])
 		}

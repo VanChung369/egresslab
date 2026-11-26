@@ -5,6 +5,9 @@ package helperipc
 import (
 	"context"
 	"errors"
+	"net"
+	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/VanChung369/egresslab/services/network-agent/internal/helperauth"
@@ -115,5 +118,81 @@ func TestRevocationUncertainKeepsRecoveryPath(t *testing.T) {
 	resp, err := RevokeEgressLease(context.Background(), socket, f.lab.ProfileID, f.lab.Namespace, *f.mint(*req.Intent).Capability)
 	if err != nil || resp.RevokedLease == nil || backend.cleanups != 2 {
 		t.Fatalf("confirmation after the uncertain revocation: %+v %v", resp, err)
+	}
+}
+
+func TestRecoveredGenerationIPC(t *testing.T) {
+	requireUnprivileged(t)
+
+	f, _, preparation := newPreparedLeaseFixture(t)
+
+	revocation, err := helperauth.NewRevokeEgressLeaseIntent(*preparation.Intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const oldID = "helper_ffffffffffffffffffffffffffffffff"
+
+	intent, err := helperauth.NewRecoverRetiredGenerationIntent(revocation, oldID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	helperID, fingerprint := f.verifier.Identity()
+
+	const (
+		oldBoot = "11111111-2222-4333-8444-555555555555"
+		newBoot = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	)
+
+	var sameBoot atomic.Bool
+
+	socket := serveWith(t, func(ctx context.Context, listener *net.UnixListener) error {
+		return ServeWith(ctx, listener, uint32(os.Getuid()), ServerOptions{
+			Verifier:  f.verifier,
+			RuntimeID: multiProbeTestRuntimeID,
+			ReadEpochRecovery: func(original, current, runtime, key string) (string, string, error) {
+				if original != oldID || current != helperID || runtime != multiProbeTestRuntimeID || key != fingerprint {
+					return "", "", errors.New("identity mismatch")
+				}
+
+				if sameBoot.Load() {
+					return "", "", errors.New("kernel reboot not established")
+				}
+
+				return oldBoot, newBoot, nil
+			},
+		})
+	})
+
+	req := f.mint(intent)
+
+	response, err := RevokeEgressLease(context.Background(), socket, intent.ProfileID, intent.Namespace, *req.Capability)
+	if err != nil || response.RevokedLease == nil || response.NetworkReady ||
+		response.Operation != helperauth.OpRecoverRetiredGeneration ||
+		response.RevokedLease.OriginalBootID != oldBoot || response.RevokedLease.CurrentBootID != newBoot {
+		t.Fatalf("recovery IPC failed: %+v %v", response, err)
+	}
+
+	if _, err := RevokeEgressLease(context.Background(), socket, intent.ProfileID, intent.Namespace,
+		*req.Capability); ErrorCode(err) != CodeAuthorizationDenied {
+		t.Fatalf("recovery replay was not refused: %v", err)
+	}
+
+	sameBoot.Store(true)
+
+	if _, err := RevokeEgressLease(context.Background(), socket, intent.ProfileID, intent.Namespace,
+		*f.mint(intent).Capability); ErrorCode(err) != CodeAuthorizationDenied {
+		t.Fatalf("same-boot recovery was not refused: %v", err)
+	}
+
+	self, err := helperauth.NewRecoverRetiredGenerationIntent(revocation, helperID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := RevokeEgressLease(context.Background(), socket, self.ProfileID, self.Namespace,
+		*f.mint(self).Capability); ErrorCode(err) != CodeAuthorizationDenied {
+		t.Fatalf("recovery by the original epoch itself was not refused: %v", err)
 	}
 }

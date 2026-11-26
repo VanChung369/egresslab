@@ -31,10 +31,11 @@ type releaseAdmission struct {
 	receivedAt time.Time
 }
 
-// validateReleaseAdmission requires the receipt for exactly this hold, from the helper epoch,
-// runtime and key that held it, answering a capability this controller signed and submitted while
-// it was valid. The cleanup may outlast the capability: its lifetime is checked at submission.
-// Fresh probe evidence is not required.
+// validateReleaseAdmission requires the receipt for exactly this hold, from the helper epoch that
+// held it (or, for a reboot-bound recovery, a later one), the runtime and key that held it,
+// answering a capability this controller signed and submitted while it was valid. The cleanup may
+// outlast the capability: its lifetime is checked at submission. Fresh probe evidence is not
+// required.
 func validateReleaseAdmission(authority ReservationAuthorityInfo, a releaseAdmission, now time.Time) error {
 	hold := a.hold
 
@@ -42,10 +43,8 @@ func validateReleaseAdmission(authority ReservationAuthorityInfo, a releaseAdmis
 		return ErrReservationReleaseInvalid
 	}
 
-	// Another helper epoch cannot attest the retirement of this generation.
 	if !a.helper.AuthorizationConfigured ||
 		!a.helper.Valid() ||
-		a.helper.HelperID != hold.Owner.HelperEpoch ||
 		a.helper.RuntimeID != hold.Owner.RuntimeID ||
 		a.runtime.ID != hold.Owner.RuntimeID ||
 		a.helper.PublicKeySHA256 != hold.PublicKeySHA256 ||
@@ -54,6 +53,27 @@ func validateReleaseAdmission(authority ReservationAuthorityInfo, a releaseAdmis
 		!validRuntimeTarget(a.runtime.Provider, a.runtime.Target) ||
 		a.runtime.TrustedAt.IsZero() ||
 		a.runtime.TrustedAt.After(a.mintedAt) {
+		return ErrReservationReleaseInvalid
+	}
+
+	if a.receipt.HelperID != a.helper.HelperID || a.capability.Claims.HelperID != a.helper.HelperID {
+		return ErrReservationReleaseInvalid
+	}
+
+	// Only the original epoch attests a revocation; only a later one, from a later kernel boot, a
+	// recovery.
+	switch a.receipt.Intent.Operation {
+	case LabRevokeEgressLeaseOp:
+		if a.helper.HelperID != hold.Owner.HelperEpoch {
+			return ErrReservationReleaseInvalid
+		}
+
+	case LabRecoverRetiredGenerationOp:
+		if a.helper.HelperID == hold.Owner.HelperEpoch {
+			return ErrReservationReleaseInvalid
+		}
+
+	default:
 		return ErrReservationReleaseInvalid
 	}
 

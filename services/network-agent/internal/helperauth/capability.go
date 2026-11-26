@@ -45,6 +45,10 @@ const (
 	// generation.
 	OpRevokeEgressLease = "RevokeEgressLeaseV1"
 
+	// OpRecoverRetiredGeneration is the revocation of an original helper epoch's reservation, answered
+	// by a later epoch from its boot-bound witnesses instead of a retirement record.
+	OpRecoverRetiredGeneration = "RecoverRetiredGenerationV1"
+
 	// The helper picks the namespace, so a CreateLab intent signs "namespace":"".
 	OpCreateLab = "CreateLab"
 
@@ -88,6 +92,9 @@ type Intent struct {
 	AuthorityID      string `json:"authority_id,omitempty"`
 	ReservationID    string `json:"reservation_id,omitempty"`
 	EgressIPv4       string `json:"egress_ipv4,omitempty"` // the reserved address, not the probe pin
+
+	// RecoverRetiredGenerationV1 only: the hold's epoch; Claims.HelperID names the recovering one.
+	OriginalHelperID string `json:"original_helper_id,omitempty"`
 }
 
 type Claims struct {
@@ -125,6 +132,23 @@ func ValidCapabilityNonce(nonce string) bool {
 }
 
 func validateIntent(in Intent) error {
+	if in.Operation != OpRecoverRetiredGeneration && in.OriginalHelperID != "" {
+		return ErrInvalidCapability
+	}
+
+	// A recovery binds exactly the revocation of the same reservation.
+	if in.Operation == OpRecoverRetiredGeneration {
+		if !helperPattern.MatchString(in.OriginalHelperID) {
+			return ErrInvalidCapability
+		}
+
+		binding := in
+		binding.Operation = OpRevokeEgressLease
+		binding.OriginalHelperID = ""
+
+		return validateIntent(binding)
+	}
+
 	if !ValidProfileID(in.ProfileID) {
 		return ErrInvalidCapability
 	}

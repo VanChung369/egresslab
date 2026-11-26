@@ -361,3 +361,48 @@ func TestEpochWitnessDetectsChangedValue(t *testing.T) {
 		t.Fatal("changed ledger was replaced")
 	}
 }
+
+func TestEpochWitnessRecovery(t *testing.T) {
+	old := testEpochWitness(1, witnessTestBootA)
+	current := testEpochWitness(2, witnessTestBootB)
+
+	for _, name := range []string{
+		"valid", "same boot", "missing witness", "missing current", "not latest", "wrong runtime",
+		"wrong fingerprint", "wrong kernel boot", "same epoch",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ledger := epochWitnessLedger{Version: epochWitnessVersion, Entries: []epochWitness{old, current}}
+			oldID, currentID, boot := old.HelperID, current.HelperID, current.BootID
+
+			switch name {
+			case "same boot":
+				ledger.Entries[0].BootID = current.BootID
+			case "missing witness":
+				ledger.Entries = ledger.Entries[1:]
+			case "missing current":
+				ledger.Entries = ledger.Entries[:1]
+			case "not latest":
+				ledger.Entries = append(ledger.Entries, testEpochWitness(3, witnessTestBootB))
+			case "wrong runtime":
+				ledger.Entries[0].RuntimeID = "runtime_ffffffffffffffffffffffffffffffff"
+			case "wrong fingerprint":
+				ledger.Entries[0].PublicKeySHA256 = strings.Repeat("f", 64)
+			case "wrong kernel boot":
+				boot = old.BootID
+			case "same epoch":
+				oldID = currentID
+			}
+
+			before, after, err := verifyEpochRecovery(ledger, oldID, currentID, current.RuntimeID,
+				current.PublicKeySHA256, boot)
+
+			if name == "valid" {
+				if err != nil || before != old.BootID || after != current.BootID {
+					t.Fatalf("valid recovery failed: %v", err)
+				}
+			} else if err == nil {
+				t.Fatal("unsafe recovery accepted")
+			}
+		})
+	}
+}

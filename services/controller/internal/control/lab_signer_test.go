@@ -109,6 +109,19 @@ func TestLabSignerGolden(t *testing.T) {
 				EgressIPv4:       "8.8.4.4"},
 			"eEGqTiEcjfhnoBNTQ_3cck8frTGITa2HuAxmDEhwxRe_SONZZN7T7Ito6UW1wTX8ze39YEwcEXuudlYI8DHlCQ",
 		},
+		"RecoverRetiredGenerationV1": {
+			LabIntent{Operation: LabRecoverRetiredGenerationOp, ProfileID: "profile_0123456789abcdef",
+				Namespace: "egresslab-lab-0123456789abcdef", ProbeIPv4: "9.9.9.9",
+				TunnelGeneration: "tunnelgen_0123456789abcdef0123456789abcdef",
+				EvidenceNonce:    "ffeeddccbbaa99887766554433221100",
+				ReservationNonce: "aabbccddeeff00112233445566778899",
+				RuntimeID:        "runtime_0123456789abcdef0123456789abcdef",
+				AuthorityID:      "authority_0123456789abcdef0123456789abcdef",
+				ReservationID:    "reservation_0123456789abcdef0123456789abcdef",
+				EgressIPv4:       "8.8.4.4",
+				OriginalHelperID: "helper_ffffffffffffffffffffffffffffffff"},
+			"slPnw8KU8q473lrqph2afgIOt_DRvGLPrngEW9Ql6vAGfI9RNcMKW1zsM7aXczAYTmKB9Km31ezNriaQek7LCw",
+		},
 	}
 
 	for name, tt := range tests {

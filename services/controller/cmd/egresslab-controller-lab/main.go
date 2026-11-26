@@ -37,7 +37,7 @@ type deps struct {
 var approvalRequired = map[string]bool{
 	"create-lab": true, "delete-lab": true, "trust-runtime": true, "untrust-runtime": true, "unbind-profile": true,
 	"connect-tunnel": true, "disconnect": true, "probe-egress": true, "probe-egress-multi": true,
-	"init-reservations": true, "reserve-egress": true, "release-egress": true,
+	"init-reservations": true, "reserve-egress": true, "release-egress": true, "recover-egress": true,
 }
 
 func main() {
@@ -182,8 +182,8 @@ func run(argv []string, d deps) error {
 		}{LabMultiProbeInfo: observation}
 	case "reserve-egress":
 		result, err = s.reserveEgress(args[1], args[2])
-	case "release-egress":
-		result, err = s.releaseEgress(args[1])
+	case "release-egress", "recover-egress":
+		result, err = s.releaseEgress(args[1], args[0] == "recover-egress")
 	}
 
 	if err != nil {
@@ -197,7 +197,7 @@ func run(argv []string, d deps) error {
 		case "reserve-egress":
 			return labruntime.Errorf(labruntime.CodeStateUncertain,
 				"reservation committed but its receipt was not written; run list-reservations: "+err.Error())
-		case "release-egress":
+		case "release-egress", "recover-egress":
 			return labruntime.Errorf(labruntime.CodeStateUncertain,
 				"release committed but its receipt was not written; run list-reservations: "+err.Error())
 		}
@@ -227,7 +227,7 @@ func checkArgs(args []string) error {
 		if len(args) == 3 && control.ValidProfileID(args[1]) && control.ValidLabNamespace(args[2]) {
 			return nil
 		}
-	case "release-egress":
+	case "release-egress", "recover-egress":
 		if len(args) == 2 && control.ValidReservationID(args[1]) {
 			return nil
 		}
@@ -629,5 +629,5 @@ func usageError() error {
 		"  stage-info PROFILE_ID | connect-tunnel PROFILE_ID NAMESPACE STAGE_ID | disconnect PROFILE_ID NAMESPACE\n" +
 		"  probe-egress PROFILE_ID NAMESPACE | probe-egress-multi PROFILE_ID NAMESPACE\n" +
 		"  multi-probe-target PROFILE_ID NAMESPACE | reserve-egress PROFILE_ID NAMESPACE\n" +
-		"  release-egress RESERVATION_ID")
+		"  release-egress RESERVATION_ID | recover-egress RESERVATION_ID")
 }

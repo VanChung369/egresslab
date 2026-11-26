@@ -9,8 +9,8 @@ import (
 
 var _ control.LeaseRevocationTransport = HelperTransport(nil)
 
-// RevokeEgressLease submits exactly one signed revocation, on stdin only. It never retries or falls
-// back to Disconnect.
+// RevokeEgressLease submits exactly one signed revocation or reboot-bound recovery, on stdin only. It
+// never retries or falls back to Disconnect.
 func (t *commandTransport) RevokeEgressLease(
 	ctx context.Context,
 	profileID, namespace string,
@@ -18,7 +18,7 @@ func (t *commandTransport) RevokeEgressLease(
 ) (control.LabRevokedLeaseInfo, error) {
 	intent := capability.Claims.Intent
 
-	if !control.ValidLabRevokeEgressLeaseIntent(intent) || intent.ProfileID != profileID || intent.Namespace != namespace {
+	if !control.ValidLabRetirementIntent(intent) || intent.ProfileID != profileID || intent.Namespace != namespace {
 		return control.LabRevokedLeaseInfo{}, Errorf(CodeInvalidRequest, "invalid lease revocation capability")
 	}
 
@@ -28,7 +28,8 @@ func (t *commandTransport) RevokeEgressLease(
 	}
 	defer clear(payload)
 
-	resp, err := t.run(ctx, control.LabRevokeEgressLeaseOp, payload, "revoke-egress-lease", profileID, namespace)
+	// A recovery travels the same helperctl command; the signed operation tells them apart.
+	resp, err := t.run(ctx, intent.Operation, payload, "revoke-egress-lease", profileID, namespace)
 	if err != nil {
 		switch ErrorCode(err) {
 		case CodeRuntimeUnavailable, CodeInternal, CodeStateUncertain:

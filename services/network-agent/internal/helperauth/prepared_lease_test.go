@@ -257,3 +257,58 @@ func TestRevokeEgressLeaseSigningMessageGolden(t *testing.T) {
 		t.Fatalf("revocation signature mismatch: %s", token.Signature)
 	}
 }
+
+func TestRecoverRetiredGenerationSigningMessageGolden(t *testing.T) {
+	revocation, err := NewRevokeEgressLeaseIntent(testPrepareLeaseIntent(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	intent, err := NewRecoverRetiredGenerationIntent(revocation, "helper_ffffffffffffffffffffffffffffffff")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	private := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, ed25519.SeedSize))
+
+	token, err := Mint(private, Claims{
+		Version:  Version,
+		Intent:   intent,
+		HelperID: testHelper,
+		Nonce:    "00112233445566778899aabbccddeeff",
+		IssuedAt: 1795500000,
+		NotAfter: 1795500030,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const want = "slPnw8KU8q473lrqph2afgIOt_DRvGLPrngEW9Ql6vAGfI9RNcMKW1zsM7aXczAYTmKB9Km31ezNriaQek7LCw"
+
+	if token.Signature != want {
+		t.Fatalf("recovery signature mismatch: %s", token.Signature)
+	}
+
+	if ValidRevokeEgressLeaseIntent(intent) || !ValidRetirementIntent(intent) {
+		t.Fatal("recovery accepted as normal revocation")
+	}
+
+	if _, err := NewRecoverRetiredGenerationIntent(revocation, "helper_ffff"); err == nil {
+		t.Fatal("invalid original helper accepted")
+	}
+
+	intent.Operation = OpRevokeEgressLease
+	if validateIntent(intent) == nil {
+		t.Fatal("normal revocation accepted recovery metadata")
+	}
+
+	for _, operation := range []string{OpPrepareEgressLease, OpReserveEgressCandidate, OpConnectTunnel} {
+		other := revocation
+		other.Operation = operation
+		other.OriginalHelperID = "helper_ffffffffffffffffffffffffffffffff"
+
+		if validateIntent(other) == nil {
+			t.Fatalf("%s accepted recovery metadata", operation)
+		}
+	}
+}

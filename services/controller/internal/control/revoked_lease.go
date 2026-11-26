@@ -19,6 +19,10 @@ type LabRevokedLeaseInfo struct {
 	PublicKeySHA256   string `json:"public_key_sha256"`
 	RevocationNonce   string `json:"revocation_nonce"`
 	GenerationRetired bool   `json:"generation_retired"`
+
+	// RecoverRetiredGenerationV1 only: the original and the recovering epoch's kernel boots.
+	OriginalBootID string `json:"original_boot_id,omitempty"`
+	CurrentBootID  string `json:"current_boot_id,omitempty"`
 }
 
 // NewLabRevokeEgressLeaseIntent must stay identical to the helper's
@@ -56,12 +60,13 @@ func ValidLabRevokeEgressLeaseIntent(intent LabIntent) bool {
 
 func (r LabRevokedLeaseInfo) Valid() bool {
 	return r.GenerationRetired &&
-		ValidLabRevokeEgressLeaseIntent(r.Intent) &&
+		ValidLabRetirementIntent(r.Intent) &&
 		labHelperIDPattern.MatchString(r.HelperID) &&
 		labFingerprintPattern.MatchString(r.PublicKeySHA256) &&
 		labProbeNoncePattern.MatchString(r.RevocationNonce) &&
 		r.RevocationNonce != r.Intent.EvidenceNonce &&
-		r.RevocationNonce != r.Intent.ReservationNonce
+		r.RevocationNonce != r.Intent.ReservationNonce &&
+		r.validRecoveryBoundary()
 }
 
 // MatchesCapability binds the receipt to the request this controller sent; it is not a helper
@@ -93,13 +98,26 @@ func revokeIntentFromHold(authority ReservationAuthorityInfo, hold EgressReserva
 	return NewLabRevokeEgressLeaseIntent(binding)
 }
 
+// matchesReservation also validates every replayed release: a revocation comes from the hold's own
+// epoch, a recovery from another one naming it as the original.
 func (r LabRevokedLeaseInfo) matchesReservation(authority ReservationAuthorityInfo, hold EgressReservation) bool {
 	expected, err := revokeIntentFromHold(authority, hold)
 
-	return err == nil &&
-		r.Valid() &&
-		r.Intent == expected &&
-		r.HelperID == hold.Owner.HelperEpoch &&
-		r.PublicKeySHA256 == hold.PublicKeySHA256 &&
-		r.PublicKeySHA256 == authority.PublicKeySHA256
+	if err != nil || !r.Valid() || r.PublicKeySHA256 != hold.PublicKeySHA256 ||
+		r.PublicKeySHA256 != authority.PublicKeySHA256 {
+		return false
+	}
+
+	switch r.Intent.Operation {
+	case LabRevokeEgressLeaseOp:
+		return r.Intent == expected && r.HelperID == hold.Owner.HelperEpoch
+
+	case LabRecoverRetiredGenerationOp:
+		expected, err = NewLabRecoverRetiredGenerationIntent(expected, hold.Owner.HelperEpoch)
+
+		return err == nil && r.Intent == expected && r.HelperID != hold.Owner.HelperEpoch
+
+	default:
+		return false
+	}
 }

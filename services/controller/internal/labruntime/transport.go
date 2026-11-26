@@ -245,18 +245,19 @@ func decodeResponse(data []byte, expected string) (helperResponse, error) {
 		return helperResponse{}, errors.New("invalid prepared lease metadata")
 	}
 
-	if (expected == control.LabRevokeEgressLeaseOp) != (resp.RevokedLease != nil) {
+	retirement := expected == control.LabRevokeEgressLeaseOp || expected == control.LabRecoverRetiredGenerationOp
+	if retirement != (resp.RevokedLease != nil) {
 		return helperResponse{}, errors.New("unexpected revoked lease metadata")
 	}
 
-	if resp.RevokedLease != nil && !resp.RevokedLease.Valid() {
+	if resp.RevokedLease != nil && (!resp.RevokedLease.Valid() || resp.RevokedLease.Intent.Operation != expected) {
 		return helperResponse{}, errors.New("invalid revoked lease metadata")
 	}
 
 	switch expected {
 	case "HelperInfo", "Ping", "StageInfo", "PermitProbe", control.LabMultiProbePolicyOp, control.LabMultiProbeOp,
 		control.LabMultiProbeV2Op, control.LabMultiProbeTargetOp, control.LabReserveEgressCandidateOp,
-		control.LabPrepareEgressLeaseOp, control.LabRevokeEgressLeaseOp:
+		control.LabPrepareEgressLeaseOp, control.LabRevokeEgressLeaseOp, control.LabRecoverRetiredGenerationOp:
 		if resp.Lab != nil || resp.Labs != nil {
 			return helperResponse{}, errors.New("unexpected lab metadata")
 		}

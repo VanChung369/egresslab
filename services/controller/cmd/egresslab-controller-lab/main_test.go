@@ -98,6 +98,7 @@ type fakeRuntime struct {
 	revokeCalls           []control.LabCapability
 	revokeErr             error
 	loseRevocationReceipt bool
+	rebootBoots           [2]string // original and current kernel boot; empty: no reboot since the hold
 }
 
 func (f *fakeRuntime) HelperInfo(context.Context) (control.LabHelperInfo, error) {

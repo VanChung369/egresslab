@@ -584,3 +584,79 @@ func TestReleaseErrorCodes(t *testing.T) {
 		}
 	}
 }
+
+func recoverCommand(distro, id string) []string {
+	return []string{"-approve", "-wsl-distro", distro, "recover-egress", id}
+}
+
+func TestControllerRecoverEgress(t *testing.T) {
+	h, a, id := setupReleaseCLI(t)
+	original := a.info.HelperID
+
+	if err := h.run("-wsl-distro", "Ubuntu-A", "recover-egress", id); err == nil ||
+		!strings.Contains(err.Error(), "requires -approve") {
+		t.Fatal("an unapproved recovery accepted")
+	}
+
+	// The original epoch is alive: recovery is refused before anything is signed.
+	signs := h.keys.signs
+	h.requireCode(codeReservationReleaseInvalid, recoverCommand("Ubuntu-A", id)...)
+
+	if len(a.revokeCalls) != 0 || h.keys.signs != signs {
+		t.Fatal("a recovery reached the original helper epoch")
+	}
+
+	// A crash and a restart in the same boot: release needs the lost epoch, recovery a reboot.
+	a.info.HelperID = "helper_ffffffffffffffffffffffffffffffff"
+
+	h.requireCode(codeReservationReleaseInvalid, releaseCommand("Ubuntu-A", id)...)
+	h.requireCode(codeLeaseRevocationUnconfirmed, recoverCommand("Ubuntu-A", id)...)
+
+	if listed := reservationList(t, h); len(listed.Reservations) != 1 || len(a.revokeCalls) != 1 {
+		t.Fatal("a same-boot recovery released ownership")
+	}
+
+	a.rebootBoots = [2]string{"11111111-2222-4333-8444-555555555555", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"}
+	h.mustRun(recoverCommand("Ubuntu-A", id)...)
+
+	var result reservationReleaseCommandResult
+	if err := json.Unmarshal(h.out.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+
+	lease := result.RevokedLease
+	if result.State != "released" || result.Reservation.ID != id || !lease.GenerationRetired ||
+		lease.Intent.Operation != control.LabRecoverRetiredGenerationOp || lease.Intent.OriginalHelperID != original ||
+		lease.HelperID != a.info.HelperID || lease.OriginalBootID != a.rebootBoots[0] ||
+		lease.CurrentBootID != a.rebootBoots[1] || result.ActivationAllowed || result.NetworkReady {
+		t.Fatalf("incorrect CLI recovery result: %s", h.out.String())
+	}
+
+	if listed := reservationList(t, h); len(listed.Reservations) != 0 {
+		t.Fatal("a recovered reservation remains held")
+	}
+
+	h.requireCode(codeReservationNotFound, recoverCommand("Ubuntu-A", id)...)
+
+	if len(a.revokeCalls) != 2 {
+		t.Fatal("an old recovery reached the helper again")
+	}
+}
+
+func TestControllerRecoverArguments(t *testing.T) {
+	h := newHarness(t)
+
+	for _, args := range [][]string{
+		{"-approve", "recover-egress"},
+		{"-approve", "recover-egress", "reservation_1"},
+		{"-approve", "recover-egress", "reservation_0123456789abcdef0123456789abcdef", "extra"},
+	} {
+		if err := h.run(args...); err == nil || !strings.Contains(err.Error(), "usage") {
+			t.Fatalf("invalid arguments accepted: %v: %v", args, err)
+		}
+	}
+
+	if h.reached != 0 {
+		t.Fatal("invalid arguments reached a runtime")
+	}
+}

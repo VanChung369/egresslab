@@ -318,9 +318,10 @@ egresslab-controller-lab -approve init-reservations                             
 egresslab-controller-lab list-reservations
 egresslab-controller-lab -approve reserve-egress <profile ID> <namespace>              # holds the address durably
 egresslab-controller-lab -approve release-egress <reservation ID>                       # revokes the generation, then releases
+egresslab-controller-lab -approve recover-egress <reservation ID>                       # only after a helper crash and a guest reboot
 ```
 
-`disconnect` and `delete-lab` never release a durable reservation; only `release-egress` does, through the runtime and helper process that hold it. Do not copy an authority between hosts or run `init-reservations` again to work around a mismatch.
+`disconnect` and `delete-lab` never release a durable reservation; only `release-egress` does, through the runtime and helper process that hold it, or `recover-egress` after that helper crashed and the guest rebooted (Step 31E.3). Do not copy an authority between hosts or run `init-reservations` again to work around a mismatch.
 
 `-runtime auto` uses WSL on Windows (`-wsl-distro`; trust and lab commands need it named), Lima on macOS (`-lima-instance`, default `egresslab`) and the host itself on Linux. A profile stays bound to the runtime it was first used on (`unbind-profile` and `untrust-runtime` release it). Every failure carries a code such as `RECOVERY_REQUIRED` or `RUNTIME_UNTRUSTED`. Install `egresslab-helper` and `egresslab-helperctl` in `/usr/local/bin` inside the runtime (see above). On macOS, the Lima and Keychain paths are verified end to end (macOS 15.3.2, Lima 2.3.0, Ubuntu 24.04 guest with nft 1.0.9); copy the public key into the VM as shown below. If `create-lab` reports an uncertain result, run `list-labs` before retrying.
 
@@ -575,6 +576,36 @@ Limitations:
 
 Application networking remained disabled.
 
+### Crash and reboot recovery smoke test (Step 31E.3)
+
+Environment:
+- Host OS: macOS 15.3.2 (arm64), Go 1.25.1; tested commit `e958131` with this step's changes; the Keychain key, authority and journal of the earlier steps.
+- Lima instance: `egresslab` (runtime A; Ubuntu 24.04.5, kernel 6.8.0-147-generic, arm64) with the first config staged for `profile_98e0aaeb5ef3564c`; `egresslab-b` was not touched. The controller CLI, helper, helperctl, probe worker and `egresslab-lab-recover` were built from this tree with `-trimpath` (the Linux ones with `CGO_ENABLED=0`) and installed in `/usr/local/bin`.
+
+Tests:
+- macOS: for the controller, `go vet` (darwin, linux, windows), `go test ./...`, `go test -race ./...` and `go build ./...` passed; for the network agent, `go vet` (darwin, linux), `go test ./...` and `go build ./...`. The recovery golden vector (`slPnw8KU…`) matches in both modules.
+- Linux (the cross-compiled test binaries of the helper, `helperipc` and `helperauth`, run as the normal user): all passed, including `TestEpochWitnessRecovery` (valid; same boot; missing original or current witness; current epoch not the latest; wrong runtime, key or kernel boot; same epoch) and `TestRecoveredGenerationIPC` (a real socket and real signatures with a synthetic witness proof: success, replay, same boot, the original epoch itself).
+- With the controller's distinct-boot check removed, the same-boot recovery flow and the transport test failed.
+
+Real crash and reboot:
+- Rehearsal without a hold: `systemctl reboot` restarted the guest (Lima kept it `Running`), changed the boot ID and kept the runtime ID; the guest clock was within 0.03 s of the host.
+- The new controller read the real journal (13520 bytes, no hold) before writing anything.
+- Hold: `reserve-egress`, 10 s after `connect-tunnel`, prepared 195.242.214.134 as `reservation_15dc65fa…` in 3.7 s, owned by helper epoch `helper_146017d7…`, whose witness named the current boot `6deaa2d7…`; it was the only hold.
+- Crash: `kill -KILL` of that helper's PID. Its log had no `EgressLab helper stopped`, `helper.sock` stayed, the hold stayed listed, and `egresslab-lab-recover` reported the orphan namespace (`owner pid 1335 is gone`) and its kept underlay table; neither was removed.
+- Same boot (added to the planned run): after the stale socket was removed as the helper's message instructs, a new epoch started (and logged that `CreateLab` is refused until the leftovers are recovered). `release-egress` answered `INVALID_EGRESS_RELEASE` (the original epoch is required) before signing; `recover-egress` answered `EGRESS_REVOCATION_UNCONFIRMED` with the helper's `AUTHORIZATION_DENIED`, and the helper logged `epoch witness: kernel reboot not established`. The hold stayed.
+- Reboot: boot `6deaa2d7…` became `d39d0bd8…`; the namespace, underlay table and socket were gone, and `egresslab-lab-recover` found nothing.
+- Recovery: a third epoch `helper_d5d0f8c0…` started; `release-egress` still answered `INVALID_EGRESS_RELEASE`, and `-approve recover-egress` released the hold in 0.3 s with a `RecoverRetiredGenerationV1` receipt naming the crashed epoch as `original_helper_id`, the new one as `helper_id`, both boot IDs and `generation_retired: true`; `state` was `released`, and `activation_allowed` and `network_ready` were `false`. The journal grew from 14326 to 15385 bytes and listed no hold; a second `recover-egress` answered `EGRESS_RESERVATION_NOT_FOUND`.
+- Lifecycle afterwards: a new lab and tunnel; `reserve-egress`, 10 s after connecting, held the same address for the new epoch, and `release-egress` released it with a normal `RevokeEgressLeaseV1` receipt (no boot IDs). Journal: 17066 bytes.
+- No downgrade: a controller built from `e958131` answered `RESERVATION_JOURNAL_CORRUPT` at byte 14326, the recovery's release frame, on `list-reservations`, while the new build listed the journal normally.
+- After: `delete-lab`, no labs, `egresslab-lab-recover` found nothing, the helper stopped and the vault stage revoked; the ledger held 7 witnesses over 3 boots and one runtime, with a valid checksum.
+
+Limitations:
+- Recovery trusts the guest: a cloned VM, a restored snapshot or root in the runtime is outside the guarantee.
+- A helper restarted without a reboot, a hold whose generation the backend contradicted and a hold made before Step 31E.3a stay unreleasable.
+- Only Lima ran it; WSL2 and native Linux did not.
+
+Application networking remained disabled.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
@@ -601,4 +632,4 @@ If DNS returns several addresses, do not take the first one blindly. The provide
 
 ## Next Milestone
 
-Steps 31E.3b to 31E.3d: the signed reboot-bound recovery proof, the controller's recovery release and a crash and reboot smoke test on Lima, on top of the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting); a coded worker failure reason in the helper log would explain it. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.
+Step 32, on top of the reboot-bound reservation recovery verified on Lima through a real helper crash and guest reboot (Step 31E.3), the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting; in Step 31E.3 both reservations, 10 s after `connect-tunnel`, succeeded at the first attempt); a coded worker failure reason in the helper log would explain it. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.

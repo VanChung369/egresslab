@@ -262,7 +262,8 @@ func (s *session) reserveEgress(profileID, namespace string) (reservationCommand
 // releaseEgress revokes the exact generation of one durable hold and releases its address. It needs
 // the runtime that holds it, selected by the provider, and that runtime's original helper epoch, but
 // no surviving profile, binding or lab: a deleted lab is no proof of retirement, nor an obstacle.
-func (s *session) releaseEgress(reservationID string) (reservationReleaseCommandResult, error) {
+// recovering asks a later epoch instead, after a reboot of the runtime (recover-egress).
+func (s *session) releaseEgress(reservationID string, recovering bool) (reservationReleaseCommandResult, error) {
 	authority, keys, err := s.openReservationAuthority()
 	if err != nil {
 		return reservationReleaseCommandResult{}, err
@@ -279,7 +280,12 @@ func (s *session) releaseEgress(reservationID string) (reservationReleaseCommand
 			"selected runtime is not trusted")
 	}
 
-	result, err := authority.ReleaseEgress(s.ctx, reservationID, s.provider.Transport(), keys, rt)
+	operation := authority.ReleaseEgress
+	if recovering {
+		operation = authority.RecoverEgress
+	}
+
+	result, err := operation(s.ctx, reservationID, s.provider.Transport(), keys, rt)
 	if err != nil {
 		return reservationReleaseCommandResult{}, reservationCommandError(err)
 	}

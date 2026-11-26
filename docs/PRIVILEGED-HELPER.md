@@ -1,8 +1,8 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 31E.3a — persistent helper epoch witness.** A controller CLI signs `CreateLab`,
+Status: **Step 31E.3 — reboot-bound reservation recovery.** A controller CLI signs `CreateLab`,
 `ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`, `ReserveEgressCandidateV1`,
-`PrepareEgressLeaseV1` and `RevokeEgressLeaseV1` and drives the helper's sealed lab, tunnel and diagnostic probes in the Linux
+`PrepareEgressLeaseV1`, `RevokeEgressLeaseV1` and `RecoverRetiredGenerationV1` and drives the helper's sealed lab, tunnel and diagnostic probes in the Linux
 runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports
 inside its labs, resolves a hostname endpoint once and pins it, checks the peer state and the IPv4
 addresses, MTU, rules and routes the kernel reports against the staged config, and stays the source
@@ -19,7 +19,9 @@ reservation as a sealed, generation-bound prepared lease (`PrepareEgressLeaseV1`
 nor a prepared lease is an active lease. The helper keeps a bounded retirement record of every
 candidate for its epoch and answers a signed `RevokeEgressLeaseV1` with a receipt only once that
 candidate's tunnel generation is confirmed removed; `release-egress` signs that revocation for a
-durable hold and records the release in the authority's journal. Windows (WSL2), Linux and macOS (Lima, Keychain) are
+durable hold and records the release in the authority's journal. After a helper crash and a reboot
+of the Linux guest, `recover-egress` has a later helper epoch attest, from its boot-bound witnesses,
+that the reboot ended the original generation (`RecoverRetiredGenerationV1`). Windows (WSL2), Linux and macOS (Lima, Keychain) are
 verified end to end, except that the multi-source probe has run on WSL2 and Lima only, not on native
 Linux. No lease or proxy traffic exists; the sections from "Typed operations only" on are partly
 design.
@@ -86,11 +88,15 @@ design.
   generation, prepared or not, expired or not, with a receipt only after a confirmed cleanup (see
   "Generation-bound revocation"); helperctl sends it (`revoke-egress-lease`), and so does the
   controller's `release-egress` (Step 31D.3d.2).
+- `RecoverRetiredGenerationV1` in the same mode: a later helper epoch's signed attestation, from the
+  persistent epoch witnesses, that a kernel reboot ended the original epoch's generation (see
+  "Reboot-bound reservation recovery"); helperctl's `revoke-egress-lease` carries it, and the
+  controller's `recover-egress` sends it (Step 31E.3).
 - Controller side (see "Controller and runtimes"):
   - an Ed25519 signer for `CreateLab`, `ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`,
-    `ReserveEgressCandidateV1` and `PrepareEgressLeaseV1` (the `PermitMultiProbeV1` signer stays for
-    compatibility tests), checked against the eight golden vectors the helper also pins (the eighth,
-    `RevokeEgressLeaseV1`, ahead of its production signer);
+    `ReserveEgressCandidateV1`, `PrepareEgressLeaseV1`, `RevokeEgressLeaseV1` and
+    `RecoverRetiredGenerationV1` (the `PermitMultiProbeV1` signer stays for compatibility tests),
+    checked against the nine golden vectors the helper also pins;
     `ConnectTunnel` is signed only for the profile's own lab in the current helper process and the
     vault's current, compatible stage, and the probes only for that lab once its tunnel is
     configured, `PermitMultiProbeV2` also only for the tunnel generation and policy that helper
@@ -99,8 +105,8 @@ design.
   - signing-key storage per platform;
   - runtime providers that reach the helper from each host OS;
   - `egresslab-controller-lab`, which needs `-approve` for every mutation, including
-    `connect-tunnel`, `disconnect`, `init-reservations`, `reserve-egress` and `release-egress`
-    (`list-reservations` is read-only);
+    `connect-tunnel`, `disconnect`, `init-reservations`, `reserve-egress`, `release-egress` and
+    `recover-egress` (`list-reservations` is read-only);
   - trusted runtimes and persistent profile-to-runtime bindings (see "Trusted runtimes and
     profile bindings").
 - A recovery gate and a kernel compatibility check before `CreateLab` (see "Sealed lab
@@ -115,9 +121,10 @@ design.
 - A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
-- Journal compaction, key rotation and authority migration, the recovery tests across runtimes (Step 31E; the collision ran in Step 31E.1, the concurrent races in Step 31E.2), and any release of a hold
-  whose helper restarted or whose generation the backend contradicted (Step 31E.3a only records
-  each multi-probe helper epoch's kernel boot, as the foundation of that recovery).
+- Journal compaction, key rotation and authority migration, and the release of a hold whose
+  generation the backend contradicted, whose helper restarted without a reboot of the guest, or whose
+  original epoch has no witness (a hold made before Step 31E.3a); a crashed helper's hold is
+  recovered only after a reboot (Step 31E.3).
 - Open from earlier steps: egress-IP leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
 - DNS for applications in the lab (a session resolver, with filesystem and resolver IPC
@@ -1476,6 +1483,7 @@ or permit, the sealed ruleset remained, and `verify-lab` answered `tunnel_config
 | 31E.1 | Real multi-runtime IP collision test |
 | 31E.2 | Concurrent reservation and release races |
 | 31E.3a | Persistent helper epoch witness |
+| 31E.3 | Reboot-bound reservation recovery |
 
 The states stay separate; none of them is an `active` flag:
 
@@ -1733,7 +1741,8 @@ provider selects to be the hold's trusted runtime, asks that runtime for `Helper
 the hold's own helper epoch and key, and only then signs one `RevokeEgressLeaseV1`, which helperctl
 receives on stdin (`revoke-egress-lease PROFILE_ID NAMESPACE`). A different helper epoch, after a
 restart, cannot attest the retirement of the original generation, and is refused before anything is
-signed. Release needs no fresh probe evidence and no surviving profile, binding or lab: a lab
+signed; after a reboot of the guest, `recover-egress` handles that hold (see "Reboot-bound reservation
+recovery"). Release needs no fresh probe evidence and no surviving profile, binding or lab: a lab
 already disconnected or deleted is no obstacle, since the helper kept its retirement record.
 
 The receipt must match the reservation, authority, generation, helper epoch, runtime and revocation
@@ -1754,9 +1763,9 @@ forced or replaced by an unsigned `disconnect`. Step 31D.3e ran it against the r
 
 ### Persistent helper epoch witnesses (Step 31E.3a)
 
-A hold whose helper crashed cannot be released: the new epoch cannot attest the retirement of the
-old generation, and a namespace, WireGuard interface or socket can outlive the process that made
-it. The planned recovery (Steps 31E.3b to 31E.3d) uses a real reboot of the Linux guest as the
+Before Step 31E.3, a hold whose helper crashed could not be released: the new epoch cannot attest
+the retirement of the old generation, and a namespace, WireGuard interface or socket can outlive the process that made
+it. The recovery of Step 31E.3 uses a real reboot of the Linux guest as the
 boundary that ends the old generation, which needs a trusted record of the boot each helper epoch
 belonged to. This step only records it.
 
@@ -1793,11 +1802,48 @@ listener, while it already holds the vault lock:
   the epoch is recorded, so repeated refused starts do not use up the ledger. A start that fails
   later, while creating the socket, keeps its witness, which authorizes nothing.
 
-A witness is not a retirement receipt and authorizes no release. Cross-epoch recovery stays
-disabled until the signed reboot-bound recovery proof and the controller's admission exist. A
-helper restart within one boot will never be enough; a missing witness, a wrong runtime or
-controller key, or a corrupt ledger will refuse; a timeout or an empty recovery scan releases
-nothing. Recovery assumes the Linux guest is a trusted runtime, never cloned, rolled back to a
+A witness is not a retirement receipt and authorizes no release by itself; the reboot-bound recovery
+of Step 31E.3 builds on it. A helper restart within one boot is never enough; a missing witness, a
+wrong runtime or controller key, or a corrupt ledger refuses; a timeout or an empty recovery scan
+releases nothing. Recovery assumes the Linux guest is a trusted runtime, never cloned, rolled back to a
 snapshot or restored onto an old kernel; it is not hardware-backed attestation. Holds made before
-this step, whose helper is gone, stay unreleasable; there is no forced release. The protocol, the
-controller journal and the release path did not change.
+this step, whose helper is gone, stay unreleasable; there is no forced release.
+
+### Reboot-bound reservation recovery (Step 31E.3)
+
+`egresslab-controller-lab -approve recover-egress RESERVATION_ID` may release an orphaned
+reservation only after the trusted runtime confirms a kernel reboot. It is a separate, explicitly
+approved command, never a fallback when `release-egress` fails:
+
+| Command | Requires |
+|---|---|
+| `release-egress` | the hold's original helper epoch, with its retirement record |
+| `recover-egress` | a later epoch of the same runtime and key, witnesses of both epochs, and a guest kernel reboot in between |
+
+- The controller rebuilds the hold's `RevokeEgressLeaseV1` intent and signs it as
+  `RecoverRetiredGenerationV1` with one more field, `original_helper_id`, the hold's epoch; the
+  capability's `helper_id` names the recovering epoch. The field is omitted from every other
+  operation, so their signed bytes do not change, and the ninth golden vector pins the new one in
+  both modules. The controller refuses before signing when the runtime still reports the original
+  epoch.
+- The helper verifies and consumes the capability, then reads its witness ledger and the kernel's
+  boot ID: both epochs must have witnesses with the same runtime ID and key fingerprint, the current
+  epoch must be the latest witness and run on the current boot, and the two boot IDs must differ. It
+  touches no network resource; the reboot already ended the old generation. The receipt is a
+  `RevokedLeaseInfo` naming the recovery intent and both boot IDs; it travels the same helperctl
+  command (`revoke-egress-lease`), and the signed operation tells the two apart.
+- The existing release transaction validates the receipt: a revocation only from the original epoch,
+  a recovery only from another one, naming exactly that hold and its epoch, with two distinct boot
+  IDs; then it locks, reloads, compares the exact hold, appends and syncs one release record. Journal
+  replay applies the same check. There is no new record type, journal or store.
+- Same-boot restarts, missing witnesses, wrong identities, a corrupt ledger and uncertain
+  persistence fail closed with the hold kept: a refusal from the helper is
+  `EGRESS_REVOCATION_UNCONFIRMED`, with the advice to check `list-reservations`. Nothing is retried.
+- Older journals stay readable. A controller built before this step reports a journal holding a
+  recovery release as `RESERVATION_JOURNAL_CORRUPT`, which refuses everything but changes nothing:
+  every controller that shares the authority must be upgraded before the first recovery, and there is
+  no downgrade afterwards.
+
+VM cloning, snapshot rollback and untrusted root administration are outside the guarantee.
+Application networking remains disabled. Step 31E.3 ran it on Lima through a real helper crash and
+guest reboot (`docs/DEV-LINUX-VM.md`, "Crash and reboot recovery smoke test").
