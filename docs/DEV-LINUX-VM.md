@@ -1051,9 +1051,24 @@ Release binaries on Windows and WSL2 (the controller from `egresslab-controller-
   - the helper stopped, leaving no namespace or table.
   - Journal: 6815 to 8497 bytes.
 
+Official artifact (GitHub Actions "Release Build", `727fc84`), checked on 2026-11-26:
+- Provenance and content:
+  - all 8 checksums verified on Windows;
+  - every binary embeds Go 1.23.12, `vcs.revision=727fc84…`, `vcs.modified=false`, `-trimpath` and `CGO_ENABLED=0`;
+  - every archive has its exact members; tarballs carry owner `0/0`, binaries 0755 and the rest 0644, and the zips have no uid or gid;
+  - no key, config, state file, build-machine path or real egress address.
+- Lifecycle with the official Windows controller and Linux runtime (one more hold, with the user's approval):
+  - `probe-egress-multi` passed at the first attempt (3.1 s), and `reserve-egress` prepared the hold in 3.5 s.
+  - Hostname requests all came out at the reserved address: `api4.ipify.org` 3 of 3, `ifconfig.co` 3 of 3, and 8 of 8 concurrent. The Windows DNS cache held neither name.
+  - Kill switch, with `wg0` taken down:
+    - three requests during the outage were all refused, and none was answered by another path;
+    - the lab was `faulted` 5 s later, and the hold stayed;
+    - the download started for this check had received nothing yet: its first window was still pending.
+  - `release-egress` released the hold in 0.3 s with `generation_retired: true`. `state.json` and `runtimes.json` were unchanged, `delete-lab` and `egresslab-lab-recover` left nothing, and the helper stopped.
+  - Journal: 8497 to 10180 bytes.
+
 Limitations:
-- The official artifact from GitHub Actions has not been built yet.
-- The lifecycle above ran on the first trial build. The script was hardened after Codex's review: archive modes and owners, member checks, the trust roots embedded by name. Its later trial builds, through GNU tar and through BSD tar (libarchive, as on macOS), passed their checks and checksums, and their Windows controller started, but the lifecycle was not repeated.
+- The lifecycle above, with a download cut mid-stream, ran on the first trial build. The script was hardened after Codex's review: archive modes and owners, member checks, the trust roots embedded by name. Its later trial builds, through GNU tar and through BSD tar (libarchive, as on macOS), passed their checks and checksums, and their Windows controller started, but the lifecycle was not repeated.
 - macOS with Lima and two runtimes were not exercised with release binaries here. Native Linux has not run end to end.
 - A fault found by the keeper's traffic window is not written to the helper log, unlike a monitor fault; the controller sees `LAB_FAULTED`.
 - `recover-egress` (after a guest reboot) was not repeated with release binaries.
