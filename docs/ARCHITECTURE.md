@@ -63,7 +63,7 @@ The registry alone is in memory and coordinates one process; Step 31C puts it be
 
 The controller keeps exclusive IPv4 ownership in an append-only journal, `egress-reservations.journal` (`internal/control/reservation_journal.go`), which production code reaches only through the provisioned authority (Step 31D.2). Every participating controller process must use the same journal on a trusted local filesystem (NTFS, APFS, ext4), not on OneDrive, a network share or a filesystem whose locking and flush semantics are unverified.
 
-- An exclusive OS lock on the journal itself serializes processes: `LockFileEx` on Windows, `flock` on Linux and macOS. A held lock fails at once as busy, with no retry. Other platforms have no authority and no mutex-only fallback. `flock` is advisory: it binds controllers that follow the protocol, not an administrator or a process that edits or replaces the file outside it. Renaming the journal during a transaction can split the authority on Linux and macOS; Windows refuses the rename while the journal is open.
+- An OS lock on the journal itself serializes processes: `LockFileEx` on Windows, `flock` on Linux and macOS. Every write takes it exclusively; since Step 35 a read (opening the authority, listing, a lookup, a preflight) takes it shared, so readers never block each other but never overlap a write. A held lock fails at once as busy, with no retry. Other platforms have no authority and no mutex-only fallback. `flock` is advisory: it binds controllers that follow the protocol, not an administrator or a process that edits or replaces the file outside it. Renaming the journal during a transaction can split the authority on Linux and macOS; Windows refuses the rename while the journal is open.
 - One transaction holds the lock while it loads and validates the whole journal, rebuilds the four ownership indexes, admits the candidate and checks collisions (Step 31B), appends one record and flushes it. No registry is cached between operations, and inspection takes the same lock.
 - A record is a length prefix, canonical JSON (at most 8 KiB, exactly the writer's bytes) and a SHA-256 digest chained to the previous record, starting from the header's digest. A damaged or partial frame, a non-canonical payload, an invalid record or duplicate ownership invalidates the whole journal: allocation and inspection fail, and no partial list is returned.
 - Normal operation never creates a missing journal, truncates or repairs a damaged one, or drops a hold; an empty file is corrupt. Provisioning is a separate, explicit step (`init-reservations`, Step 31D.2), because a missing journal is no proof that nothing was ever reserved.
@@ -206,6 +206,14 @@ A loopback SOCKS5 endpoint on the controller host carries IPv4 TCP streams throu
 - One stream per runtime, IPv4 only, no domain names (no safe resolver yet).
 
 Application networking as a whole remains disabled.
+
+### Endpoint-to-runtime integration (Step 35)
+
+An explicitly approved `serve-endpoint` command resolves a stored SOCKS5 endpoint to its routing profile, trusted runtime and current durable reservation, with no runtime or reservation given by hand.
+
+- The listener is pinned to the approved reservation and tunnel generation. For each new CONNECT, minting looks the pinned hold up in the journal once, under the shared read lock, after the helper call; the stored endpoint, the runtime binding and trust are then re-read, and the capability is sent only if they still agree. A released hold, or a later one for the same profile, is refused until a new approved start.
+- Independent endpoints serve different trusted runtimes under one shared reservation authority.
+- The HTTP API cannot activate privileged networking: endpoint definitions stay separate from live network authorization, and its start still answers 409.
 
 ### Windows / macOS / Linux
 

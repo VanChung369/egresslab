@@ -201,7 +201,7 @@ func InitializeReservationAuthority(root string, signer LabSigner) (ReservationA
 }
 
 func loadReservationAuthorityInfo(root string) (ReservationAuthorityInfo, error) {
-	marker, info, err := openReservationAuthorityMarker(root)
+	marker, info, err := openReservationAuthorityMarker(root, true)
 	if err != nil {
 		return ReservationAuthorityInfo{}, err
 	}
@@ -215,13 +215,13 @@ func loadReservationAuthorityInfo(root string) (ReservationAuthorityInfo, error)
 // openReservationAuthorityMarker returns the marker still locked. It accepts exactly the bytes the
 // initializer wrote, for this directory: the re-encoding refuses unknown or duplicated fields and
 // trailing content.
-func openReservationAuthorityMarker(root string) (*os.File, ReservationAuthorityInfo, error) {
+func openReservationAuthorityMarker(root string, shared bool) (*os.File, ReservationAuthorityInfo, error) {
 	dir, err := canonicalAuthorityDirectory(root)
 	if err != nil {
 		return nil, ReservationAuthorityInfo{}, err
 	}
 
-	file, err := openLockedReservationJournal(filepath.Join(dir, reservationAuthorityFile), false)
+	file, err := openLockedReservationFile(filepath.Join(dir, reservationAuthorityFile), false, shared)
 	if err != nil {
 		return nil, ReservationAuthorityInfo{}, err
 	}
@@ -350,20 +350,25 @@ func (h reservationJournalHandle) Close() error {
 	return err
 }
 
-// open re-reads the marker before every operation (provisioning never modifies a valid one), then
-// locks the journal while still holding the marker.
+// open locks the journal for a write.
 func (j reservationJournalSpec) open() (reservationJournalHandle, error) {
+	return j.lock(false)
+}
+
+// lock re-reads the marker before every operation (provisioning never modifies a valid one), then
+// locks the journal while still holding the marker; shared only for reads.
+func (j reservationJournalSpec) lock(shared bool) (reservationJournalHandle, error) {
 	path, err := reservationJournalPath(j.directory)
 	if err != nil {
 		return reservationJournalHandle{}, err
 	}
 
 	if j.authority == nil {
-		file, err := openLockedReservationJournal(path, false)
+		file, err := openLockedReservationFile(path, false, shared)
 		return reservationJournalHandle{File: file}, err
 	}
 
-	marker, current, err := openReservationAuthorityMarker(j.directory)
+	marker, current, err := openReservationAuthorityMarker(j.directory, shared)
 	if err != nil {
 		return reservationJournalHandle{}, err
 	}
@@ -373,7 +378,7 @@ func (j reservationJournalSpec) open() (reservationJournalHandle, error) {
 		return reservationJournalHandle{}, ErrReservationAuthorityMismatch
 	}
 
-	file, err := openLockedReservationJournal(path, false)
+	file, err := openLockedReservationFile(path, false, shared)
 	if err != nil {
 		_ = marker.Close()
 		return reservationJournalHandle{}, err

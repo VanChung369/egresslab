@@ -384,6 +384,42 @@ func TestReservationAuthorityBusy(t *testing.T) {
 	}
 }
 
+// Readers share both locks; a reader still excludes every writer.
+func TestReservationAuthorityReadersShare(t *testing.T) {
+	for _, name := range []string{reservationAuthorityFile, reservationJournalFile} {
+		t.Run(name, func(t *testing.T) {
+			dir, authority, signer := newTestAuthority(t)
+
+			file, err := openLockedReservationFile(filepath.Join(dir, name), false, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+
+			if _, err := authority.List(); err != nil {
+				t.Fatalf("list beside a reader: %v", err)
+			}
+
+			if _, err := OpenReservationAuthority(dir, signer); err != nil {
+				t.Fatalf("open beside a reader: %v", err)
+			}
+
+			journal, err := authority.journal()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if handle, err := journal.open(); !errors.Is(err, ErrReservationBusy) {
+				if err == nil {
+					_ = handle.Close()
+				}
+
+				t.Fatalf("write lock beside a reader: %v", err)
+			}
+		})
+	}
+}
+
 // Concurrent reservations through one authority, with the marker and journal locks in turn. A
 // contender that finds the authority busy tries again (tests only; production never retries), so
 // exactly one is granted and every other one ends in a collision.

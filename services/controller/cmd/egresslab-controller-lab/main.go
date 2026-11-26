@@ -38,7 +38,7 @@ var approvalRequired = map[string]bool{
 	"create-lab": true, "delete-lab": true, "trust-runtime": true, "untrust-runtime": true, "unbind-profile": true,
 	"connect-tunnel": true, "disconnect": true, "probe-egress": true, "probe-egress-multi": true,
 	"init-reservations": true, "reserve-egress": true, "release-egress": true, "recover-egress": true,
-	"serve-socks": true,
+	"serve-socks": true, "serve-endpoint": true,
 }
 
 func main() {
@@ -125,6 +125,15 @@ func run(argv []string, d deps) error {
 
 	if err := checkArgs(args); err != nil {
 		return err
+	}
+
+	// The runtime comes from the stored binding, never from a flag.
+	if args[0] == "serve-endpoint" {
+		if *kind != "auto" || *distro != "" || *instance != "" {
+			return errors.New("serve-endpoint selects its runtime from the stored binding")
+		}
+
+		return s.serveEndpoint(args[1])
 	}
 
 	if s.provider, err = d.newRuntime(*kind, labruntime.Options{WSLDistro: *distro, LimaInstance: *instance}); err != nil {
@@ -239,6 +248,10 @@ func checkArgs(args []string) error {
 		}
 	case "serve-socks":
 		if len(args) == 3 && control.ValidReservationID(args[1]) && validSocksPort(args[2]) {
+			return nil
+		}
+	case "serve-endpoint":
+		if len(args) == 2 && control.ValidEndpointID(args[1]) {
 			return nil
 		}
 	case "connect-tunnel":
@@ -640,5 +653,6 @@ func usageError() error {
 		"  probe-egress PROFILE_ID NAMESPACE | probe-egress-multi PROFILE_ID NAMESPACE\n" +
 		"  multi-probe-target PROFILE_ID NAMESPACE | reserve-egress PROFILE_ID NAMESPACE\n" +
 		"  release-egress RESERVATION_ID | recover-egress RESERVATION_ID\n" +
-		"  serve-socks RESERVATION_ID PORT (127.0.0.1 only, foreground)")
+		"  serve-socks RESERVATION_ID PORT (127.0.0.1 only, foreground)\n" +
+		"  serve-endpoint ENDPOINT_ID (its runtime and reservation from the stored configuration)")
 }

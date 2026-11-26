@@ -99,11 +99,29 @@ type fakeRuntime struct {
 	revokeErr             error
 	loseRevocationReceipt bool
 	rebootBoots           [2]string // original and current kernel boot; empty: no reboot since the hold
+
+	helperInfoCalls int
+	onHelperInfo    func(call int) // runs inside HelperInfo
+	streamCalls     []control.LabCapability
 }
 
 func (f *fakeRuntime) HelperInfo(context.Context) (control.LabHelperInfo, error) {
 	f.calls = append(f.calls, "HelperInfo")
+	f.helperInfoCalls++
+
+	if f.onHelperInfo != nil {
+		f.onHelperInfo(f.helperInfoCalls)
+	}
+
 	return f.info, nil
+}
+
+var errFakeStream = errors.New("fake proxy stream")
+
+// OpenProxyStream records the capability and opens nothing.
+func (f *fakeRuntime) OpenProxyStream(_ context.Context, c control.LabCapability) (*labruntime.ProxyStream, error) {
+	f.streamCalls = append(f.streamCalls, c)
+	return nil, errFakeStream
 }
 
 func (f *fakeRuntime) ListLabs(context.Context) ([]control.LabInfo, error) {
@@ -282,7 +300,11 @@ func (h *harness) newRuntime(target, id string) *fakeRuntime {
 func (h *harness) run(args ...string) error {
 	h.out.Reset()
 
-	return run(args, deps{
+	return run(args, h.deps())
+}
+
+func (h *harness) deps() deps {
+	return deps{
 		openKeys: func(string) (keystore.KeyStore, error) { return h.keys, nil },
 		newRuntime: func(_ string, opts labruntime.Options) (labruntime.RuntimeProvider, error) {
 			h.reached++
@@ -300,7 +322,7 @@ func (h *harness) run(args ...string) error {
 		stdout: h.writer(),
 		// Never the real per-user authority.
 		reservationRoot: func() (string, error) { return h.dir, nil },
-	})
+	}
 }
 
 func (h *harness) writer() io.Writer {

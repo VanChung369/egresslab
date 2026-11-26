@@ -49,11 +49,24 @@ func randomToken(n int) (string, error) {
 // signed capability for that one destination, and the helper's prepared lease and monitoring health.
 // It changes no global readiness and opens nothing on the LAN.
 func (s *session) serveSocks(reservationID, portArg string) error {
-	port, _ := strconv.ParseUint(portArg, 10, 16)
-
 	authority, keys, err := s.openReservationAuthority()
 	if err != nil {
 		return err
+	}
+
+	return s.serveSocksWithAuthority(reservationID, portArg, authority, keys, nil)
+}
+
+// serveSocksWithAuthority: guard, when set, must hold at start and for every stream, after its
+// capability is minted and before it is sent.
+func (s *session) serveSocksWithAuthority(reservationID, portArg string, authority *control.ReservationAuthority,
+	keys control.LabSigner, guard func() error) error {
+	port, _ := strconv.ParseUint(portArg, 10, 16)
+
+	if guard != nil {
+		if err := guard(); err != nil {
+			return reservationCommandError(err)
+		}
 	}
 
 	if _, err := authority.Lookup(reservationID); err != nil {
@@ -101,7 +114,12 @@ func (s *session) serveSocks(reservationID, portArg string) error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	parent := s.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+
+	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
@@ -137,11 +155,18 @@ func (s *session) serveSocks(reservationID, portArg string) error {
 
 		capability, err := authority.MintProxyStream(reservationID, destination, keys, rt, helper, s.d.now())
 		if err != nil {
-			if errors.Is(err, control.ErrReservationReleaseInvalid) {
+			if errors.Is(err, control.ErrReservationReleaseInvalid) || errors.Is(err, control.ErrReservationNotFound) {
 				return nil, errors.Join(socks5.ErrNotAllowed, err)
 			}
 
 			return nil, err
+		}
+
+		// The last check before the capability leaves the controller; a refused one is discarded.
+		if guard != nil {
+			if err := guard(); err != nil {
+				return nil, errors.Join(socks5.ErrNotAllowed, err)
+			}
 		}
 
 		return streams.OpenProxyStream(ctx, capability)
@@ -151,7 +176,12 @@ func (s *session) serveSocks(reservationID, portArg string) error {
 	waiting := make(chan struct{}, socksMaxWaiting)
 
 	var clients sync.WaitGroup
-	defer clients.Wait()
+
+	// A listener failure cancels the clients before waiting for them.
+	defer func() {
+		stop()
+		clients.Wait()
+	}()
 
 	for {
 		conn, err := listener.AcceptTCP()

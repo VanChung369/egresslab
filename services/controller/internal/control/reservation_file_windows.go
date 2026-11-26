@@ -58,9 +58,9 @@ func openReservationFile(path string, create bool) (*os.File, error) {
 	return file, nil
 }
 
-// lockReservationFile locks one byte at offset zero exclusively; Windows allows a range beyond
-// EOF, so an empty new file locks too. Closing the handle releases the lock.
-func lockReservationFile(file *os.File) error {
+// lockReservationFile locks one byte at offset zero, exclusively or (reads only) shared; Windows
+// allows a range beyond EOF, so an empty new file locks too. Closing the handle releases the lock.
+func lockReservationFile(file *os.File, shared bool) error {
 	root := os.Getenv("SystemRoot")
 	if !filepath.IsAbs(root) {
 		return errors.New("invalid Windows SystemRoot")
@@ -73,7 +73,12 @@ func lockReservationFile(file *os.File) error {
 
 	var overlapped syscall.Overlapped
 
-	result, _, callErr := lock.Call(file.Fd(), lockfileExclusiveLock|lockfileFailImmediately, 0, 1, 0,
+	flags := uintptr(lockfileFailImmediately)
+	if !shared {
+		flags |= lockfileExclusiveLock
+	}
+
+	result, _, callErr := lock.Call(file.Fd(), flags, 0, 1, 0,
 		uintptr(unsafe.Pointer(&overlapped)))
 	if result != 0 {
 		return nil

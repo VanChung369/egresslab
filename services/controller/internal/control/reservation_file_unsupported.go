@@ -10,7 +10,7 @@ func openReservationFile(string, bool) (*os.File, error) {
 	return nil, ErrReservationUnavailable
 }
 
-func lockReservationFile(*os.File) error {
+func lockReservationFile(*os.File, bool) error {
 	return ErrReservationUnavailable
 }
 

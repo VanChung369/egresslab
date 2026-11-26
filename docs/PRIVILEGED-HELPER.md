@@ -115,7 +115,7 @@ design.
   - runtime providers that reach the helper from each host OS;
   - `egresslab-controller-lab`, which needs `-approve` for every mutation, including
     `connect-tunnel`, `disconnect`, `init-reservations`, `reserve-egress`, `release-egress` and
-    `recover-egress` and `serve-socks` (`list-reservations` is read-only);
+    `recover-egress`, `serve-socks` and `serve-endpoint` (`list-reservations` is read-only);
   - trusted runtimes and persistent profile-to-runtime bindings (see "Trusted runtimes and
     profile bindings").
 - A recovery gate and a kernel compatibility check before `CreateLab` (see "Sealed lab
@@ -1496,6 +1496,7 @@ or permit, the sealed ruleset remained, and `verify-lab` answered `tunnel_config
 | 32 | Continuous egress monitoring of a prepared generation |
 | 33 | Kernel-timed traffic gate (kill-switch) |
 | 34 | SOCKS5 proxy runtime |
+| 35 | Endpoint-to-runtime integration |
 
 The states stay separate; none of them is an `active` flag:
 
@@ -1581,8 +1582,8 @@ disabled.
 ### Durable reservations and process coordination (Step 31C)
 
 The shared authority now lives in an append-only journal in the per-user authority directory (Step
-31D.2), under an exclusive OS file lock (`LockFileEx` on Windows, `flock` on Linux and macOS; see
-`docs/ARCHITECTURE.md`). Every reservation attempt reloads and validates the whole journal under
+31D.2), under an exclusive OS file lock for every write (`LockFileEx` on Windows, `flock` on Linux
+and macOS; see `docs/ARCHITECTURE.md`); since Step 35 reads take it shared. Every reservation attempt reloads and validates the whole journal under
 that lock before it checks uniqueness, appends one checksummed record and flushes it, so two
 controller processes using the same journal cannot hold the same address, and a process started
 later still sees it held. A process exit releases the lock, not the ownership. Records read back are
@@ -1989,3 +1990,18 @@ runs in the foreground until interrupted and changes no global readiness.
 
 Limits of this prototype: one stream per runtime; traffic pauses for a few seconds at each monitor
 check; WSL2 and native Linux have not run it. Application networking as a whole stays disabled.
+
+### Endpoint-to-runtime integration (Step 35)
+
+`egresslab-controller-lab -approve serve-endpoint ENDPOINT_ID` serves a SOCKS5 endpoint stored by
+the desktop or the HTTP API (`state.json`): only `socks5` on `127.0.0.1` with a port of at least
+1024. The command takes no runtime flag; it resolves the endpoint's profile, the profile's runtime
+binding (runtime, namespace, helper epoch), that runtime's trust record and the profile's durable
+hold, requires them all to agree and the runtime's helper to be the epoch that prepared the hold, and
+then serves exactly that reservation and generation. For every CONNECT, after the helper call,
+minting looks the pinned hold up once, under the journal's shared read lock: a released hold, or a
+later hold for the profile on the same helper (the binding is then unchanged), is not found
+(`reservation is not held`). Then the endpoint, the binding and the trust record are re-read, and
+the capability is sent only if they still agree (`endpoint binding changed` otherwise: another
+helper epoch, namespace, runtime or key). Both are refused until a new approved start. The controller and the helper did not change
+otherwise. The HTTP API only stores endpoint definitions; its start still answers 409.

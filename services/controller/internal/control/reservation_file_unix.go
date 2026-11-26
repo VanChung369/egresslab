@@ -17,9 +17,15 @@ func openReservationFile(path string, create bool) (*os.File, error) {
 	return os.OpenFile(path, flags, 0o600)
 }
 
-// The flock belongs to the open file description; closing the file releases it.
-func lockReservationFile(file *os.File) error {
-	err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+// The flock belongs to the open file description; closing the file releases it. A shared lock is
+// for reads only: it excludes every writer, never another reader.
+func lockReservationFile(file *os.File, shared bool) error {
+	how := syscall.LOCK_EX
+	if shared {
+		how = syscall.LOCK_SH
+	}
+
+	err := syscall.Flock(int(file.Fd()), how|syscall.LOCK_NB)
 	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
 		return ErrReservationBusy
 	}

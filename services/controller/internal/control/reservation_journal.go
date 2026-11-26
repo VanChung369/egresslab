@@ -72,6 +72,11 @@ func reservationJournalPath(dataDir string) (string, error) {
 // (wrapped) at once if another handle holds it. flock on Unix is advisory: it binds only processes
 // that follow this protocol.
 func openLockedReservationJournal(path string, create bool) (*os.File, error) {
+	return openLockedReservationFile(path, create, false)
+}
+
+// openLockedReservationFile: a shared lock is for reads only.
+func openLockedReservationFile(path string, create, shared bool) (*os.File, error) {
 	file, err := openReservationFile(path, create)
 	if err != nil {
 		return nil, errors.Join(ErrReservationUnavailable, err)
@@ -93,7 +98,7 @@ func openLockedReservationJournal(path string, create bool) (*os.File, error) {
 		return nil, ErrReservationUnavailable
 	}
 
-	if err := lockReservationFile(file); err != nil {
+	if err := lockReservationFile(file, shared); err != nil {
 		return nil, errors.Join(ErrReservationUnavailable, err)
 	}
 
@@ -696,7 +701,8 @@ func reserveDurableEgressJournal(ctx context.Context, journal reservationJournal
 	return hold, nil
 }
 
-// inspectReservationJournal takes the same exclusive lock, so it never reads a half-written frame.
+// inspectReservationJournal takes a shared lock, which excludes every writer, so it never reads a
+// half-written frame.
 // A damaged journal is an error, never an empty list.
 func inspectReservationJournal(dataDir string) ([]EgressReservation, error) {
 	return inspectReservationJournalSpec(legacyReservationJournal(dataDir))
@@ -711,10 +717,11 @@ func inspectReservationJournalSpec(journal reservationJournalSpec) ([]EgressRese
 	return state.registry.snapshot(), nil
 }
 
-// loadReservationJournalState replays the journal under its lock and releases the lock again; the
-// state is a snapshot for inspection, never the basis of a write.
+// loadReservationJournalState replays the journal under a shared lock and releases the lock again;
+// the state is a snapshot for inspection, never the basis of a write, so readers never block each
+// other.
 func loadReservationJournalState(journal reservationJournalSpec) (state reservationJournalState, resultErr error) {
-	handle, err := journal.open()
+	handle, err := journal.lock(true)
 	if err != nil {
 		return reservationJournalState{}, err
 	}

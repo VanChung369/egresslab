@@ -421,7 +421,7 @@ func runAuthorityHoldChild(t *testing.T, mode, dir string) {
 	var held io.Closer
 
 	if mode == "marker-hold" {
-		marker, _, err := openReservationAuthorityMarker(dir)
+		marker, _, err := openReservationAuthorityMarker(dir, false)
 		if err != nil {
 			t.Fatal(err)
 		}

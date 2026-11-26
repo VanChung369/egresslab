@@ -139,3 +139,7 @@ func validateStoredName(name string) error {
 func invalidState(where, reason string) error {
 	return fmt.Errorf("%w: %s: %s", ErrInvalidState, where, reason)
 }
+
+func ValidEndpointID(id string) bool {
+	return endpointIDPattern.MatchString(id)
+}
