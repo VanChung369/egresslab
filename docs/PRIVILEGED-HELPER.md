@@ -1,6 +1,6 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 31D.3e — reservation lifecycle on a real tunnel.** A controller CLI signs `CreateLab`,
+Status: **Step 31E.1 — address collision across two real runtimes.** A controller CLI signs `CreateLab`,
 `ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`, `ReserveEgressCandidateV1`,
 `PrepareEgressLeaseV1` and `RevokeEgressLeaseV1` and drives the helper's sealed lab, tunnel and diagnostic probes in the Linux
 runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports
@@ -115,7 +115,7 @@ design.
 - A privileged Desktop API. The controller's HTTP API stays without signing endpoints.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
-- Journal compaction, key rotation and authority migration, the multi-runtime collision and recovery tests (Step 31E), and any release of a hold
+- Journal compaction, key rotation and authority migration, the remaining concurrent and recovery tests across runtimes (Step 31E; the collision ran in Step 31E.1), and any release of a hold
   whose helper restarted or whose generation the backend contradicted.
 - Open from earlier steps: egress-IP leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
@@ -1471,6 +1471,7 @@ or permit, the sealed ruleset remained, and `verify-lab` answered `tunnel_config
 | 31D.3d.2 | Controller revocation transport and the release command |
 | 31D.3e | Complete reservation lifecycle smoke test |
 | 31E | Concurrent collision and recovery tests |
+| 31E.1 | Real multi-runtime IP collision test |
 
 The states stay separate; none of them is an `active` flag:
 
@@ -1530,7 +1531,8 @@ active lease or permission to send traffic: two helpers can still produce candid
 address, and the shared authority decides durable ownership afterwards (Steps 31B to 31D.1).
 helperctl sends it since Step 31D.1 and the controller's `reserve-egress` since Step 31D.2; the tests
 use real Unix sockets and signatures with the fake kernel backend, and it ran on a real tunnel in
-Step 31D.3e (`docs/DEV-LINUX-VM.md`).
+Step 31D.3e (`docs/DEV-LINUX-VM.md`). In Step 31E.1 two Lima runtimes produced candidates for the
+same address, and the authority refused the second one with `EGRESS_IP_COLLISION`.
 
 ### Shared atomic reservation registry (Step 31B)
 

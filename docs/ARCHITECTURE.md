@@ -145,7 +145,7 @@ Journal compaction, migrating an authority between hosts (a Windows authority is
 - No automatic retry, forced release or fallback to an unsigned disconnect exists. A hold whose helper restarted, or whose generation the backend contradicted, cannot be released by any command yet.
 - Application networking remains disabled.
 
-The whole lifecycle (reserve, prepare, revoke, release, reconnect, reserve the same address again) ran on Lima against the real WireGuard tunnel in Step 31D.3e (`docs/DEV-LINUX-VM.md`).
+The whole lifecycle (reserve, prepare, revoke, release, reconnect, reserve the same address again) ran on Lima against the real WireGuard tunnel in Step 31D.3e (`docs/DEV-LINUX-VM.md`). Step 31E.1 ran it on two Lima runtimes sharing the controller key and the authority: the second runtime's reservation of an address the first one held answered `EGRESS_IP_COLLISION` with the journal unchanged, and succeeded once the first runtime released it.
 
 ### Windows / macOS / Linux
 
