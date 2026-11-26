@@ -147,6 +147,15 @@ Journal compaction, migrating an authority between hosts (a Windows authority is
 
 The whole lifecycle (reserve, prepare, revoke, release, reconnect, reserve the same address again) ran on Lima against the real WireGuard tunnel in Step 31D.3e (`docs/DEV-LINUX-VM.md`). Step 31E.1 ran it on two Lima runtimes sharing the controller key and the authority: the second runtime's reservation of an address the first one held answered `EGRESS_IP_COLLISION` with the journal unchanged, and succeeded once the first runtime released it.
 
+### Cross-process authority races (Step 31E.2)
+
+The provisioned V2 authority is exercised through independent operating-system processes (`internal/control/reservation_authority_process_test.go`): concurrent reservations of one address, a release against a reservation of the same address, and a duplicate release of one hold. Each child process opens the authority and builds its complete admission (real signatures, a synthetic receipt, no network cleanup) before a process barrier releases all of them together, so the transactions meet at the journal lock, not at a mutex in shared memory.
+
+- The authority never grants overlapping ownership of an address and never releases a hold twice, and a stale release cannot remove a later owner. Refusing a retired owner's new hold is covered in process by `reservation_release_test.go`.
+- Lock contention is a valid fail-closed outcome: while another process holds the authority marker, the journal or both, a reservation, a release and a listing answer `ErrReservationBusy` at once; nothing waits or retries.
+- A sequential case covers the ownership transfer that the barrier never produces: a new owner's reservation process, opened before another process commits the release, is granted afterwards (it reloads the journal), and the stale release is then refused.
+- Synthetic same-address admissions exercise the durable transaction boundary independently of the VPN provider.
+
 ### Windows / macOS / Linux
 
 The Go control plane can run natively on Windows and macOS.

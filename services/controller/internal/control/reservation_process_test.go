@@ -78,6 +78,12 @@ func TestReservationJournalSubprocess(t *testing.T) {
 			t.Fatal(err)
 		}
 
+	case "authority-reserve", "authority-release":
+		runAuthorityRaceChild(t, mode, dir)
+
+	case "authority-hold", "marker-hold":
+		runAuthorityHoldChild(t, mode, dir)
+
 	default:
 		t.Fatal("unknown reservation child mode")
 	}
