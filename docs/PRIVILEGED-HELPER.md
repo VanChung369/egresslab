@@ -1,6 +1,6 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 33 — kernel-timed traffic gate.** A controller CLI signs `CreateLab`,
+Status: **Step 34 — SOCKS5 proxy runtime.** A controller CLI signs `CreateLab`,
 `ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`, `ReserveEgressCandidateV1`,
 `PrepareEgressLeaseV1`, `RevokeEgressLeaseV1` and `RecoverRetiredGenerationV1` and drives the helper's sealed lab, tunnel and diagnostic probes in the Linux
 runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports
@@ -23,9 +23,11 @@ durable hold and records the release in the authority's journal. After a helper 
 of the Linux guest, `recover-egress` has a later helper epoch attest, from its boot-bound witnesses,
 that the reboot ended the original generation (`RecoverRetiredGenerationV1`). While a lease is
 prepared, the helper re-verifies its generation's address with the same two sources about every 20 s;
-drift or a failed check faults and removes the tunnel, and the durable hold stays. An internal,
-kernel-timed traffic gate for the future proxy's dedicated UID is built and tested, but nothing
-opens it yet. Windows (WSL2), Linux and macOS (Lima, Keychain) are
+drift or a failed check faults and removes the tunnel, and the durable hold stays. A loopback
+SOCKS5 proxy (`serve-socks`) carries IPv4 TCP streams through the prepared generation: each CONNECT
+is a signed `OpenProxyStreamV1`, the socket is opened inside the lab by an unprivileged worker and
+handed to the helper, and its traffic passes only a kernel-timed gate that the helper renews while
+the monitoring health is fresh. Windows (WSL2), Linux and macOS (Lima, Keychain) are
 verified end to end, except that the multi-source probe has run on WSL2 and Lima only, not on native
 Linux. No lease or proxy traffic exists; the sections from "Typed operations only" on are partly
 design.
@@ -96,11 +98,14 @@ design.
   persistent epoch witnesses, that a kernel reboot ended the original epoch's generation (see
   "Reboot-bound reservation recovery"); helperctl's `revoke-egress-lease` carries it, and the
   controller's `recover-egress` sends it (Step 31E.3).
+- `OpenProxyStreamV1` with `-enable-proxy`: one IPv4 TCP stream to one destination for the prepared
+  reservation of this helper epoch (see "SOCKS5 proxy runtime"); helperctl's `proxy-stream` carries
+  it, and the controller's `serve-socks` sends one per CONNECT (Step 34).
 - Controller side (see "Controller and runtimes"):
   - an Ed25519 signer for `CreateLab`, `ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`,
-    `ReserveEgressCandidateV1`, `PrepareEgressLeaseV1`, `RevokeEgressLeaseV1` and
-    `RecoverRetiredGenerationV1` (the `PermitMultiProbeV1` signer stays for compatibility tests),
-    checked against the nine golden vectors the helper also pins;
+    `ReserveEgressCandidateV1`, `PrepareEgressLeaseV1`, `RevokeEgressLeaseV1`,
+    `RecoverRetiredGenerationV1` and `OpenProxyStreamV1` (the `PermitMultiProbeV1` signer stays for
+    compatibility tests), checked against the ten golden vectors the helper also pins;
     `ConnectTunnel` is signed only for the profile's own lab in the current helper process and the
     vault's current, compatible stage, and the probes only for that lab once its tunnel is
     configured, `PermitMultiProbeV2` also only for the tunnel generation and policy that helper
@@ -110,7 +115,7 @@ design.
   - runtime providers that reach the helper from each host OS;
   - `egresslab-controller-lab`, which needs `-approve` for every mutation, including
     `connect-tunnel`, `disconnect`, `init-reservations`, `reserve-egress`, `release-egress` and
-    `recover-egress` (`list-reservations` is read-only);
+    `recover-egress` and `serve-socks` (`list-reservations` is read-only);
   - trusted runtimes and persistent profile-to-runtime bindings (see "Trusted runtimes and
     profile bindings").
 - A recovery gate and a kernel compatibility check before `CreateLab` (see "Sealed lab
@@ -1490,6 +1495,7 @@ or permit, the sealed ruleset remained, and `verify-lab` answered `tunnel_config
 | 31E.3 | Reboot-bound reservation recovery |
 | 32 | Continuous egress monitoring of a prepared generation |
 | 33 | Kernel-timed traffic gate (kill-switch) |
+| 34 | SOCKS5 proxy runtime |
 
 The states stay separate; none of them is an `active` flag:
 
@@ -1502,8 +1508,9 @@ The states stay separate; none of them is an `active` flag:
 | Prepared lease | a reservation bound by the helper to its tunnel generation (Step 31D.3a); not active |
 | Retired generation | a candidate's tunnel generation whose removal the helper confirmed (Step 31D.3c), for its epoch only |
 | Monitoring health | a prepared generation's address verified again by the helper (Step 32), for 60 s at most; renews no evidence or authorization |
-| Traffic window | a kernel-timed gate for one trusted worker of the prepared generation (Step 33), 10 s at most, on fresh monitoring health; not reachable through IPC yet |
-| Active lease | the right to use the address: the supervised proxy runtime (later steps) on top of the monitoring and the traffic gate |
+| Traffic window | a kernel-timed gate for the proxy user of the prepared generation (Step 33), 10 s at most, on fresh monitoring health; opened again and again by a proxy stream (Step 34) |
+| Proxy stream | one signed IPv4 TCP stream through those windows (Step 34); it ends with the prepared lease |
+| Active lease | the right to use the address as a whole (later steps): more than one stream, DNS and the desktop's control |
 | Network ready | application traffic allowed |
 
 `EgressCandidateRegistry` and the lease registry of the earlier lab CLIs are not that authority:
@@ -1932,12 +1939,53 @@ kernel. The data-plane gate reuses the probe window's design (Step 29) with a di
   sticky address of a configured, unfaulted tunnel, a verified tunnel and an idle namespace before
   and after the window (probe and traffic windows never overlap). `LabLifecycle.
   WithPreparedTrafficWindow` adds the exact prepared reservation and fresh monitoring health, gives
-  way to a due monitor check (`LAB_BUSY`), and never runs past the next check as the monitor computes
-  it (20 s after the last check, or 30 s before the health expires, whichever comes first); it needs
-  more than 14 s of that left. A refusal before anything opened is `LAB_BUSY` and leaves the tunnel;
-  any other failed window faults the tunnel, and the durable hold stays.
-- So a window can start only in the first few seconds after a monitor check, and lasts at most 9 s.
-  The data plane of the next steps has to live with that cadence or change it.
-- No IPC operation, listener or worker calls it yet; application networking remains disabled
-  until the supervised proxy runtime exists. The controller, the journal and the signed protocol
-  did not change.
+  way to a due monitor check (`LAB_BUSY`), and never runs past the monitor's renewal deadline (30 s
+  before the health expires; until Step 34, the next routine check); it needs more than 14 s of that
+  left. A refusal before anything opened is `LAB_BUSY` and leaves the tunnel; any other failed window
+  faults the tunnel, and the durable hold stays.
+- Since Step 34 windows chain through the routine check interval, so the gate closes only while the
+  monitor probes. Bounded to the routine check, a window could start only in the first ~6 s of a
+  ~23 s cycle, and a server-push TCP stream stalled for good (see "SOCKS5 proxy runtime").
+- Only the proxy stream of Step 34 opens it; no IPC operation exposes the primitive itself.
+
+### SOCKS5 proxy runtime (Step 34)
+
+`egresslab-controller-lab -approve serve-socks RESERVATION_ID PORT` listens on `127.0.0.1:PORT`
+only, with a random username and password shown once at start, and carries SOCKS5 CONNECT for
+IPv4 destinations. Domain names (no safe resolver yet), IPv6, BIND and UDP ASSOCIATE are refused, as
+are the probe sources (Cloudflare, the ident.me pin), DNS ports, private and reserved addresses. It
+runs in the foreground until interrupted and changes no global readiness.
+
+- **Authorization per CONNECT.** The controller reads the trust record again, asks the runtime for
+  `HelperInfo` and signs one `OpenProxyStreamV1` for the hold's own helper epoch: the preparation
+  intent of the hold plus `destination_ipv4` and `destination_port` (appended, omitted elsewhere; the
+  tenth golden vector pins them). The durable hold only proves ownership: the helper also requires
+  its prepared lease for that reservation and fresh monitoring health, so a recovered hold never
+  opens a stream.
+- **Socket handoff.** `egresslab-proxy-dial` runs inside the lab namespace through `setpriv` as the
+  dedicated proxy user (no groups, capabilities or new privileges), connects, passes the socket to
+  the helper over an inherited Unix socket (`SCM_RIGHTS`) and exits. The socket keeps the
+  namespace's routes and firewall and its creator's UID, so the gate's `meta skuid` still matches,
+  and no process stays in the namespace, which the monitor's probe requires. A failed dial is a
+  SOCKS error with a coded reason in the helper log; it never faults the tunnel, and the helper never
+  dials by itself.
+- **Traffic windows.** The stream dials inside a traffic window, then keeps reopening windows (6 s
+  each, 250 ms apart) for as long as it lives, giving way to a due monitor check; the gate closes only
+  while the monitor probes. One stream per helper: a new authorized stream replaces the previous one.
+  A stream lives at most 30 minutes, and ends with the prepared lease: monitoring faults,
+  disconnects, releases and new tunnels close it before anything else.
+- **Preemption.** A stream holds the lifecycle lock through its windows almost continuously. A
+  release or a new stream whose capability already checks out (verified, not yet consumed) cancels
+  the stream and waits up to 5 s for the lock; an unauthorized request never interrupts it. Other
+  operations (verify, disconnect, delete) answer `LAB_BUSY` while a stream runs: stop `serve-socks`
+  or release first.
+- **Transport.** The controller runs `egresslab-helperctl proxy-stream` through the runtime launcher.
+  The capability travels in a frame on stdin, the helper's acknowledgement comes back as a frame,
+  then both directions are framed (data, FIN, and END from the guest), because neither a killed
+  launcher nor a closed stdout crosses `limactl shell`; EOF on stdin closes the stream. A destination
+  FIN does not end the upload. A pending request whose client left never dials.
+- **Client handling.** One client is served at a time; up to eight more wait up to 10 s for its slot,
+  the rest are refused. After the destination finished, an idle client is closed after 30 s.
+
+Limits of this prototype: one stream per runtime; traffic pauses for a few seconds at each monitor
+check; WSL2 and native Linux have not run it. Application networking as a whole stays disabled.

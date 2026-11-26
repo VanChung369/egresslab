@@ -14,6 +14,7 @@ type fakeTrafficWindowBackend struct {
 	opened      int
 	healthUntil time.Time
 	err         error
+	window      time.Duration // the run deadline, like the kernel element's; 2 s when zero
 }
 
 func (b *fakeTrafficWindowBackend) WithTrafficWindow(
@@ -35,7 +36,15 @@ func (b *fakeTrafficWindowBackend) WithTrafficWindow(
 		return b.err
 	}
 
-	return run(ctx)
+	window := b.window
+	if window == 0 {
+		window = 2 * time.Second
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, window)
+	defer cancel()
+
+	return run(runCtx)
 }
 
 func newTrafficWindowFixture(t *testing.T) (*tunnelFixture, *fakeTrafficWindowBackend, Request, PreparedLeaseInfo) {
@@ -71,9 +80,9 @@ func TestPreparedTrafficWindow(t *testing.T) {
 	}
 
 	if f.labs.preparedLease != p || p.info != info || p.evidence != evidence || p.monitor != health ||
-		windows.healthUntil.After(health.checkedAt.Add(egressMonitorInterval)) ||
+		!windows.healthUntil.Equal(health.renewBy()) ||
 		f.labs.labs[f.lab.ProfileID].State != LabTunnelConfigured {
-		t.Fatal("traffic window changed the lease or outlived the next monitor check")
+		t.Fatal("traffic window changed the lease or outlived the renewal deadline")
 	}
 
 	called = false
@@ -93,7 +102,7 @@ func TestPreparedTrafficWindowRefusals(t *testing.T) {
 	}
 
 	for _, mode := range []string{
-		"wrong reservation", "root UID", "busy lifecycle", "monitor due", "next check too close", "renewal due soon",
+		"wrong reservation", "root UID", "busy lifecycle", "monitor due", "renewal too close", "renewal due soon",
 		"backend too late",
 	} {
 		t.Run(mode, func(t *testing.T) {
@@ -115,8 +124,8 @@ func TestPreparedTrafficWindowRefusals(t *testing.T) {
 			case "monitor due":
 				p.monitor.checkedAt = p.monitor.checkedAt.Add(-egressMonitorInterval)
 				want = errLabBusy
-			case "next check too close":
-				p.monitor.checkedAt = p.monitor.checkedAt.Add(-9 * time.Second)
+			case "renewal too close":
+				p.monitor.expiresAt = time.Now().Add(egressMonitorBudget + trafficWindowMinHealth - time.Second)
 				want = errLabBusy
 			case "renewal due soon":
 				// Not due yet, but the monitor renews 30 s before the health expires.
@@ -172,5 +181,19 @@ func TestPreparedTrafficWindowFaults(t *testing.T) {
 				t.Fatal("window opened when it must not")
 			}
 		})
+	}
+}
+
+// Windows chain through the routine check interval; only a due check or the renewal deadline stops
+// them.
+func TestPreparedTrafficWindowChainsPastInterval(t *testing.T) {
+	f, windows, _, result := newTrafficWindowFixture(t)
+	p := f.labs.preparedLease
+	p.monitor.checkedAt = p.monitor.checkedAt.Add(-egressMonitorInterval + 5*time.Second)
+
+	if err := f.labs.WithPreparedTrafficWindow(context.Background(), result.ReservationID, 1001,
+		func(context.Context) error { return nil }); err != nil || windows.opened != 1 ||
+		!windows.healthUntil.Equal(p.monitor.renewBy()) || !windows.healthUntil.After(p.monitor.nextDue()) {
+		t.Fatalf("window refused past the routine check: %v", err)
 	}
 }

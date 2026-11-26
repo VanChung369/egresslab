@@ -49,6 +49,10 @@ const (
 	// by a later epoch from its boot-bound witnesses instead of a retirement record.
 	OpRecoverRetiredGeneration = "RecoverRetiredGenerationV1"
 
+	// OpOpenProxyStream opens one IPv4 TCP stream for the prepared reservation's tunnel generation,
+	// to one destination. It is the only operation that lets traffic through the data-plane gate.
+	OpOpenProxyStream = "OpenProxyStreamV1"
+
 	// The helper picks the namespace, so a CreateLab intent signs "namespace":"".
 	OpCreateLab = "CreateLab"
 
@@ -95,6 +99,10 @@ type Intent struct {
 
 	// RecoverRetiredGenerationV1 only: the hold's epoch; Claims.HelperID names the recovering one.
 	OriginalHelperID string `json:"original_helper_id,omitempty"`
+
+	// OpenProxyStreamV1 only: the one destination of the stream.
+	DestinationIPv4 string `json:"destination_ipv4,omitempty"`
+	DestinationPort uint16 `json:"destination_port,omitempty"`
 }
 
 type Claims struct {
@@ -147,6 +155,27 @@ func validateIntent(in Intent) error {
 		binding.OriginalHelperID = ""
 
 		return validateIntent(binding)
+	}
+
+	// A proxy stream binds exactly the preparation of the same reservation, plus one destination.
+	if in.Operation == OpOpenProxyStream {
+		binding := in
+		binding.Operation = OpPrepareEgressLease
+		binding.DestinationIPv4, binding.DestinationPort = "", 0
+
+		if err := validateIntent(binding); err != nil {
+			return err
+		}
+
+		if !ValidProxyDestination(in.DestinationIPv4, in.DestinationPort, in.ProbeIPv4) {
+			return ErrInvalidCapability
+		}
+
+		return nil
+	}
+
+	if in.DestinationIPv4 != "" || in.DestinationPort != 0 {
+		return ErrInvalidCapability
 	}
 
 	if !ValidProfileID(in.ProfileID) {
@@ -346,6 +375,16 @@ func NewVerifier(public ed25519.PublicKey, helperID string) (*Verifier, error) {
 // before the replay check leaves its nonce unused. After an observed clock rollback it returns
 // ErrAuthorizationClockUnsafe for every capability. It runs no network commands.
 func (v *Verifier) VerifyAndConsume(capability SignedCapability, expected Intent) error {
+	return v.verify(capability, expected, true)
+}
+
+// Check runs every check of VerifyAndConsume, the replay check included, without consuming the
+// nonce. It lets a request prove it is authorized before it may interrupt other work.
+func (v *Verifier) Check(capability SignedCapability, expected Intent) error {
+	return v.verify(capability, expected, false)
+}
+
+func (v *Verifier) verify(capability SignedCapability, expected Intent, consume bool) error {
 	if v == nil ||
 		validateIntent(expected) != nil ||
 		validateStructure(capability.Claims) != nil ||
@@ -387,6 +426,10 @@ func (v *Verifier) VerifyAndConsume(capability SignedCapability, expected Intent
 
 	if _, used := v.used[capability.Claims.Nonce]; used {
 		return ErrCapabilityReplay
+	}
+
+	if !consume {
+		return nil
 	}
 
 	// Bound memory: refuse rather than forget a live nonce.

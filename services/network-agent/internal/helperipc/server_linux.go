@@ -39,6 +39,10 @@ type ServerOptions struct {
 	ReadStage StageReader
 
 	ReadEpochRecovery EpochRecoveryReader
+
+	// The proxy data plane: the dedicated proxy user and its dial worker, from trusted startup flags.
+	ProxyUID  uint32
+	ProxyDial ProxyDialer
 }
 
 // Serve answers local, single-request connections until ctx is cancelled, without
@@ -79,6 +83,11 @@ func ServeWith(ctx context.Context, listener *net.UnixListener, allowedUID uint3
 
 	if opts.RuntimeID != "" && !ValidRuntimeID(opts.RuntimeID) {
 		return errors.New("invalid runtime ID")
+	}
+
+	if opts.ProxyDial != nil && (opts.Labs == nil || opts.Verifier == nil || opts.ProxyUID == 0 ||
+		opts.ProxyUID == ^uint32(0)) {
+		return errors.New("proxy streams require the authorized lab lifecycle and a proxy UID")
 	}
 
 	if opts.ReadEpochRecovery != nil && (opts.Verifier == nil || opts.RuntimeID == "") {
@@ -173,6 +182,18 @@ func handle(ctx context.Context, conn *net.UnixConn, allowedUID uint32, opts Ser
 	if err := ReadFrame(conn, &req); err != nil {
 		// Do not echo anything from a frame that failed to parse.
 		_ = WriteFrame(conn, Response{Version: Version, Code: CodeInvalidRequest, Error: "invalid request frame"})
+		return
+	}
+
+	// A proxy stream keeps the connection: an ack, then raw TCP bytes.
+	if req.Operation == helperauth.OpOpenProxyStream {
+		if opts.ProxyDial == nil || opts.Labs == nil || opts.Verifier == nil {
+			_ = WriteFrame(conn, ProxyStreamAck{Version: Version, Operation: req.Operation, Code: CodeOperationDisabled})
+			return
+		}
+
+		opts.Labs.serveProxyStream(ctx, conn, req, opts.Verifier, opts.RuntimeID, opts.ProxyUID, opts.ProxyDial)
+
 		return
 	}
 

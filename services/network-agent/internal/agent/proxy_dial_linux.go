@@ -171,7 +171,7 @@ func dialInNamespace(
 
 	waitErr := cmd.Wait()
 
-	if receiveErr == nil && waitErr == nil && workerCtx.Err() == nil {
+	if receiveErr == nil && waitErr == nil && ctx.Err() == nil {
 		return conn, nil
 	}
 
@@ -179,12 +179,19 @@ func dialInNamespace(
 		_ = conn.Close()
 	}
 
-	if workerCtx.Err() != nil {
-		return nil, errors.Join(ErrProxyDialFailed, workerCtx.Err())
+	// The cleanup cancellation above is not the caller's: only the caller's context, or the dial
+	// deadline, reports as such.
+	if ctx.Err() != nil {
+		return nil, errors.Join(ErrProxyDialFailed, ctx.Err())
 	}
 
 	if waitErr != nil {
-		return nil, fmt.Errorf("%w: %s", ErrProxyDialFailed, proxyDialFailureReason(stderr.buf.String()))
+		reason := proxyDialFailureReason(stderr.buf.String())
+		if reason == "WORKER_EXECUTION_FAILED" && !time.Now().Before(deadline) {
+			reason = "WORKER_TIMEOUT"
+		}
+
+		return nil, fmt.Errorf("%w: %s", ErrProxyDialFailed, reason)
 	}
 
 	return nil, fmt.Errorf("%w: WORKER_HANDOFF_FAILED: %w", ErrProxyDialFailed, receiveErr)

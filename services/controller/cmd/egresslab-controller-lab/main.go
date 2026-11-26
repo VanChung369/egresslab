@@ -38,6 +38,7 @@ var approvalRequired = map[string]bool{
 	"create-lab": true, "delete-lab": true, "trust-runtime": true, "untrust-runtime": true, "unbind-profile": true,
 	"connect-tunnel": true, "disconnect": true, "probe-egress": true, "probe-egress-multi": true,
 	"init-reservations": true, "reserve-egress": true, "release-egress": true, "recover-egress": true,
+	"serve-socks": true,
 }
 
 func main() {
@@ -128,6 +129,11 @@ func run(argv []string, d deps) error {
 
 	if s.provider, err = d.newRuntime(*kind, labruntime.Options{WSLDistro: *distro, LimaInstance: *instance}); err != nil {
 		return err
+	}
+
+	// Runs in the foreground until interrupted, with its own context.
+	if args[0] == "serve-socks" {
+		return s.serveSocks(args[1], args[2])
 	}
 
 	// Several helper calls in a row; a ConnectTunnel alone may take up to 135 s with its rollback.
@@ -229,6 +235,10 @@ func checkArgs(args []string) error {
 		}
 	case "release-egress", "recover-egress":
 		if len(args) == 2 && control.ValidReservationID(args[1]) {
+			return nil
+		}
+	case "serve-socks":
+		if len(args) == 3 && control.ValidReservationID(args[1]) && validSocksPort(args[2]) {
 			return nil
 		}
 	case "connect-tunnel":
@@ -629,5 +639,6 @@ func usageError() error {
 		"  stage-info PROFILE_ID | connect-tunnel PROFILE_ID NAMESPACE STAGE_ID | disconnect PROFILE_ID NAMESPACE\n" +
 		"  probe-egress PROFILE_ID NAMESPACE | probe-egress-multi PROFILE_ID NAMESPACE\n" +
 		"  multi-probe-target PROFILE_ID NAMESPACE | reserve-egress PROFILE_ID NAMESPACE\n" +
-		"  release-egress RESERVATION_ID | recover-egress RESERVATION_ID")
+		"  release-egress RESERVATION_ID | recover-egress RESERVATION_ID\n" +
+		"  serve-socks RESERVATION_ID PORT (127.0.0.1 only, foreground)")
 }

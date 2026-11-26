@@ -122,6 +122,20 @@ func TestLabSignerGolden(t *testing.T) {
 				OriginalHelperID: "helper_ffffffffffffffffffffffffffffffff"},
 			"slPnw8KU8q473lrqph2afgIOt_DRvGLPrngEW9Ql6vAGfI9RNcMKW1zsM7aXczAYTmKB9Km31ezNriaQek7LCw",
 		},
+		"OpenProxyStreamV1": {
+			LabIntent{Operation: LabOpenProxyStreamOp, ProfileID: "profile_0123456789abcdef",
+				Namespace: "egresslab-lab-0123456789abcdef", ProbeIPv4: "9.9.9.9",
+				TunnelGeneration: "tunnelgen_0123456789abcdef0123456789abcdef",
+				EvidenceNonce:    "ffeeddccbbaa99887766554433221100",
+				ReservationNonce: "aabbccddeeff00112233445566778899",
+				RuntimeID:        "runtime_0123456789abcdef0123456789abcdef",
+				AuthorityID:      "authority_0123456789abcdef0123456789abcdef",
+				ReservationID:    "reservation_0123456789abcdef0123456789abcdef",
+				EgressIPv4:       "8.8.4.4",
+				DestinationIPv4:  "93.184.216.34",
+				DestinationPort:  443},
+			"OA6DjJ3tdkupojWRhq0tTIwoT8uA-ix9D5Rl1NBIP2iPz6u11mp2lpzxtwnVCdmr0JOl1EZFvPYYSgKHrt5ECg",
+		},
 	}
 
 	for name, tt := range tests {

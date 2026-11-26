@@ -250,6 +250,10 @@ func (e *verifiedMultiProbeEvidence) fresh(now time.Time) bool {
 // the local candidate and the prepared lease. It is not durable IP ownership, and dropping it proves
 // no kernel cleanup. The caller must hold l.mu.
 func (l *LabLifecycle) invalidateEvidenceLocked(profileID string) {
+	if l.proxyStream != nil && l.proxyStream.profileID == profileID {
+		l.closeProxyStreamLocked()
+	}
+
 	if l.verifiedEvidence != nil && l.verifiedEvidence.intent.ProfileID == profileID {
 		l.verifiedEvidence = nil
 	}

@@ -1,0 +1,203 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net"
+	"net/netip"
+	"os"
+	"os/signal"
+	"strconv"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/VanChung369/egresslab/services/controller/internal/control"
+	"github.com/VanChung369/egresslab/services/controller/internal/labruntime"
+	"github.com/VanChung369/egresslab/services/controller/internal/socks5"
+)
+
+const (
+	proxySetupTimeout = 30 * time.Second
+
+	// One client is served at a time; a few more wait briefly for its slot (the previous stream
+	// finishes its close through the tunnel), and the rest are refused.
+	socksSlotWait   = 10 * time.Second
+	socksMaxWaiting = 8
+)
+
+func validSocksPort(raw string) bool {
+	port, err := strconv.ParseUint(raw, 10, 16)
+
+	return err == nil && port >= 1024 && strconv.FormatUint(port, 10) == raw
+}
+
+func randomToken(n int) (string, error) {
+	raw := make([]byte, n)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(raw), nil
+}
+
+// serveSocks serves SOCKS5 on 127.0.0.1 only, one client at a time, in the foreground until
+// interrupted. Every CONNECT is authorized on its own: the runtime's current helper epoch, a fresh
+// signed capability for that one destination, and the helper's prepared lease and monitoring health.
+// It changes no global readiness and opens nothing on the LAN.
+func (s *session) serveSocks(reservationID, portArg string) error {
+	port, _ := strconv.ParseUint(portArg, 10, 16)
+
+	authority, keys, err := s.openReservationAuthority()
+	if err != nil {
+		return err
+	}
+
+	if _, err := authority.Lookup(reservationID); err != nil {
+		return reservationCommandError(err)
+	}
+
+	trusted := func() (control.TrustedRuntime, error) {
+		state, err := control.LoadRuntimeState(s.dataDir)
+		if err != nil {
+			return control.TrustedRuntime{}, err
+		}
+
+		rt, exists := state.RuntimeFor(s.provider.Kind(), s.provider.Target())
+		if !exists {
+			return control.TrustedRuntime{}, labruntime.Errorf(labruntime.CodeRuntimeUntrusted, "selected runtime is not trusted")
+		}
+
+		return rt, nil
+	}
+
+	if _, err := trusted(); err != nil {
+		return err
+	}
+
+	transport := s.provider.Transport()
+
+	streams, ok := transport.(labruntime.ProxyStreamTransport)
+	if !ok {
+		return labruntime.Errorf(labruntime.CodeOperationDisabled, "runtime has no proxy stream transport")
+	}
+
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	username, err := randomToken(8)
+	if err != nil {
+		return err
+	}
+
+	password, err := randomToken(16)
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+
+	if err := s.print(struct {
+		Listen        string `json:"listen"`
+		Username      string `json:"username"`
+		Password      string `json:"password"`
+		ReservationID string `json:"reservation_id"`
+		NetworkReady  bool   `json:"network_ready"`
+	}{listener.Addr().String(), username, password, reservationID, false}); err != nil {
+		return err
+	}
+
+	dial := func(ctx context.Context, destination netip.AddrPort) (socks5.Stream, error) {
+		// The trust record is read again for every CONNECT: untrust-runtime stops new streams.
+		rt, err := trusted()
+		if err != nil {
+			return nil, err
+		}
+
+		// Bounded setup; the stream itself lives on ctx.
+		setup, cancel := context.WithTimeout(ctx, proxySetupTimeout)
+		defer cancel()
+
+		helper, err := transport.HelperInfo(setup)
+		if err != nil {
+			return nil, err
+		}
+
+		capability, err := authority.MintProxyStream(reservationID, destination, keys, rt, helper, s.d.now())
+		if err != nil {
+			if errors.Is(err, control.ErrReservationReleaseInvalid) {
+				return nil, errors.Join(socks5.ErrNotAllowed, err)
+			}
+
+			return nil, err
+		}
+
+		return streams.OpenProxyStream(ctx, capability)
+	}
+
+	slot := make(chan struct{}, 1)
+	waiting := make(chan struct{}, socksMaxWaiting)
+
+	var clients sync.WaitGroup
+	defer clients.Wait()
+
+	for {
+		conn, err := listener.AcceptTCP()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+
+			return err
+		}
+
+		select {
+		case waiting <- struct{}{}:
+		default:
+			_ = conn.Close()
+			continue
+		}
+
+		clients.Add(1)
+
+		go func() {
+			defer clients.Done()
+
+			timer := time.NewTimer(socksSlotWait)
+			defer timer.Stop()
+
+			select {
+			case slot <- struct{}{}:
+				<-waiting
+			case <-timer.C:
+				<-waiting
+				_ = conn.Close()
+
+				return
+			case <-ctx.Done():
+				<-waiting
+				_ = conn.Close()
+
+				return
+			}
+
+			defer func() { <-slot }()
+
+			if err := socks5.ServeConn(ctx, conn, username, password, dial); err != nil {
+				fmt.Fprintln(os.Stderr, "serve-socks:", err)
+			}
+		}()
+	}
+}

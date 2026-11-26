@@ -59,11 +59,16 @@ func (h egressMonitorHealth) fresh(now time.Time) bool {
 	return age >= 0 && age < verifiedProbeEvidenceTTL
 }
 
-// nextDue: one interval after the last check, or earlier when the health would expire within one
-// probe budget.
+// renewBy is the last moment a renewal can start with its whole probe budget before the health
+// expires.
+func (h egressMonitorHealth) renewBy() time.Time {
+	return h.expiresAt.Add(-egressMonitorBudget)
+}
+
+// nextDue: one interval after the last check, or earlier at renewBy.
 func (h egressMonitorHealth) nextDue() time.Time {
 	next := h.checkedAt.Add(egressMonitorInterval)
-	if renewal := h.expiresAt.Add(-egressMonitorBudget); renewal.Before(next) {
+	if renewal := h.renewBy(); renewal.Before(next) {
 		next = renewal
 	}
 

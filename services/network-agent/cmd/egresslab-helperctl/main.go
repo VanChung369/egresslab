@@ -41,6 +41,16 @@ func main() {
 		fail(invalid(err.Error()))
 	}
 
+	// A stream writes frames and raw bytes to stdout, never the JSON failure document.
+	if len(os.Args) == 2 && os.Args[1] == "proxy-stream" {
+		if err := runProxyStream(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "helperctl:", err)
+			os.Exit(1)
+		}
+
+		return
+	}
+
 	if err := run(os.Args[1:], os.Stdin, os.Stdout); err != nil {
 		fail(err)
 	}
@@ -264,5 +274,6 @@ func usageError() error {
 		"       egresslab-helperctl probe-egress-multi PROFILE_ID NAMESPACE < capability.json\n" +
 		"       egresslab-helperctl reserve-egress-candidate PROFILE_ID NAMESPACE < capability.json\n" +
 		"       egresslab-helperctl prepare-egress-lease PROFILE_ID NAMESPACE < capability.json\n" +
-		"       egresslab-helperctl revoke-egress-lease PROFILE_ID NAMESPACE < capability.json")
+		"       egresslab-helperctl revoke-egress-lease PROFILE_ID NAMESPACE < capability.json\n" +
+		"       egresslab-helperctl proxy-stream < capability frame, then stream frames")
 }

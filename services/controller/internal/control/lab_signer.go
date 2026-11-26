@@ -75,6 +75,10 @@ type LabIntent struct {
 
 	// RecoverRetiredGenerationV1 only, last as in helperauth.Intent.
 	OriginalHelperID string `json:"original_helper_id,omitempty"`
+
+	// OpenProxyStreamV1 only, in helperauth.Intent's order.
+	DestinationIPv4 string `json:"destination_ipv4,omitempty"`
+	DestinationPort uint16 `json:"destination_port,omitempty"`
 }
 
 type LabClaims struct {

@@ -69,18 +69,23 @@ func main() {
 		"enable signed multi-source egress verification (requires -enable-tunnel; excludes -enable-probe)")
 	probeUID := flag.Int("probe-uid", -1, "dedicated unprivileged probe UID")
 	probeGID := flag.Int("probe-gid", -1, "dedicated unprivileged probe GID")
+	enableProxy := flag.Bool("enable-proxy", false,
+		"enable signed proxy streams through the kernel-timed traffic gate (requires -enable-multi-probe)")
+	proxyUID := flag.Int("proxy-uid", -1, "dedicated unprivileged proxy UID")
+	proxyGID := flag.Int("proxy-gid", -1, "dedicated unprivileged proxy GID")
 	flag.Parse()
 
 	if os.Geteuid() != 0 || *uid <= 0 || *gid <= 0 || flag.NArg() != 0 {
 		log.Fatal("usage: sudo egresslab-helper -uid <non-root UID> -gid <non-root GID> " +
 			"[-auth-public-key-file <path> [-enable-lab-lifecycle [-enable-vault [-enable-tunnel\n" +
-			"       [(-enable-probe | -enable-multi-probe) -probe-uid <UID> -probe-gid <GID>]]]]]\n" +
+			"       [(-enable-probe | -enable-multi-probe) -probe-uid <UID> -probe-gid <GID>\n" +
+			"       [-enable-proxy -proxy-uid <UID> -proxy-gid <GID>]]]]]\n" +
 			"       sudo egresslab-helper vault-init | vault-stage PROFILE_ID | vault-revoke PROFILE_ID\n" +
 			"       sudo egresslab-helper check-multi-probe-pin PATH")
 	}
 
 	if err := run(*uid, *gid, *publicKeyFile, *enableLifecycle, *enableVault, *enableTunnel, *enableProbe,
-		*probeUID, *probeGID, *enableMultiProbe); err != nil {
+		*probeUID, *probeGID, *enableMultiProbe, proxyFlags{*enableProxy, *proxyUID, *proxyGID}); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -121,15 +126,59 @@ func validateProbeFlags(uid, gid int, enableTunnel, enableProbe, enableMultiProb
 	return nil
 }
 
+type proxyFlags struct {
+	enable   bool
+	uid, gid int
+}
+
+// validateProxyFlags: the proxy user is neither root, the agent nor the probe worker, and exists only
+// on top of the generation-bound multi-source verification.
+func validateProxyFlags(p proxyFlags, uid, gid int, enableMultiProbe bool, probeUID, probeGID int) error {
+	if !p.enable {
+		if p.uid != -1 || p.gid != -1 {
+			return errors.New("proxy UID and GID require -enable-proxy")
+		}
+
+		return nil
+	}
+
+	if !enableMultiProbe {
+		return errors.New("proxy streams require -enable-multi-probe")
+	}
+
+	if !validID(p.uid) || !validID(p.gid) || p.uid == uid || p.gid == gid || p.uid == probeUID || p.gid == probeGID {
+		return errors.New("proxy requires a separate non-root UID and GID")
+	}
+
+	return nil
+}
+
 func run(
 	uid, gid int,
 	publicKeyFile string,
 	enableLifecycle, enableVault, enableTunnel, enableProbe bool,
 	probeUID, probeGID int,
 	enableMultiProbe bool,
+	proxy proxyFlags,
 ) error {
 	if err := validateProbeFlags(uid, gid, enableTunnel, enableProbe, enableMultiProbe, probeUID, probeGID); err != nil {
 		return err
+	}
+
+	if err := validateProxyFlags(proxy, uid, gid, enableMultiProbe, probeUID, probeGID); err != nil {
+		return err
+	}
+
+	// The worker binary is verified before anything else starts.
+	var proxyDial helperipc.ProxyDialer
+
+	if proxy.enable {
+		dial, err := agent.NewProxyDialer(uint32(proxy.uid), uint32(proxy.gid))
+		if err != nil {
+			return fmt.Errorf("proxy dial worker: %w", err)
+		}
+
+		proxyDial = helperipc.ProxyDialer(dial)
 	}
 
 	if enableTunnel && !enableVault {
@@ -281,6 +330,9 @@ func run(
 
 		if enableMultiProbe {
 			mode = "signed generation-bound multi-source verification enabled; V1, single-source probe and proxy disabled"
+			if proxy.enable {
+				mode = "signed generation-bound multi-source verification and proxy streams enabled; V1 and single-source probe disabled"
+			}
 
 			log.Printf("Multi-source policy: %s; ident.me pin: %s", helperauth.OpPermitMultiProbeV2, identPin)
 		}
@@ -328,6 +380,8 @@ func run(
 		RuntimeID:         runtimeID,
 		ReadStage:         readStage,
 		ReadEpochRecovery: readEpochRecovery,
+		ProxyUID:          proxyUID(proxy),
+		ProxyDial:         proxyDial,
 	})
 
 	if stopMonitor != nil {
@@ -468,4 +522,12 @@ func scanLabResources(ctx context.Context) ([]agent.LabRecoveryItem, error) {
 	}
 
 	return recovery.Scan(ctx)
+}
+
+func proxyUID(p proxyFlags) uint32 {
+	if !p.enable {
+		return 0
+	}
+
+	return uint32(p.uid)
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/VanChung369/egresslab/services/network-agent/internal/helperauth"
@@ -147,6 +148,11 @@ type LabLifecycle struct {
 	candidateGenerationContradicted bool
 
 	logf func(format string, args ...any) // nil: log.Printf
+
+	// The one proxy stream, bound to the prepared lease; proxyActive lets a teardown cancel it
+	// without the lock.
+	proxyStream *proxyStreamState
+	proxyActive atomic.Pointer[proxyStreamState]
 }
 
 func NewLabLifecycle(backend LabBackend) *LabLifecycle {
@@ -372,6 +378,7 @@ func (l *LabLifecycle) Close() error {
 	defer l.mu.Unlock()
 
 	l.closed = true
+	l.closeProxyStreamLocked()
 	l.verifiedEvidence = nil
 	l.localCandidate = nil
 	l.preparedLease = nil

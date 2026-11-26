@@ -26,7 +26,8 @@ func TestProbeFlagsRefused(t *testing.T) {
 		"multi-source probe without tunnel": {false, false, true, 2000, 2000, "requires managed tunnel"},
 		"multi-source probe as the agent":   {true, false, true, 1000, 1000, "separate non-root"},
 	} {
-		err := run(1000, 1000, "/nonexistent/key", true, true, tt.tunnel, tt.probe, tt.probeUID, tt.probeGID, tt.multi)
+		err := run(1000, 1000, "/nonexistent/key", true, true, tt.tunnel, tt.probe, tt.probeUID, tt.probeGID, tt.multi,
+			proxyFlags{uid: -1, gid: -1})
 		if err == nil || !strings.Contains(err.Error(), tt.want) {
 			t.Errorf("%s: %v", name, err)
 		}
@@ -97,5 +98,32 @@ func TestAgentIDsBounded(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "agent UID and GID") {
 			t.Errorf("agent IDs %v accepted: %v", ids, err)
 		}
+	}
+}
+
+// The proxy user is checked before the worker binary, the key, the socket or the kernel.
+func TestProxyFlagsRefused(t *testing.T) {
+	for name, tt := range map[string]struct {
+		multi bool
+		proxy proxyFlags
+		want  string
+	}{
+		"IDs without the proxy":  {true, proxyFlags{false, 3000, 3000}, "require -enable-proxy"},
+		"proxy without V2 probe": {false, proxyFlags{true, 3000, 3000}, "require -enable-multi-probe"},
+		"proxy as root":          {true, proxyFlags{true, 0, 3000}, "separate non-root"},
+		"proxy as the agent":     {true, proxyFlags{true, 1000, 3000}, "separate non-root"},
+		"proxy in the agent GID": {true, proxyFlags{true, 3000, 1000}, "separate non-root"},
+		"proxy as the prober":    {true, proxyFlags{true, 2000, 3000}, "separate non-root"},
+		"proxy in the probe GID": {true, proxyFlags{true, 3000, 2000}, "separate non-root"},
+		"proxy IDs missing":      {true, proxyFlags{true, -1, -1}, "separate non-root"},
+	} {
+		err := validateProxyFlags(tt.proxy, 1000, 1000, tt.multi, 2000, 2000)
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+
+	if err := validateProxyFlags(proxyFlags{true, 3000, 3000}, 1000, 1000, true, 2000, 2000); err != nil {
+		t.Fatal(err)
 	}
 }

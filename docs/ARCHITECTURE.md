@@ -190,11 +190,22 @@ Application networking remains disabled. Polling does not guarantee instantaneou
 Managed traffic windows require an exact prepared reservation, tunnel generation and fresh monitoring health. The namespace firewall permits only IPv4 TCP over the approved interface, with outbound sockets bound to a dedicated UID.
 
 - Both directions depend on a kernel-expiring set (10 s). No unconditional established-connection permit survives the timeout, and only replies of connections the proxy permit admitted (a conntrack mark) come back.
-- A window never runs past the next monitor check and leaves time to close; a refusal before opening is retryable, any other failure faults the tunnel.
+- A window never runs past the monitor's renewal deadline and leaves time to close; a refusal before opening is retryable, any other failure faults the tunnel.
 - Traffic windows are not persisted as firewall baselines. Closing a window must restore and verify the sealed policy.
-- The primitive is not exposed through IPC.
+- The primitive itself is not exposed through IPC; only a proxy stream opens it (Step 34).
 
 Application networking remains disabled until the supervised proxy runtime is implemented.
+
+### SOCKS5 proxy runtime (Step 34)
+
+A loopback SOCKS5 endpoint on the controller host carries IPv4 TCP streams through the prepared generation of one reservation. Every CONNECT is a signed `OpenProxyStreamV1` for one destination, accepted only by the helper epoch that prepared the reservation and only while its monitoring health is fresh.
+
+- An unprivileged worker opens the socket inside the lab namespace and hands it to the helper (`SCM_RIGHTS`); the socket keeps the namespace's routes, firewall and the proxy user's UID, and no process stays in the namespace.
+- The helper renews kernel-timed traffic windows for the stream, through the monitor's check interval; the gate closes only while the monitor probes. Faults, releases and new tunnels close the stream first.
+- The SOCKS parser never dials; the runtime transport is framed in both directions, since the launcher carries no close signal of its own.
+- One stream per runtime, IPv4 only, no domain names (no safe resolver yet).
+
+Application networking as a whole remains disabled.
 
 ### Windows / macOS / Linux
 

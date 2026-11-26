@@ -26,8 +26,8 @@ type trafficWindowBackend interface {
 }
 
 // WithPreparedTrafficWindow opens the kernel-timed data-plane gate for the prepared reservation's
-// exact generation and address, only on fresh monitoring health, and never past the next monitor
-// check. It is reserved for the trusted data plane: uid comes from local provisioning, never from
+// exact generation and address, only on fresh monitoring health, and never past the monitor's
+// renewal deadline: windows chain through the check interval, and a due check goes first. It is reserved for the trusted data plane: uid comes from local provisioning, never from
 // an application or IPC request. A failed window faults the tunnel; the durable hold stays.
 func (l *LabLifecycle) WithPreparedTrafficWindow(
 	ctx context.Context,
@@ -84,8 +84,9 @@ func (l *LabLifecycle) WithPreparedTrafficWindow(
 		return l.faultMonitoredTunnelLocked(lab, errLabUncertain)
 	}
 
-	// Never occupy the lifecycle past the next monitor check, as the monitor computes it.
-	healthUntil := p.monitor.nextDue()
+	// A window may delay the routine check, never the renewal: the gate stays closed only while the
+	// monitor probes.
+	healthUntil := p.monitor.renewBy()
 
 	if healthUntil.Sub(now) <= trafficWindowMinHealth {
 		return errLabBusy
