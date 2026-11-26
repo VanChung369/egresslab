@@ -182,9 +182,9 @@ func (l *LabLifecycle) revokeEgressLease(
 		return RevokedLeaseInfo{}, errLabAuthorization
 	}
 
-	// An authorized release preempts a running proxy stream; the stream closes before the generation
+	// An authorized release preempts the running proxy streams; they close before the generation
 	// retires. The capability is only checked here; it is consumed below.
-	if !l.lockPreemptingProxyStream(ctx, v.Check(*req.Capability, *req.Intent) == nil) {
+	if !l.lockPreemptingProxyStreams(ctx, v.Check(*req.Capability, *req.Intent) == nil) {
 		return RevokedLeaseInfo{}, errLabBusy
 	}
 

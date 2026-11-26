@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ const (
 )
 
 type memoryKeys struct {
+	mu      sync.Mutex
 	private ed25519.PrivateKey
 	signs   int
 }
@@ -54,6 +56,9 @@ func (k *memoryKeys) PublicKey() (ed25519.PublicKey, error) {
 }
 
 func (k *memoryKeys) Sign(message []byte) ([]byte, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
 	k.signs++
 	return ed25519.Sign(k.private, message), nil
 }
@@ -100,27 +105,41 @@ type fakeRuntime struct {
 	loseRevocationReceipt bool
 	rebootBoots           [2]string // original and current kernel boot; empty: no reboot since the hold
 
+	// A proxy listener calls these two concurrently.
+	mu              sync.Mutex
 	helperInfoCalls int
 	onHelperInfo    func(call int) // runs inside HelperInfo
 	streamCalls     []control.LabCapability
+	onStream        func() // runs inside OpenProxyStream
 }
 
 func (f *fakeRuntime) HelperInfo(context.Context) (control.LabHelperInfo, error) {
+	f.mu.Lock()
 	f.calls = append(f.calls, "HelperInfo")
 	f.helperInfoCalls++
+	call, hook, info := f.helperInfoCalls, f.onHelperInfo, f.info
+	f.mu.Unlock()
 
-	if f.onHelperInfo != nil {
-		f.onHelperInfo(f.helperInfoCalls)
+	if hook != nil {
+		hook(call)
 	}
 
-	return f.info, nil
+	return info, nil
 }
 
 var errFakeStream = errors.New("fake proxy stream")
 
 // OpenProxyStream records the capability and opens nothing.
 func (f *fakeRuntime) OpenProxyStream(_ context.Context, c control.LabCapability) (*labruntime.ProxyStream, error) {
+	f.mu.Lock()
 	f.streamCalls = append(f.streamCalls, c)
+	hook := f.onStream
+	f.mu.Unlock()
+
+	if hook != nil {
+		hook()
+	}
+
 	return nil, errFakeStream
 }
 

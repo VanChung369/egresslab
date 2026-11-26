@@ -44,7 +44,8 @@ func (b *fakeTrafficWindowBackend) WithTrafficWindow(
 	runCtx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
 
-	return run(runCtx)
+	// As the real gate: a run that outlives its window, or a cancelled window, fails.
+	return errors.Join(run(runCtx), runCtx.Err())
 }
 
 func newTrafficWindowFixture(t *testing.T) (*tunnelFixture, *fakeTrafficWindowBackend, Request, PreparedLeaseInfo) {

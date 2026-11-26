@@ -149,10 +149,10 @@ type LabLifecycle struct {
 
 	logf func(format string, args ...any) // nil: log.Printf
 
-	// The one proxy stream, bound to the prepared lease; proxyActive lets a teardown cancel it
-	// without the lock.
-	proxyStream *proxyStreamState
-	proxyActive atomic.Pointer[proxyStreamState]
+	// The streams of the prepared lease and their keeper; written under mu, read without it so that
+	// a release can cancel them. proxyCount counts admitted and waiting streams.
+	proxyPlane atomic.Pointer[proxyPlane]
+	proxyCount atomic.Int32
 }
 
 func NewLabLifecycle(backend LabBackend) *LabLifecycle {
@@ -378,7 +378,7 @@ func (l *LabLifecycle) Close() error {
 	defer l.mu.Unlock()
 
 	l.closed = true
-	l.closeProxyStreamLocked()
+	l.closeProxyStreamsLocked()
 	l.verifiedEvidence = nil
 	l.localCandidate = nil
 	l.preparedLease = nil

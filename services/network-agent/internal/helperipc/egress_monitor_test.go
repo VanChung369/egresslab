@@ -202,7 +202,7 @@ func TestEgressMonitorLogNeverBlocks(t *testing.T) {
 		defer close(done)
 
 		for i := 0; i < 4*monitorLogQueue; i++ {
-			logMonitor("synthetic monitor line %d", i)
+			logDetached("synthetic monitor line %d", i)
 		}
 	}()
 

@@ -72,7 +72,7 @@ func (l *LabLifecycle) connectTunnelLocked(
 	}
 
 	// A new tunnel inherits no evidence, candidate, prepared lease or proxy stream.
-	l.closeProxyStreamLocked()
+	l.closeProxyStreamsLocked()
 	l.verifiedEvidence = nil
 	l.localCandidate = nil
 	l.preparedLease = nil

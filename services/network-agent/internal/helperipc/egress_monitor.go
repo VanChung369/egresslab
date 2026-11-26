@@ -24,9 +24,9 @@ var (
 	monitorLogger sync.Once
 )
 
-// logMonitor never blocks the monitor: a stalled log sink drops lines instead of stopping the checks
-// or the helper's shutdown.
-func logMonitor(format string, args ...any) {
+// logDetached never blocks its caller: a stalled log sink drops lines instead of stopping the
+// monitor, a traffic window or the helper's shutdown.
+func logDetached(format string, args ...any) {
 	monitorLogger.Do(func() {
 		go func() {
 			for line := range monitorLogs {
@@ -106,7 +106,7 @@ func (l *LabLifecycle) monitorPreparedOnce(ctx context.Context) error {
 	l.mu.Unlock()
 
 	if renewed != nil {
-		logMonitor("Egress monitor healthy: reservation=%s generation=%s ipv4=%s",
+		logDetached("Egress monitor healthy: reservation=%s generation=%s ipv4=%s",
 			renewed.ReservationID, renewed.TunnelGeneration, renewed.IPv4)
 	}
 
@@ -263,7 +263,7 @@ func (l *LabLifecycle) RunEgressMonitor(ctx context.Context) {
 
 		case <-ticker.C:
 			if err := l.monitorPreparedOnce(ctx); err != nil {
-				logMonitor("Egress monitor fault: %v", err)
+				logDetached("Egress monitor fault: %v", err)
 			}
 		}
 	}

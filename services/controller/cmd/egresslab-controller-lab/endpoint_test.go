@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -116,12 +117,10 @@ func TestEndpointPlanLifecycle(t *testing.T) {
 	}
 }
 
-func socksConnect(t *testing.T, addr, user, pass string, destination netip.AddrPort) byte {
-	t.Helper()
-
+func socksConnectCode(addr, user, pass string, destination netip.AddrPort) (byte, error) {
 	c, err := net.DialTimeout("tcp4", addr, 5*time.Second)
 	if err != nil {
-		t.Fatal(err)
+		return 0, err
 	}
 	defer c.Close()
 
@@ -136,23 +135,23 @@ func socksConnect(t *testing.T, addr, user, pass string, destination netip.AddrP
 
 	for _, step := range []struct{ send, want []byte }{{[]byte{5, 1, 2}, []byte{5, 2}}, {auth, []byte{1, 0}}} {
 		if _, err := c.Write(step.send); err != nil {
-			t.Fatal(err)
+			return 0, err
 		}
 
 		if _, err := io.ReadFull(c, reply); err != nil || !bytes.Equal(reply, step.want) {
-			t.Fatalf("handshake: %v %v", reply, err)
+			return 0, fmt.Errorf("handshake: %v %v", reply, err)
 		}
 	}
 
 	if _, err := c.Write(request); err != nil {
-		t.Fatal(err)
+		return 0, err
 	}
 
 	if _, err := io.ReadFull(c, reply); err != nil || reply[0] != 5 {
-		t.Fatalf("no CONNECT reply: %v %v", reply, err)
+		return 0, fmt.Errorf("no CONNECT reply: %v %v", reply, err)
 	}
 
-	return reply[1]
+	return reply[1], nil
 }
 
 func freeLoopbackPort(t *testing.T) int {
@@ -167,9 +166,18 @@ func freeLoopbackPort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-// A running listener re-reads the endpoint after the helper call and the mint: a change during the
-// helper call stops the stream before its capability is sent.
-func TestServeEndpointRevalidatesEachConnect(t *testing.T) {
+var testSocksDestination = netip.MustParseAddrPort("93.184.216.34:443")
+
+type endpointHarness struct {
+	*harness
+	rt       *fakeRuntime
+	store    *control.Store
+	endpoint control.ProxyEndpoint
+}
+
+func newEndpointHarness(t *testing.T) *endpointHarness {
+	t.Helper()
+
 	h := newHarness(t)
 	h.now = time.Now
 
@@ -189,62 +197,154 @@ func TestServeEndpointRevalidatesEachConnect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := rt.helperInfoCalls
-	rt.onHelperInfo = func(call int) {
-		// The third call since start: the listener's own, the first CONNECT's, then this one.
-		if call == start+3 {
-			if err := store.DeleteEndpoint(endpoint.ID); err != nil {
-				t.Error(err)
-			}
-		}
+	return &endpointHarness{harness: h, rt: rt, store: store, endpoint: endpoint}
+}
+
+type runningEndpoint struct {
+	Listen, Username, Password string
+	ReservationID              string `json:"reservation_id"`
+
+	stop func() error
+}
+
+func (e *runningEndpoint) connect(t *testing.T) byte {
+	t.Helper()
+
+	code, err := socksConnectCode(e.Listen, e.Username, e.Password, testSocksDestination)
+	if err != nil {
+		t.Fatal(err)
 	}
 
+	return code
+}
+
+// serve starts serve-endpoint in the background and reads its listener.
+func (e *endpointHarness) serve(t *testing.T) *runningEndpoint {
+	t.Helper()
+
 	output, stdout := io.Pipe()
-	d := h.deps()
+	d := e.deps()
 	d.stdout = stdout
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 
 	done := make(chan error, 1)
 
 	go func() {
-		done <- (&session{d: d, dataDir: h.dir, ctx: ctx}).serveEndpoint(endpoint.ID)
+		done <- (&session{d: d, dataDir: e.dir, ctx: ctx}).serveEndpoint(e.endpoint.ID)
 		_ = stdout.Close()
 	}()
 
-	var listening struct {
-		Listen, Username, Password string
-		ReservationID              string `json:"reservation_id"`
-	}
+	running := &runningEndpoint{stop: func() error {
+		cancel()
+		return <-done
+	}}
 
-	if err := json.NewDecoder(output).Decode(&listening); err != nil {
+	if err := json.NewDecoder(output).Decode(running); err != nil {
 		t.Fatal(err)
 	}
 
 	go func() { _, _ = io.Copy(io.Discard, output) }()
 
-	destination := netip.MustParseAddrPort("93.184.216.34:443")
+	return running
+}
+
+// A running listener re-reads the endpoint after the helper call and the mint: a change during the
+// helper call stops the stream before its capability is sent.
+func TestServeEndpointRevalidatesEachConnect(t *testing.T) {
+	e := newEndpointHarness(t)
+
+	start := e.rt.helperInfoCalls
+	e.rt.onHelperInfo = func(call int) {
+		// The third call since start: the listener's own, the first CONNECT's, then this one.
+		if call == start+3 {
+			if err := e.store.DeleteEndpoint(e.endpoint.ID); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+
+	running := e.serve(t)
 
 	// Allowed: minted and handed to the transport, whose fake refuses to open it.
-	if code := socksConnect(t, listening.Listen, listening.Username, listening.Password, destination); code != 1 {
+	if code := running.connect(t); code != 1 {
 		t.Fatalf("first CONNECT answered %d", code)
 	}
 
 	// The endpoint is deleted while the helper call runs.
-	if code := socksConnect(t, listening.Listen, listening.Username, listening.Password, destination); code != 2 {
+	if code := running.connect(t); code != 2 {
 		t.Fatalf("CONNECT after the change answered %d", code)
 	}
 
-	cancel()
-
-	if err := <-done; err != nil {
+	if err := running.stop(); err != nil {
 		t.Fatal(err)
 	}
 
-	if len(rt.streamCalls) != 1 || rt.streamCalls[0].Claims.Intent.ReservationID != listening.ReservationID ||
-		rt.streamCalls[0].Claims.Intent.DestinationIPv4 != "93.184.216.34" {
-		t.Fatalf("unexpected streams: %d", len(rt.streamCalls))
+	if len(e.rt.streamCalls) != 1 || e.rt.streamCalls[0].Claims.Intent.ReservationID != running.ReservationID ||
+		e.rt.streamCalls[0].Claims.Intent.DestinationIPv4 != "93.184.216.34" {
+		t.Fatalf("unexpected streams: %d", len(e.rt.streamCalls))
+	}
+}
+
+// Several clients are authorized and opened at once, each with its own capability.
+func TestServeEndpointConcurrentClients(t *testing.T) {
+	e := newEndpointHarness(t)
+
+	const clients = 3
+
+	arrived := make(chan struct{}, clients)
+	release := make(chan struct{})
+
+	e.rt.onStream = func() {
+		arrived <- struct{}{}
+		<-release
+	}
+
+	running := e.serve(t)
+	codes := make(chan byte, clients)
+
+	for range clients {
+		go func() {
+			code, err := socksConnectCode(running.Listen, running.Username, running.Password, testSocksDestination)
+			if err != nil {
+				t.Error(err)
+			}
+
+			codes <- code
+		}()
+	}
+
+	timeout := time.After(10 * time.Second)
+
+	for range clients {
+		select {
+		case <-arrived:
+		case <-timeout:
+			close(release)
+			t.Fatal("clients were not served at once")
+		}
+	}
+
+	close(release)
+
+	for range clients {
+		if code := <-codes; code != 1 {
+			t.Fatalf("CONNECT answered %d", code)
+		}
+	}
+
+	if err := running.stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	nonces := map[string]bool{}
+	for _, c := range e.rt.streamCalls {
+		nonces[c.Claims.Nonce] = true
+	}
+
+	if len(e.rt.streamCalls) != clients || len(nonces) != clients {
+		t.Fatalf("unexpected streams: %d, %d nonces", len(e.rt.streamCalls), len(nonces))
 	}
 }
 

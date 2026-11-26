@@ -6,17 +6,17 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"net/netip"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/VanChung369/egresslab/services/network-agent/internal/helperauth"
 )
 
 const (
-	// proxyFirstWindowWait bounds how long a new stream waits for its first traffic window.
+	// proxyFirstWindowWait bounds how long a new stream waits for a traffic window and its dial.
 	proxyFirstWindowWait = 45 * time.Second
 
 	// proxyWindowHold caps one window, so a due monitor check never waits long.
@@ -25,96 +25,292 @@ const (
 	proxyWindowRetry = 250 * time.Millisecond
 )
 
+// A window admits a new dial only while proxyDialBudget of it is left (the agent's 4 s dial timeout
+// and proxyDialReserve); later requests wait for the next window. Every dial ends proxyDialReserve
+// before the window's deadline, so its worker's cleanup never runs the window past it. Variables
+// for tests.
+var (
+	proxyDialBudget  = 6 * time.Second
+	proxyDialReserve = 2 * time.Second
+)
+
 // ProxyDialer opens one TCP connection inside namespace as the proxy user (agent.ProxyDialer).
 type ProxyDialer func(ctx context.Context, namespace string, destination netip.AddrPort) (*net.TCPConn, error)
 
-// authorizeProxyStream binds the signed request to the prepared lease of this helper epoch and its
-// fresh monitoring health, consumes the capability, and replaces any earlier stream.
-func (l *LabLifecycle) authorizeProxyStream(
-	ctx context.Context,
-	req Request,
-	v *helperauth.Verifier,
-	conn *net.UnixConn,
-	runtimeID string,
-) (*proxyStreamState, netip.AddrPort, error) {
+// proxyKeeper is what the keeper needs from the server; it never comes from a request.
+type proxyKeeper struct {
+	verifier  *helperauth.Verifier
+	runtimeID string
+	uid       uint32
+	dial      ProxyDialer
+}
+
+// checkProxyRequest validates the request and its signature without consuming it.
+func checkProxyRequest(req Request, v *helperauth.Verifier) error {
 	if req.Version != Version || req.Operation != helperauth.OpOpenProxyStream || req.Intent == nil ||
 		req.Capability == nil || v == nil || !helperauth.ValidOpenProxyStreamIntent(*req.Intent) {
-		return nil, netip.AddrPort{}, errLabInvalid
+		return errLabInvalid
 	}
 
-	destination, ok := req.Intent.ProxyDestination()
-	if !ok {
-		return nil, netip.AddrPort{}, errLabInvalid
+	if _, ok := req.Intent.ProxyDestination(); !ok {
+		return errLabInvalid
 	}
 
-	// Only a request that is already authorized may interrupt the running stream.
 	if v.Check(*req.Capability, *req.Intent) != nil {
-		return nil, netip.AddrPort{}, errLabAuthorization
+		return errLabAuthorization
 	}
 
-	if !l.lockPreemptingProxyStream(ctx, true) {
-		return nil, netip.AddrPort{}, errLabBusy
-	}
-	defer l.mu.Unlock()
+	return nil
+}
 
+// authorizeProxyRequestLocked binds the signed request to the prepared lease of this helper epoch,
+// the plane's reservation and fresh monitoring health, and consumes the capability. The caller holds
+// l.mu, inside a traffic window.
+func (l *LabLifecycle) authorizeProxyRequestLocked(req Request, k proxyKeeper, reservationID string) (netip.AddrPort, error) {
+	v := k.verifier
+	destination, _ := req.Intent.ProxyDestination()
 	p := l.preparedLease
 
-	if l.closed || l.blockCreation || p == nil || !p.monitor.fresh(time.Now()) {
-		return nil, netip.AddrPort{}, errLabAuthorization
+	if l.closed || l.blockCreation || p == nil || p.info.ReservationID != reservationID || !p.monitor.fresh(time.Now()) {
+		return netip.AddrPort{}, errLabAuthorization
 	}
 
 	lab, exists := l.labs[p.info.ProfileID]
 	if !exists || lab.Namespace != p.info.Namespace || lab.State != LabTunnelConfigured ||
 		l.tunnelProfile != p.info.ProfileID {
-		return nil, netip.AddrPort{}, errLabUncertain
+		return netip.AddrPort{}, errLabUncertain
 	}
 
 	helperID, fingerprint := v.Identity()
-	if p.info.HelperID != helperID || p.info.RuntimeID != runtimeID || p.info.PublicKeySHA256 != fingerprint {
-		return nil, netip.AddrPort{}, errLabAuthorization
+	if p.info.HelperID != helperID || p.info.RuntimeID != k.runtimeID || p.info.PublicKeySHA256 != fingerprint {
+		return netip.AddrPort{}, errLabAuthorization
 	}
 
 	binding, err := prepareLeaseIntent(p.info.CandidateInfo, p.info.AuthorityID, p.info.ReservationID)
 	if err != nil {
-		return nil, netip.AddrPort{}, errLabAuthorization
+		return netip.AddrPort{}, errLabAuthorization
 	}
 
 	expected, err := helperauth.NewOpenProxyStreamIntent(binding, destination)
 	if err != nil || *req.Intent != expected {
-		return nil, netip.AddrPort{}, errLabAuthorization
+		return netip.AddrPort{}, errLabAuthorization
 	}
 
 	nonce := req.Capability.Claims.Nonce
 	if nonce == p.info.EvidenceNonce || nonce == p.info.ReservationNonce || nonce == p.info.PreparationNonce {
-		return nil, netip.AddrPort{}, errLabAuthorization
+		return netip.AddrPort{}, errLabAuthorization
 	}
 
 	if err := v.VerifyAndConsume(*req.Capability, expected); err != nil {
-		return nil, netip.AddrPort{}, errLabAuthorization
+		return netip.AddrPort{}, errLabAuthorization
 	}
 
-	// One stream per helper: a new authorized stream replaces a stale one.
-	l.closeProxyStreamLocked()
-
-	streamCtx, cancel := context.WithTimeout(ctx, proxyStreamLifetime)
-
-	stream := &proxyStreamState{
-		profileID:     p.info.ProfileID,
-		reservationID: p.info.ReservationID,
-		ctx:           streamCtx,
-		cancel:        cancel,
-		client:        conn,
-	}
-
-	l.proxyStream = stream
-	l.proxyActive.Store(stream)
-
-	return stream, destination, nil
+	return destination, nil
 }
 
-// serveProxyStream dials once inside a traffic window, then keeps reopening windows while the stream
-// lives: the socket outlives every window, and its traffic pauses while the gate is closed (during a
-// monitor check). It never dials again and never opens a window past the stream.
+// joinProxyPlane queues r on the plane of its reservation, starting the plane and its keeper when
+// there is none. A running keeper holds the lock, so joining it never takes the lock; without one,
+// the lock is held at most by a short operation such as a monitor check, or by a keeper that another
+// first request just started.
+func (l *LabLifecycle) joinProxyPlane(ctx context.Context, r *proxyRequest, k proxyKeeper) (*proxyPlane, error) {
+	reservationID := r.req.Intent.ReservationID
+	deadline := time.Now().Add(proxyPreemptWait)
+
+	for {
+		if plane := l.proxyPlane.Load(); plane != nil && plane.reservationID == reservationID && plane.submit(r) {
+			return plane, nil
+		}
+
+		if l.mu.TryLock() {
+			break
+		}
+
+		if !time.Now().Before(deadline) {
+			return nil, errLabBusy
+		}
+
+		timer := time.NewTimer(20 * time.Millisecond)
+
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, errLabBusy
+		case <-timer.C:
+		}
+	}
+
+	plane, created, err := l.joinProxyPlaneLocked(ctx, r)
+	l.mu.Unlock()
+
+	// Started after the unlock, so its first window does not find the lock taken.
+	if created {
+		go l.runProxyPlane(plane, k)
+	}
+
+	return plane, err
+}
+
+func (l *LabLifecycle) joinProxyPlaneLocked(ctx context.Context, r *proxyRequest) (*proxyPlane, bool, error) {
+	reservationID := r.req.Intent.ReservationID
+	p := l.preparedLease
+
+	if l.closed || l.blockCreation || p == nil || p.info.ReservationID != reservationID || !p.monitor.fresh(time.Now()) {
+		return nil, false, errLabAuthorization
+	}
+
+	if plane := l.proxyPlane.Load(); plane != nil {
+		if plane.reservationID == reservationID && plane.submit(r) {
+			return plane, false, nil
+		}
+
+		// Ending, or left from another reservation.
+		plane.close(errLabAuthorization)
+	}
+
+	plane := newProxyPlane(ctx, p.info.ProfileID, reservationID)
+	if !plane.submit(r) {
+		return nil, false, errLabBusy
+	}
+
+	l.proxyPlane.Store(plane)
+
+	return plane, true, nil
+}
+
+// runProxyPlane chains traffic windows while the plane has streams or requests. A window that the
+// monitor or another operation refuses is tried again; any other failure ends every stream.
+func (l *LabLifecycle) runProxyPlane(plane *proxyPlane, k proxyKeeper) {
+	var failure error
+
+	defer func() {
+		plane.close(failure)
+		l.proxyPlane.CompareAndSwap(plane, nil)
+	}()
+
+	for plane.ctx.Err() == nil && !plane.retireIfIdle() {
+		err := l.WithPreparedTrafficWindow(plane.parent, plane.reservationID, k.uid, func(windowCtx context.Context) error {
+			return l.holdProxyWindowLocked(windowCtx, plane, k)
+		})
+
+		if err != nil && !errors.Is(err, errLabBusy) {
+			failure = err
+			return
+		}
+
+		if plane.retireIfIdle() {
+			return
+		}
+
+		timer := time.NewTimer(proxyWindowRetry)
+
+		select {
+		case <-plane.ctx.Done():
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+}
+
+// holdProxyWindowLocked keeps one window open for the plane's streams, admitting and dialing new
+// requests while enough of it is left. It returns at the hold, or early when the plane ends or has
+// nothing left, and only after every dial it started has finished: no dial outlives its window, and
+// a dial admitted late may keep the window past the hold, never past its deadline. It never returns a
+// stream's own failure, which would fault the tunnel.
+func (l *LabLifecycle) holdProxyWindowLocked(windowCtx context.Context, plane *proxyPlane, k proxyKeeper) error {
+	deadline, ok := windowCtx.Deadline()
+	if !ok {
+		return errLabUncertain
+	}
+
+	holdUntil := deadline.Add(-time.Second)
+	if limit := time.Now().Add(proxyWindowHold); holdUntil.After(limit) {
+		holdUntil = limit
+	}
+
+	acceptUntil := deadline.Add(-proxyDialBudget)
+	if acceptUntil.After(holdUntil) {
+		acceptUntil = holdUntil
+	}
+
+	dialUntil := deadline.Add(-proxyDialReserve)
+
+	var dials sync.WaitGroup
+	defer dials.Wait()
+
+	hold := time.NewTimer(time.Until(holdUntil))
+	defer hold.Stop()
+
+	for {
+		for time.Now().Before(acceptUntil) {
+			r := plane.next()
+			if r == nil {
+				break
+			}
+
+			if r.ctx.Err() != nil {
+				plane.finish(r, proxyAdmission{err: errLabBusy})
+				continue
+			}
+
+			destination, err := l.authorizeProxyRequestLocked(r.req, k, plane.reservationID)
+			if err != nil {
+				plane.finish(r, proxyAdmission{err: err})
+				continue
+			}
+
+			dials.Add(1)
+
+			go func() {
+				defer dials.Done()
+				plane.finish(r, dialProxyStream(windowCtx, dialUntil, plane, r, destination, k.dial))
+			}()
+		}
+
+		select {
+		case <-plane.ctx.Done():
+			return nil
+		case <-hold.C:
+			return nil
+		case <-plane.changed:
+			if plane.idle() {
+				return nil
+			}
+		}
+	}
+}
+
+func dialProxyStream(windowCtx context.Context, dialUntil time.Time, plane *proxyPlane, r *proxyRequest,
+	destination netip.AddrPort, dial ProxyDialer) proxyAdmission {
+	dialCtx, cancelDial := context.WithDeadline(windowCtx, dialUntil)
+	stopRequest := context.AfterFunc(r.ctx, cancelDial)
+	stopPlane := context.AfterFunc(plane.ctx, cancelDial)
+	target, err := dial(dialCtx, r.req.Intent.Namespace, destination)
+	stopRequest()
+	stopPlane()
+	cancelDial()
+
+	// A refused destination is the client's answer, not a fault of the tunnel.
+	if err != nil {
+		logDetached("proxy stream: %v", err)
+		return proxyAdmission{err: errLabUnavailable}
+	}
+
+	streamCtx, cancel := context.WithTimeout(plane.ctx, proxyStreamLifetime)
+	stream := &proxyStreamState{ctx: streamCtx, cancel: cancel, client: r.conn, target: target}
+
+	if !plane.add(r, stream) {
+		cancel()
+		_ = target.Close()
+
+		return proxyAdmission{err: errLabBusy}
+	}
+
+	return proxyAdmission{stream: stream}
+}
+
+// serveProxyStream admits one stream through the plane of the prepared reservation, then relays it.
+// The socket outlives every window; its traffic pauses while the gate is closed (during a monitor
+// check). It never dials again.
 func (l *LabLifecycle) serveProxyStream(
 	ctx context.Context,
 	conn *net.UnixConn,
@@ -138,28 +334,25 @@ func (l *LabLifecycle) serveProxyStream(
 		return err
 	}
 
-	stream, destination, err := l.authorizeProxyStream(ctx, req, v, conn, runtimeID)
-	if err != nil {
+	// Refused before anything is consumed.
+	if l.proxyCount.Add(1) > maxProxyStreams {
+		l.proxyCount.Add(-1)
+		_ = reply(false, CodeLabBusy, netip.AddrPort{})
+
+		return
+	}
+	defer l.proxyCount.Add(-1)
+
+	if err := checkProxyRequest(req, v); err != nil {
 		_ = reply(false, labCode(err), netip.AddrPort{})
 		return
 	}
 
-	defer func() {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-
-		if l.proxyStream == stream {
-			l.closeProxyStreamLocked()
-		} else {
-			stream.closeLocked()
-		}
-	}()
-
 	// The request was read under the ordinary deadline; the stream owns its lifetime from here.
 	_ = conn.SetDeadline(time.Time{})
 
-	stop := context.AfterFunc(stream.ctx, func() { _ = conn.Close() })
-	defer stop()
+	requestCtx, cancelRequest := context.WithCancel(ctx)
+	defer cancelRequest()
 
 	// Before the ack the client sends nothing: a read that returns means it left, and an abandoned
 	// request must not dial.
@@ -169,7 +362,7 @@ func (l *LabLifecycle) serveProxyStream(
 		defer close(watching)
 
 		if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
-			stream.cancel()
+			cancelRequest()
 		}
 	}()
 
@@ -179,115 +372,64 @@ func (l *LabLifecycle) serveProxyStream(
 		_ = conn.SetReadDeadline(time.Time{})
 	}
 
-	openUntil := time.Now().Add(proxyFirstWindowWait)
-	opened := false
-	failure := ""
+	r := &proxyRequest{ctx: requestCtx, req: req, conn: conn, result: make(chan proxyAdmission, 1)}
 
-	for stream.ctx.Err() == nil {
-		if !opened && !time.Now().Before(openUntil) {
-			failure = CodeLabBusy
-			break
-		}
+	plane, err := l.joinProxyPlane(ctx, r, proxyKeeper{verifier: v, runtimeID: runtimeID, uid: proxyUID, dial: dial})
+	if err != nil {
+		stopWatching()
+		_ = reply(false, labCode(err), netip.AddrPort{})
 
-		var dialErr error
-
-		err := l.WithPreparedTrafficWindow(ctx, stream.reservationID, proxyUID, func(windowCtx context.Context) error {
-			if stream.ctx.Err() != nil || l.proxyStream != stream {
-				return nil
-			}
-
-			if !opened {
-				dialCtx, cancelDial := context.WithCancel(windowCtx)
-				stopDial := context.AfterFunc(stream.ctx, cancelDial)
-				target, err := dial(dialCtx, req.Intent.Namespace, destination)
-				stopDial()
-				cancelDial()
-
-				if err != nil {
-					dialErr = err
-					return nil
-				}
-
-				stopWatching()
-
-				if stream.ctx.Err() != nil {
-					_ = target.Close()
-					return nil
-				}
-
-				stream.target = target
-
-				local, ok := target.LocalAddr().(*net.TCPAddr)
-				if !ok || reply(true, "", local.AddrPort()) != nil {
-					dialErr = errLabUncertain
-					return nil
-				}
-
-				opened = true
-
-				go relayProxy(stream.ctx, stream.cancel, conn, target)
-			}
-
-			deadline, ok := windowCtx.Deadline()
-			if !ok {
-				return errLabUncertain
-			}
-
-			hold := time.Until(deadline) - time.Second
-			if hold > proxyWindowHold {
-				hold = proxyWindowHold
-			}
-
-			if hold <= 0 {
-				return nil
-			}
-
-			timer := time.NewTimer(hold)
-			defer timer.Stop()
-
-			select {
-			case <-stream.ctx.Done():
-			case <-timer.C:
-			}
-
-			return nil
-		})
-
-		// A refused destination is the client's answer, not a fault of the tunnel.
-		if dialErr != nil {
-			log.Printf("proxy stream: %v", dialErr)
-
-			if !opened {
-				failure = CodeRuntimeUnavailable
-			}
-
-			break
-		}
-
-		if err != nil && !errors.Is(err, errLabBusy) {
-			if !opened {
-				failure = labCode(err)
-			}
-
-			break
-		}
-
-		timer := time.NewTimer(proxyWindowRetry)
-
-		select {
-		case <-stream.ctx.Done():
-			timer.Stop()
-		case <-timer.C:
-		}
+		return
 	}
 
-	if !opened {
-		if failure == "" {
-			failure = CodeLabBusy
-		}
+	admission := waitProxyAdmission(plane, r)
+	stopWatching()
 
-		_ = reply(false, failure, netip.AddrPort{})
+	if admission.err != nil {
+		_ = reply(false, labCode(admission.err), netip.AddrPort{})
+		return
 	}
+
+	stream := admission.stream
+
+	defer func() {
+		stream.close()
+		plane.remove(stream)
+	}()
+
+	local, ok := stream.target.LocalAddr().(*net.TCPAddr)
+	if requestCtx.Err() != nil || !ok || reply(true, "", local.AddrPort()) != nil {
+		return
+	}
+
+	relayProxy(stream.ctx, stream.cancel, conn, stream.target)
+}
+
+// waitProxyAdmission waits for the keeper's answer. A request the keeper has not taken is withdrawn
+// when it times out, its client leaves or the plane ends; a taken one is always answered, within its
+// window.
+func waitProxyAdmission(plane *proxyPlane, r *proxyRequest) proxyAdmission {
+	timer := time.NewTimer(proxyFirstWindowWait)
+	defer timer.Stop()
+
+	var gaveUp error
+
+	select {
+	case a := <-r.result:
+		return a
+	case <-timer.C:
+		gaveUp = errLabBusy
+	case <-r.ctx.Done():
+		gaveUp = errLabBusy
+	case <-plane.ctx.Done():
+		gaveUp = plane.failure()
+	}
+
+	if plane.withdraw(r) {
+		return proxyAdmission{err: gaveUp}
+	}
+
+	return <-r.result
 }
 
 // relayProxy copies both directions and propagates half-closes; the stream ends when both are done

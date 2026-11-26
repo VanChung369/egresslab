@@ -23,8 +23,9 @@ import (
 const (
 	proxySetupTimeout = 30 * time.Second
 
-	// One client is served at a time; a few more wait briefly for its slot (the previous stream
-	// finishes its close through the tunnel), and the rest are refused.
+	// Up to socksMaxClients clients are served at once, as many as the helper admits streams per
+	// runtime; a few more wait briefly for a slot, and the rest are refused.
+	socksMaxClients = 8
 	socksSlotWait   = 10 * time.Second
 	socksMaxWaiting = 8
 )
@@ -44,8 +45,8 @@ func randomToken(n int) (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
-// serveSocks serves SOCKS5 on 127.0.0.1 only, one client at a time, in the foreground until
-// interrupted. Every CONNECT is authorized on its own: the runtime's current helper epoch, a fresh
+// serveSocks serves SOCKS5 on 127.0.0.1 only, up to socksMaxClients clients at once, in the
+// foreground until interrupted. Every CONNECT is authorized on its own: the runtime's current helper epoch, a fresh
 // signed capability for that one destination, and the helper's prepared lease and monitoring health.
 // It changes no global readiness and opens nothing on the LAN.
 func (s *session) serveSocks(reservationID, portArg string) error {
@@ -172,7 +173,7 @@ func (s *session) serveSocksWithAuthority(reservationID, portArg string, authori
 		return streams.OpenProxyStream(ctx, capability)
 	}
 
-	slot := make(chan struct{}, 1)
+	slot := make(chan struct{}, socksMaxClients)
 	waiting := make(chan struct{}, socksMaxWaiting)
 
 	var clients sync.WaitGroup

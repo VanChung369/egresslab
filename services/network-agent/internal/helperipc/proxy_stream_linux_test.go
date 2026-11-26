@@ -63,6 +63,7 @@ type proxyDialRecorder struct {
 	namespace   string
 	destination netip.AddrPort
 	err         error
+	hang        bool // never answers before its context ends
 }
 
 func (r *proxyDialRecorder) dialer(echo *proxyEcho) ProxyDialer {
@@ -70,8 +71,13 @@ func (r *proxyDialRecorder) dialer(echo *proxyEcho) ProxyDialer {
 		r.mu.Lock()
 		r.calls++
 		r.namespace, r.destination = namespace, destination
-		err := r.err
+		err, hang := r.err, r.hang
 		r.mu.Unlock()
+
+		if hang {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
 
 		if err != nil {
 			return nil, err
@@ -98,6 +104,11 @@ type proxyFixture struct {
 func newProxyFixture(t *testing.T, enabled bool) *proxyFixture {
 	t.Helper()
 	requireUnprivileged(t)
+
+	// The fake windows last 2 s.
+	budget, reserve := proxyDialBudget, proxyDialReserve
+	proxyDialBudget, proxyDialReserve = 600*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { proxyDialBudget, proxyDialReserve = budget, reserve })
 
 	f, windows, prep, lease := newTrafficWindowFixture(t)
 	echo := newProxyEcho(t)
@@ -138,6 +149,28 @@ func (p *proxyFixture) open(t *testing.T, capability helperauth.SignedCapability
 	defer cancel()
 
 	return OpenProxyStream(ctx, p.socket, capability)
+}
+
+// waitPlaneGone waits for the keeper to retire with its last stream or request.
+func (p *proxyFixture) waitPlaneGone(t *testing.T) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for p.f.labs.proxyPlane.Load() != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("the stream keeper outlived its streams")
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func (p *proxyFixture) windowsOpened() int {
+	p.f.labs.mu.Lock()
+	defer p.f.labs.mu.Unlock()
+
+	return p.windows.opened
 }
 
 func echoOnce(t *testing.T, conn net.Conn, msg string) {
@@ -228,21 +261,18 @@ func TestProxyStreamAbandonedRequest(t *testing.T) {
 	p.f.labs.mu.Unlock()
 
 	time.Sleep(time.Second)
+	p.waitPlaneGone(t)
 
 	p.dials.mu.Lock()
-	calls := p.dials.calls
-	p.dials.mu.Unlock()
+	defer p.dials.mu.Unlock()
 
-	p.f.labs.mu.Lock()
-	defer p.f.labs.mu.Unlock()
-
-	if calls != 0 || p.f.labs.proxyStream != nil {
-		t.Fatalf("an abandoned request dialed (%d) or kept its stream", calls)
+	if p.dials.calls != 0 {
+		t.Fatalf("an abandoned request dialed (%d)", p.dials.calls)
 	}
 }
 
 func TestProxyStreamRefusals(t *testing.T) {
-	for _, mode := range []string{"expired health", "other destination signed", "dial failed", "disabled"} {
+	for _, mode := range []string{"expired health", "other destination signed", "dial failed", "dial hangs", "disabled"} {
 		t.Run(mode, func(t *testing.T) {
 			p := newProxyFixture(t, mode != "disabled")
 			capability := p.capability(t, testProxyDestination)
@@ -259,6 +289,10 @@ func TestProxyStreamRefusals(t *testing.T) {
 			case "dial failed":
 				p.dials.err = errors.New("managed proxy dial failed: DESTINATION_REFUSED")
 				want = CodeRuntimeUnavailable
+			case "dial hangs":
+				// It must give up before the window's deadline: a window run past it faults the tunnel.
+				p.dials.hang = true
+				want = CodeRuntimeUnavailable
 			case "disabled":
 				want = CodeOperationDisabled
 			}
@@ -269,10 +303,12 @@ func TestProxyStreamRefusals(t *testing.T) {
 			}
 
 			// A refused stream never faults the tunnel.
+			p.waitPlaneGone(t)
+
 			p.f.labs.mu.Lock()
 			defer p.f.labs.mu.Unlock()
 
-			if p.f.labs.labs[p.f.lab.ProfileID].State != LabTunnelConfigured || p.f.labs.proxyStream != nil {
+			if p.f.labs.labs[p.f.lab.ProfileID].State != LabTunnelConfigured {
 				t.Fatal("refused stream changed the lab")
 			}
 
@@ -283,38 +319,50 @@ func TestProxyStreamRefusals(t *testing.T) {
 	}
 }
 
-// A release preempts the stream and closes it before the generation retires.
+// A release preempts every stream and closes them before the generation retires.
 func TestProxyStreamClosedByRelease(t *testing.T) {
 	p := newProxyFixture(t, true)
 
-	conn, _, err := p.open(t, p.capability(t, testProxyDestination))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
+	var conns []*net.UnixConn
 
-	echoOnce(t, conn, "ping")
+	for range 3 {
+		conn, _, err := p.open(t, p.capability(t, testProxyDestination))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+
+		echoOnce(t, conn, "ping")
+		conns = append(conns, conn)
+	}
 
 	if _, err := runRevokeLease(p.f, revokeRequest(t, p.f, p.prep)); err != nil {
-		t.Fatalf("release refused while a stream ran: %v", err)
+		t.Fatalf("release refused while streams ran: %v", err)
 	}
 
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for _, conn := range conns {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	if _, err := conn.Read(make([]byte, 1)); err == nil {
-		t.Fatal("stream outlived the release")
+		if _, err := conn.Read(make([]byte, 1)); err == nil {
+			t.Fatal("a stream outlived the release")
+		}
 	}
 
 	p.f.labs.mu.Lock()
 	defer p.f.labs.mu.Unlock()
 
-	if p.f.labs.proxyStream != nil || p.f.labs.proxyActive.Load() != nil || p.f.labs.preparedLease != nil {
+	if p.f.labs.proxyPlane.Load() != nil || p.f.labs.preparedLease != nil {
 		t.Fatal("stream state outlived the release")
+	}
+
+	// Interrupting the window was no failure of the tunnel.
+	if state := p.f.labs.labs[p.f.lab.ProfileID].State; state != LabSealed {
+		t.Fatalf("release left the lab %s", state)
 	}
 }
 
-// One stream per helper: a new authorized stream replaces the earlier one.
-func TestProxyStreamReplaced(t *testing.T) {
+// Streams of one reservation share the windows; the last one to end ends them.
+func TestProxyStreamsShareWindows(t *testing.T) {
 	p := newProxyFixture(t, true)
 
 	first, _, err := p.open(t, p.capability(t, testProxyDestination))
@@ -332,12 +380,124 @@ func TestProxyStreamReplaced(t *testing.T) {
 	defer second.Close()
 
 	echoOnce(t, second, "second")
+	echoOnce(t, first, "first again")
 
-	_ = first.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// Both cross the next windows.
+	time.Sleep(2500 * time.Millisecond)
+	echoOnce(t, first, "later")
+	echoOnce(t, second, "later")
 
-	if _, err := first.Read(make([]byte, 1)); err == nil {
-		t.Fatal("replaced stream still open")
+	_ = first.Close()
+	echoOnce(t, second, "alone")
+	_ = second.Close()
+
+	p.waitPlaneGone(t)
+
+	opened := p.windowsOpened()
+	time.Sleep(time.Second)
+
+	if p.windowsOpened() != opened {
+		t.Fatal("windows outlived the last stream")
 	}
+
+	p.dials.mu.Lock()
+	defer p.dials.mu.Unlock()
+
+	if p.dials.calls != 2 {
+		t.Fatalf("unexpected dials: %d", p.dials.calls)
+	}
+}
+
+// Two first requests at once: the one that does not start the keeper joins its plane instead of
+// waiting for the lock, which the keeper's windows hold longer than that wait.
+func TestProxyStreamFirstRequestsJoin(t *testing.T) {
+	p := newProxyFixture(t, true)
+	p.windows.window = 8 * time.Second
+
+	first, second := p.capability(t, testProxyDestination), p.capability(t, testProxyDestination)
+
+	p.f.labs.mu.Lock()
+
+	type opened struct {
+		conn *net.UnixConn
+		err  error
+	}
+
+	results := make(chan opened, 2)
+
+	for _, capability := range []helperauth.SignedCapability{first, second} {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			conn, _, err := OpenProxyStream(ctx, p.socket, capability)
+			results <- opened{conn, err}
+		}()
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	p.f.labs.mu.Unlock()
+
+	started := time.Now()
+
+	for range 2 {
+		o := <-results
+		if o.err != nil {
+			t.Fatalf("a first request refused: %v", o.err)
+		}
+		defer o.conn.Close()
+
+		echoOnce(t, o.conn, "ping")
+	}
+
+	if time.Since(started) > 4*time.Second {
+		t.Fatalf("a first request waited %v", time.Since(started))
+	}
+}
+
+// Over the limit a request is refused before its capability is consumed.
+func TestProxyStreamLimit(t *testing.T) {
+	p := newProxyFixture(t, true)
+
+	var conns []*net.UnixConn
+
+	for i := range maxProxyStreams {
+		conn, _, err := p.open(t, p.capability(t, testProxyDestination))
+		if err != nil {
+			t.Fatalf("stream %d refused: %v", i, err)
+		}
+		defer conn.Close()
+
+		echoOnce(t, conn, "ping")
+		conns = append(conns, conn)
+	}
+
+	over := p.capability(t, testProxyDestination)
+
+	if _, _, err := p.open(t, over); ErrorCode(err) != CodeLabBusy {
+		t.Fatalf("stream over the limit: %v", err)
+	}
+
+	_ = conns[0].Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for p.f.labs.proxyCount.Load() >= maxProxyStreams {
+		if time.Now().After(deadline) {
+			t.Fatal("an ended stream still counts")
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	conn, _, err := p.open(t, over)
+	if err != nil {
+		t.Fatalf("the refused capability was consumed: %v", err)
+	}
+	defer conn.Close()
+
+	echoOnce(t, conn, "again")
+	echoOnce(t, conns[1], "still open")
 }
 
 // An authorized stream waits out a short monitor check instead of answering LAB_BUSY.

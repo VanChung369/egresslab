@@ -724,7 +724,7 @@ Limitations:
 - In this run, concurrent CONNECTs on two listeners collided on the journal's exclusive lock and failed; nothing retries.
 - After this run, from the Codex review: journal reads (opening the authority, listing, lookups) take the lock shared, so listeners no longer block each other; only a concurrent write (reserve or release) still makes a CONNECT or a start busy. The per-CONNECT check moved after the helper call and the mint, right before the capability is sent, and the journal is read once instead of twice (the hold through the mint; endpoint, binding and trust from the controller's files). A later hold on the same helper keeps the binding, so it is now refused by the mint (`reservation is not held`) rather than as `endpoint binding changed`. Tests: `TestReservationAuthorityReadersShare`, `TestServeEndpointRevalidatesEachConnect` (the endpoint deleted during the helper call: no capability sent; it fails with the check moved before the call) and the later hold in `TestEndpointPlanLifecycle`. Not yet re-run on Lima.
 - The checks resolve names on the host (curl's `--socks5`): they prove the data plane, not DNS isolation.
-- Windows, not tested: every CONNECT reads `state.json` and `runtimes.json`, and Go opens files there without delete sharing, so an API save that renames over one of them at that moment can fail (the API answers an error and keeps the old definition). Every lab command reads them the same way; the store's read path is unchanged in this step.
+- Windows, not tested: see Pending Windows checks.
 
 Application networking as a whole remained disabled.
 
@@ -751,6 +751,13 @@ curl -q --noproxy '*' --ipv4 --proto '=https' --connect-timeout 5 --max-time 10 
 Ubuntu 22.04 (the WSL2 distribution) has no `whois` by default; Team Cymru serves the same data over DNS: `dig +short TXT <reversed IPv4>.origin.asn.cymru.com`, whose first field is the ASN.
 
 If DNS returns several addresses, do not take the first one blindly. The provider does not promise a stable address. DNS at probe time, automatic replacement of the address and skipping certificate verification (`curl -k`) are not allowed. A host-side check reveals the host's own public IP to the provider; it is not a managed observation and never activates an egress lease. The helper reads the approved pin from `/etc/egresslab/multi-probe-pin` at startup (Step 29C.4b, see "Multi-source helper").
+
+## Pending Windows checks
+
+To run on a Windows machine; nothing below has been executed there.
+
+1. Shared journal read lock (Step 35): `go test -race ./internal/control/` in `services/controller`, in particular `TestReservationAuthorityReadersShare` (a shared `LockFileEx` beside another reader, refused to a writer), `TestReservationAuthorityBusy` and the subprocess lock tests. Only `go vet` and `go build` for `GOOS=windows` passed on macOS.
+2. Controller state files during `serve-endpoint` (Step 35, from the Codex review): every CONNECT reads `state.json` and `runtimes.json`, and Go opens files on Windows without delete sharing, so a save that renames over one of them at that moment can fail with a sharing violation; the API then answers an error and keeps the old definition. Check: while a listener serves CONNECTs in a loop, create and delete endpoints through the HTTP API. If saves fail, the fix belongs to the store's read path (open with `FILE_SHARE_DELETE`), which every lab command and the API share. It is not fixed yet.
 
 ## Next Milestone
 
