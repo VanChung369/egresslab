@@ -550,6 +550,31 @@ Limitations:
 
 Application networking remained disabled.
 
+### Helper epoch witness (Step 31E.3a)
+
+Environment:
+- Host OS: macOS 15.3.2 (arm64), Go 1.25.1; tested commit `1f4e895` with this step's changes.
+- Lima instance: `egresslab` (runtime A of Steps 31E.1 and 31E.2; Ubuntu 24.04.5, kernel 6.8.0-147-generic, arm64). Only its helper was replaced, built with `-trimpath` and `CGO_ENABLED=0`; the controller, helperctl and the IPC protocol are unchanged, and `egresslab-b` was not touched.
+
+Unit tests:
+- On Linux (the cross-compiled test binary, run as the normal user without sudo): `TestKernelBootIDParsing`, `TestReadActualKernelBootID`, `TestEpochWitnessRegistersKernelBoot`, `TestEpochWitnessPersistence`, `TestEpochWitnessBootHistory`, `TestEpochWitnessRejectsDuplicate`, `TestEpochWitnessCorruption`, `TestEpochWitnessRejectsUnsafePermissions`, `TestEpochWitnessRejectsSymlink`, `TestEpochWitnessHistoryLimit`, `TestEpochWitnessRejectsNoncanonical` and `TestEpochWitnessDetectsChangedValue` passed; `-count=50` of `^TestEpochWitness` passed, and so did the whole helper test binary. The race detector did not run (no cgo in the cross-compiled binary).
+- The upper-case boot ID case first used an all-digit ID, which upper-casing leaves unchanged, so it failed by accepting a valid ID; it now uses an ID with letters.
+- On macOS (the new files are Linux-only): `go vet ./...`, `go test ./...` and `go build ./...` passed, and `GOOS=linux go vet` passed for arm64 and amd64.
+
+Real witness persistence (one boot, no hold, no lab), with the final build:
+- Before: `list-reservations` showed no hold, no helper ran in either VM, and `egresslab-lab-recover` found nothing. A first build without the checksum had already passed the start, restart and `0644` runs below; the final build refused its three-entry ledger (`invalid or noncanonical epoch witness ledger`, exit status 1, no socket, file unchanged), and that ledger was then removed, since no hold depended on it.
+- Leftover socket: with a file at `/run/egresslab/helper.sock`, the helper exited with status 1 (`... already exists`) and created no ledger; the file was then removed.
+- First start: the helper logged `Persistent boot-bound helper epoch witness committed` before listening. `helper-epochs.json` was `root root 600` with one link and held one entry whose helper ID, runtime ID and key fingerprint matched `egresslab-helperctl helper-info`, and whose boot ID matched `/proc/sys/kernel/random/boot_id`; its SHA-256, recomputed independently with Python, matched.
+- Restart without reboot (SIGTERM, then the same command): a second entry with a new helper ID and the same runtime ID, boot ID and fingerprint; the first entry was unchanged, the checksum matched, and no temporary file was left in the vault directory.
+- Fail closed: with the ledger made `0644`, the helper exited with status 1 (`persistent helper epoch registration: read existing helper epochs: vault file must be root-owned, regular, mode 0600, without hard links`) and created no `/run/egresslab/helper.sock`; the ledger's SHA-256 did not change. Back at `0600`, a third start committed its witness and listened: three entries, one boot ID, one runtime ID.
+- After: the helper stopped, its socket removed, no reservation, and `egresslab-lab-recover` found nothing; the VM's temporary test directory was removed.
+
+Limitations:
+- No guest reboot and no helper crash with a durable hold were tested; that is Step 31E.3d.
+- A hold made before this step whose helper is gone stays unreleasable.
+
+Application networking remained disabled.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
@@ -576,4 +601,4 @@ If DNS returns several addresses, do not take the first one blindly. The provide
 
 ## Next Milestone
 
-Step 31E: the recovery tests across runtimes, on top of the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting); a coded worker failure reason in the helper log would explain it. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.
+Steps 31E.3b to 31E.3d: the signed reboot-bound recovery proof, the controller's recovery release and a crash and reboot smoke test on Lima, on top of the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting); a coded worker failure reason in the helper log would explain it. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.

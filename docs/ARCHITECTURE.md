@@ -156,6 +156,14 @@ The provisioned V2 authority is exercised through independent operating-system p
 - A sequential case covers the ownership transfer that the barrier never produces: a new owner's reservation process, opened before another process commits the release, is granted afterwards (it reloads the journal), and the stale release is then refused.
 - Synthetic same-address admissions exercise the durable transaction boundary independently of the VPN provider.
 
+### Reboot-bound recovery foundation (Step 31E.3a)
+
+A helper process restart does not prove that its managed kernel resources are gone. Persistent epoch witnesses record the Linux kernel boot to which each multi-probe helper lifetime belonged, in a root-owned, checksummed ledger in the managed vault, committed before the helper serves any request. A future recovery operation may use a trusted kernel reboot boundary to attest the retirement of an older generation.
+
+- Missing witnesses, same-boot restarts and identity mismatches cannot authorize recovery.
+- A witness authorizes nothing by itself; no hold can be released across helper epochs yet.
+- VM cloning, snapshot rollback and untrusted runtime administration are outside this recovery guarantee.
+
 ### Windows / macOS / Linux
 
 The Go control plane can run natively on Windows and macOS.

@@ -235,6 +235,22 @@ func run(
 		return errors.New("managed tunnel requires a valid runtime identity")
 	}
 
+	// The vault lock is still held; without a committed witness the socket is never created. A
+	// start that would be refused at the socket records no epoch.
+	if enableMultiProbe {
+		if err := checkSocketPath(); err != nil {
+			return err
+		}
+
+		helperID, fingerprint := verifier.Identity()
+
+		if err := registerHelperEpochLocked(managedLayout, runtimeID, helperID, fingerprint); err != nil {
+			return fmt.Errorf("persistent helper epoch registration: %w", err)
+		}
+
+		log.Printf("Persistent boot-bound helper epoch witness committed: %s", helperID)
+	}
+
 	listener, cleanup, err := prepareSocket(gid)
 	if err != nil {
 		return err
@@ -303,32 +319,11 @@ func run(
 // The directory is root-owned, group-traversable and not writable by the agent. The socket is
 // root-owned with group read/write; SO_PEERCRED still checks the caller's UID.
 func prepareSocket(gid int) (*net.UnixListener, func(), error) {
+	if err := checkSocketPath(); err != nil {
+		return nil, nil, err
+	}
+
 	dir := filepath.Dir(helperipc.SocketPath)
-
-	if err := os.Mkdir(dir, 0o750); err != nil && !errors.Is(err, os.ErrExist) {
-		return nil, nil, err
-	}
-
-	info, err := os.Lstat(dir)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.IsDir() || stat.Uid != 0 || info.Mode().Perm()&0o022 != 0 {
-		return nil, nil, errors.New("helper socket directory must be root owned and not writable by other users")
-	}
-
-	// Never unlink an existing path: it may belong to a live helper. Check before touching the
-	// directory, so a refused start cannot re-group it under a running helper.
-	if _, err := os.Lstat(helperipc.SocketPath); err == nil {
-		return nil, nil, fmt.Errorf(
-			"%s already exists; if no egresslab-helper process is running (pidof egresslab-helper prints nothing), remove it by hand",
-			helperipc.SocketPath,
-		)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, nil, err
-	}
 
 	if err := os.Chown(dir, 0, gid); err != nil {
 		return nil, nil, err
@@ -372,6 +367,39 @@ func prepareSocket(gid int) (*net.UnixListener, func(), error) {
 	}
 
 	return listener, cleanup, nil
+}
+
+// checkSocketPath creates the socket directory if needed and refuses an unsafe directory or an
+// existing socket path.
+func checkSocketPath() error {
+	dir := filepath.Dir(helperipc.SocketPath)
+
+	if err := os.Mkdir(dir, 0o750); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() || stat.Uid != 0 || info.Mode().Perm()&0o022 != 0 {
+		return errors.New("helper socket directory must be root owned and not writable by other users")
+	}
+
+	// Never unlink an existing path: it may belong to a live helper. Check before touching the
+	// directory, so a refused start cannot re-group it under a running helper.
+	if _, err := os.Lstat(helperipc.SocketPath); err == nil {
+		return fmt.Errorf(
+			"%s already exists; if no egresslab-helper process is running (pidof egresslab-helper prints nothing), remove it by hand",
+			helperipc.SocketPath,
+		)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	return nil
 }
 
 // scanRecovery reuses the read-only LabRecovery.Scan. Clean/delete and shell commands are not

@@ -1,6 +1,6 @@
 # Privileged helper and authorization protocol
 
-Status: **Step 31E.2 — concurrent reservation and release races.** A controller CLI signs `CreateLab`,
+Status: **Step 31E.3a — persistent helper epoch witness.** A controller CLI signs `CreateLab`,
 `ConnectTunnel`, `PermitProbe`, `PermitMultiProbeV2`, `ReserveEgressCandidateV1`,
 `PrepareEgressLeaseV1` and `RevokeEgressLeaseV1` and drives the helper's sealed lab, tunnel and diagnostic probes in the Linux
 runtime; the helper holds the encrypted WireGuard configs, disables IPv6 and drops DNS transports
@@ -116,7 +116,8 @@ design.
 - Linux Secret Service key storage, and the remote runtime (SSH or mTLS).
 - Runtime `Start`/`Stop` (they return "not implemented"), and a runtime management UI.
 - Journal compaction, key rotation and authority migration, the recovery tests across runtimes (Step 31E; the collision ran in Step 31E.1, the concurrent races in Step 31E.2), and any release of a hold
-  whose helper restarted or whose generation the backend contradicted.
+  whose helper restarted or whose generation the backend contradicted (Step 31E.3a only records
+  each multi-probe helper epoch's kernel boot, as the foundation of that recovery).
 - Open from earlier steps: egress-IP leases across runtimes; a kill-switch independent of the controller; refusing to delete a
   profile that still has runtime resources.
 - DNS for applications in the lab (a session resolver, with filesystem and resolver IPC
@@ -710,6 +711,7 @@ The helper can hold one encrypted WireGuard config per profile, inside the Linux
 | `/etc/egresslab/vault/wg-vault.key` | AES-256 key, root `0600` |
 | `/var/lib/egresslab/vault/wg-vault.json` | configs encrypted with AES-256-GCM, bound to profile and stage IDs |
 | `/var/lib/egresslab/vault/vault.lock` | exclusive `flock` |
+| `/var/lib/egresslab/vault/helper-epochs.json` | helper epoch witnesses (Step 31E.3a), root `0600` |
 | `/var/lib/egresslab/vault/import.conf` | plaintext import slot, consumed by a successful `vault-stage` |
 
 - Both directories must be root-owned `0700`, and no directory above them may be writable by
@@ -1473,6 +1475,7 @@ or permit, the sealed ruleset remained, and `verify-lab` answered `tunnel_config
 | 31E | Concurrent collision and recovery tests |
 | 31E.1 | Real multi-runtime IP collision test |
 | 31E.2 | Concurrent reservation and release races |
+| 31E.3a | Persistent helper epoch witness |
 
 The states stay separate; none of them is an `active` flag:
 
@@ -1748,3 +1751,53 @@ back. The
 durable authority never accepts a retirement receipt supplied from outside, and nothing is retried,
 forced or replaced by an unsigned `disconnect`. Step 31D.3e ran it against the real tunnel on Lima
 (`docs/DEV-LINUX-VM.md`, "Reservation lifecycle smoke test"); application networking stays disabled.
+
+### Persistent helper epoch witnesses (Step 31E.3a)
+
+A hold whose helper crashed cannot be released: the new epoch cannot attest the retirement of the
+old generation, and a namespace, WireGuard interface or socket can outlive the process that made
+it. The planned recovery (Steps 31E.3b to 31E.3d) uses a real reboot of the Linux guest as the
+boundary that ends the old generation, which needs a trusted record of the boot each helper epoch
+belonged to. This step only records it.
+
+A helper started with `-enable-multi-probe`, the only mode that serves `ReserveEgressCandidateV1`,
+`PrepareEgressLeaseV1` and `RevokeEgressLeaseV1`, registers its epoch before it creates the IPC
+listener, while it already holds the vault lock:
+
+| Identity | Changes when |
+|---|---|
+| Runtime ID | the Linux installation changes |
+| Helper epoch | the helper process restarts |
+| Boot ID | the Linux kernel reboots (`/proc/sys/kernel/random/boot_id`) |
+| Tunnel generation | the managed tunnel reconnects |
+
+- Each witness binds the helper epoch to its runtime ID, the kernel boot ID and the controller's
+  public-key fingerprint. The boot ID comes only from the kernel; no client, flag or file supplies
+  it.
+- The ledger `helper-epochs.json` lives in the root-owned `0700` vault directory under the existing
+  exclusive vault lock, not under the volatile `/run`. It must be root-owned, regular, `0600` and
+  have one link, and is read only in its canonical encoding with a SHA-256 over the entries, so
+  unknown or duplicate fields, duplicate epochs, invalid IDs, truncation, another version, an
+  oversized file or a value changed into another well-formed one are refused. The checksum detects
+  corruption, not root in the runtime.
+- An update keeps every earlier entry and replaces the file atomically: a private temporary file is
+  written and synced, renamed over the ledger, and the directory synced. An epoch is never
+  registered twice, and an existing entry never changes.
+- The ledger holds at most 4096 epochs and evicts none, since an old epoch may still own a durable
+  hold; at that limit a multi-probe helper refuses to start, so capacity and a recovery-only start
+  must be handled before long-term use.
+- A corrupt or unsafe ledger, or any write failure, refuses the start: the socket is never
+  created. A missing ledger is created for the new epoch, which proves nothing about earlier
+  epochs; an epoch without a witness can never use the reboot-bound recovery.
+- An unsafe socket directory or a leftover `helper.sock` (after a crash) refuses the start before
+  the epoch is recorded, so repeated refused starts do not use up the ledger. A start that fails
+  later, while creating the socket, keeps its witness, which authorizes nothing.
+
+A witness is not a retirement receipt and authorizes no release. Cross-epoch recovery stays
+disabled until the signed reboot-bound recovery proof and the controller's admission exist. A
+helper restart within one boot will never be enough; a missing witness, a wrong runtime or
+controller key, or a corrupt ledger will refuse; a timeout or an empty recovery scan releases
+nothing. Recovery assumes the Linux guest is a trusted runtime, never cloned, rolled back to a
+snapshot or restored onto an old kernel; it is not hardware-backed attestation. Holds made before
+this step, whose helper is gone, stay unreleasable; there is no forced release. The protocol, the
+controller journal and the release path did not change.
