@@ -22,10 +22,15 @@ const (
 	reservationJournalFile  = "egress-reservations.journal"
 	reservationJournalMagic = "egresslab-reservations/v1\n"
 
-	maxReservationRecordBytes  = 8 * 1024
-	maxReservationHeaderBytes  = 128
-	maxReservationJournalBytes = maxReservationHeaderBytes +
-		maxEgressReservations*(4+maxReservationRecordBytes+sha256.Size)
+	maxReservationRecordBytes = 8 * 1024
+	maxReservationHeaderBytes = 128
+
+	// Every reservation ever held keeps its identity, and may add one release frame: room for all
+	// the releases is reserved, so a full history refuses new holds, never a release.
+	maxHistoricalReservations   = 4096
+	maxReservationJournalFrames = 2 * maxHistoricalReservations
+	maxReservationJournalBytes  = maxReservationHeaderBytes +
+		maxReservationJournalFrames*(4+maxReservationRecordBytes+sha256.Size)
 )
 
 var (
@@ -227,6 +232,11 @@ func encodeReservationFrame(reservation EgressReservation, previous [sha256.Size
 		return nil, err
 	}
 
+	return encodeJournalPayload(payload, previous)
+}
+
+// encodeJournalPayload frames one record, hold or release, on the shared checksum chain.
+func encodeJournalPayload(payload []byte, previous [sha256.Size]byte) ([]byte, error) {
 	if len(payload) == 0 || len(payload) > maxReservationRecordBytes {
 		return nil, ErrReservationUnavailable
 	}
@@ -274,11 +284,140 @@ func decodeReservationPayload(payload []byte) (EgressReservation, error) {
 	return reservation, nil
 }
 
+// reservationJournalState is the replayed journal: the registry holds the active ownership, and the
+// historical indexes every reservation ID and owner ever held, which a release never removes.
 type reservationJournalState struct {
 	registry *egressReservationRegistry
 
+	seenIDs    map[string]struct{}
+	seenOwners map[LeaseOwner]struct{}
+
 	tail   [sha256.Size]byte
 	length int64
+}
+
+// checkNewHold refuses a hold whose owner or ID was ever held, released ones included, so stale
+// authorization cannot resurrect them, and a hold beyond the history capacity.
+func (s *reservationJournalState) checkNewHold(hold EgressReservation) error {
+	if s.seenIDs == nil || s.seenOwners == nil {
+		return ErrReservationUnavailable
+	}
+
+	if _, exists := s.seenOwners[hold.Owner]; exists {
+		return ErrReservationOwnerRetired
+	}
+
+	if _, exists := s.seenIDs[hold.ID]; exists {
+		return ErrReservationUnavailable
+	}
+
+	if len(s.seenIDs) >= maxHistoricalReservations {
+		return ErrReservationLimit
+	}
+
+	return nil
+}
+
+// restoreHold replays one hold: the authority's key, the history, then the active indexes.
+func (s *reservationJournalState) restoreHold(hold EgressReservation, authority *ReservationAuthorityInfo) error {
+	if authority != nil && hold.PublicKeySHA256 != authority.PublicKeySHA256 {
+		return ErrReservationAuthorityMismatch
+	}
+
+	if err := s.checkNewHold(hold); err != nil {
+		return err
+	}
+
+	if err := restoreJournalHold(s.registry, hold); err != nil {
+		return err
+	}
+
+	s.seenIDs[hold.ID] = struct{}{}
+	s.seenOwners[hold.Owner] = struct{}{}
+
+	return nil
+}
+
+// applyRelease removes exactly one active hold, matched by its retirement receipt, from a registry
+// not yet visible to anyone else; the caller holds the journal's OS lock. The history stays.
+func (s *reservationJournalState) applyRelease(record reservationReleaseRecord, authority *ReservationAuthorityInfo) error {
+	if authority == nil || !validReleaseRecord(record) {
+		return ErrReservationJournalCorrupt
+	}
+
+	id := record.Receipt.Intent.ReservationID
+	registry := s.registry
+
+	owner, exists := registry.byID[id]
+	if !exists {
+		return ErrReservationJournalCorrupt
+	}
+
+	hold, exists := registry.byOwner[owner]
+	if !exists || hold.ID != id || hold.Owner != owner || !record.Receipt.matchesReservation(*authority, hold) ||
+		record.ReleasedAt.Before(hold.ReservedAt) {
+		return ErrReservationJournalCorrupt
+	}
+
+	// Every index must still name exactly this reservation.
+	ipOwner, hasIP := registry.byIP[hold.IPv4]
+	profileOwner, hasProfile := registry.byProfile[owner.ProfileID]
+
+	if !hasIP || ipOwner != owner || !hasProfile || profileOwner != owner {
+		return ErrReservationJournalCorrupt
+	}
+
+	if _, exists := s.seenIDs[id]; !exists {
+		return ErrReservationJournalCorrupt
+	}
+
+	if _, exists := s.seenOwners[owner]; !exists {
+		return ErrReservationJournalCorrupt
+	}
+
+	delete(registry.byOwner, owner)
+	delete(registry.byIP, hold.IPv4)
+	delete(registry.byProfile, owner.ProfileID)
+	delete(registry.byID, id)
+
+	return nil
+}
+
+// applyPayload dispatches on the record type; holds carry none. Unknown types are corruption, and
+// a release is only meaningful against a provisioned authority.
+func (s *reservationJournalState) applyPayload(payload []byte, authority *ReservationAuthorityInfo) error {
+	var kind struct {
+		Type string `json:"type"`
+	}
+
+	if err := json.Unmarshal(payload, &kind); err != nil {
+		return ErrReservationJournalCorrupt
+	}
+
+	switch kind.Type {
+	case "":
+		hold, err := decodeReservationPayload(payload)
+		if err != nil {
+			return err
+		}
+
+		return s.restoreHold(hold, authority)
+
+	case reservationReleaseType:
+		if authority == nil {
+			return ErrReservationJournalCorrupt
+		}
+
+		record, err := decodeReleasePayload(payload)
+		if err != nil {
+			return err
+		}
+
+		return s.applyRelease(record, authority)
+
+	default:
+		return ErrReservationJournalCorrupt
+	}
 }
 
 // restoreJournalHold fills a registry not yet visible to other goroutines; the caller holds the
@@ -324,7 +463,20 @@ func parseReservationJournal(data []byte) (reservationJournalState, error) {
 }
 
 func parseReservationJournalWithHeader(data []byte, headerText string) (reservationJournalState, error) {
+	return parseReservationJournalRecords(data, headerText, nil)
+}
+
+// parseReservationJournalRecords replays holds and, for a provisioned authority, releases.
+func parseReservationJournalRecords(data []byte, headerText string, authority *ReservationAuthorityInfo) (
+	reservationJournalState, error) {
 	header := []byte(headerText)
+
+	if authority != nil {
+		expected, err := authorityJournalHeader(*authority)
+		if err != nil || expected != headerText {
+			return reservationJournalState{}, ErrReservationAuthorityMismatch
+		}
+	}
 
 	if len(header) == 0 || len(header) > maxReservationHeaderBytes || len(data) > maxReservationJournalBytes ||
 		!bytes.HasPrefix(data, header) {
@@ -332,9 +484,11 @@ func parseReservationJournalWithHeader(data []byte, headerText string) (reservat
 	}
 
 	state := reservationJournalState{
-		registry: newEgressReservationRegistry(),
-		tail:     sha256.Sum256(header),
-		length:   int64(len(data)),
+		registry:   newEgressReservationRegistry(),
+		seenIDs:    make(map[string]struct{}),
+		seenOwners: make(map[LeaseOwner]struct{}),
+		tail:       sha256.Sum256(header),
+		length:     int64(len(data)),
 	}
 
 	remaining := data[len(header):]
@@ -363,12 +517,7 @@ func parseReservationJournalWithHeader(data []byte, headerText string) (reservat
 			return reservationJournalState{}, corrupt
 		}
 
-		reservation, err := decodeReservationPayload(remaining[4:bodyEnd])
-		if err != nil {
-			return reservationJournalState{}, errors.Join(corrupt, err)
-		}
-
-		if err := restoreJournalHold(state.registry, reservation); err != nil {
+		if err := state.applyPayload(remaining[4:bodyEnd], authority); err != nil {
 			return reservationJournalState{}, errors.Join(corrupt, err)
 		}
 
@@ -381,10 +530,11 @@ func parseReservationJournalWithHeader(data []byte, headerText string) (reservat
 
 // readReservationJournal reads through the locked handle.
 func readReservationJournal(file *os.File) (reservationJournalState, error) {
-	return readReservationJournalWithHeader(file, reservationJournalMagic)
+	return readReservationJournalRecords(file, reservationJournalMagic, nil)
 }
 
-func readReservationJournalWithHeader(file *os.File, headerText string) (reservationJournalState, error) {
+func readReservationJournalRecords(file *os.File, headerText string, authority *ReservationAuthorityInfo) (
+	reservationJournalState, error) {
 	info, err := file.Stat()
 	if err != nil {
 		return reservationJournalState{}, errors.Join(ErrReservationUnavailable, err)
@@ -413,17 +563,26 @@ func readReservationJournalWithHeader(file *os.File, headerText string) (reserva
 		return reservationJournalState{}, ErrReservationJournalCorrupt
 	}
 
-	return parseReservationJournalWithHeader(data, headerText)
+	return parseReservationJournalRecords(data, headerText, authority)
 }
 
-// appendReservationHold appends one complete frame and flushes it before reporting success. Once
-// the write starts, a failure is uncertain: never truncate or try to roll back.
+// appendReservationHold appends a hold that passes the history checks.
 func appendReservationHold(file *os.File, state reservationJournalState, reservation EgressReservation) error {
+	if err := state.checkNewHold(reservation); err != nil {
+		return err
+	}
+
 	frame, err := encodeReservationFrame(reservation, state.tail)
 	if err != nil {
 		return err
 	}
 
+	return appendJournalFrame(file, state, frame)
+}
+
+// appendJournalFrame appends one complete frame and flushes it before reporting success. Once the
+// write starts, a failure is uncertain: never truncate or try to roll back.
+func appendJournalFrame(file *os.File, state reservationJournalState, frame []byte) error {
 	if state.length+int64(len(frame)) > int64(maxReservationJournalBytes) {
 		return ErrReservationLimit
 	}
@@ -543,25 +702,31 @@ func inspectReservationJournal(dataDir string) ([]EgressReservation, error) {
 	return inspectReservationJournalSpec(legacyReservationJournal(dataDir))
 }
 
-func inspectReservationJournalSpec(journal reservationJournalSpec) (items []EgressReservation, resultErr error) {
-	handle, err := journal.open()
-	if err != nil {
-		return nil, err
-	}
-
-	defer func() {
-		if err := handle.Close(); err != nil {
-			items = nil
-			resultErr = errors.Join(resultErr, ErrReservationUnavailable, err)
-		}
-	}()
-
-	state, err := journal.read(handle.File)
+func inspectReservationJournalSpec(journal reservationJournalSpec) ([]EgressReservation, error) {
+	state, err := loadReservationJournalState(journal)
 	if err != nil {
 		return nil, err
 	}
 
 	return state.registry.snapshot(), nil
+}
+
+// loadReservationJournalState replays the journal under its lock and releases the lock again; the
+// state is a snapshot for inspection, never the basis of a write.
+func loadReservationJournalState(journal reservationJournalSpec) (state reservationJournalState, resultErr error) {
+	handle, err := journal.open()
+	if err != nil {
+		return reservationJournalState{}, err
+	}
+
+	defer func() {
+		if err := handle.Close(); err != nil {
+			state = reservationJournalState{}
+			resultErr = errors.Join(resultErr, ErrReservationUnavailable, err)
+		}
+	}()
+
+	return journal.read(handle.File)
 }
 
 func lookupDurableReservationByIP(dataDir string, ip netip.Addr) (EgressReservation, bool, error) {

@@ -398,21 +398,10 @@ func (j reservationJournalSpec) open() (reservationJournalHandle, error) {
 	return handle, nil
 }
 
+// read replays the journal; with an authority, every hold ever recorded, released ones included,
+// must carry its key.
 func (j reservationJournalSpec) read(file *os.File) (reservationJournalState, error) {
-	state, err := readReservationJournalWithHeader(file, j.header)
-	if err != nil {
-		return reservationJournalState{}, err
-	}
-
-	if j.authority != nil {
-		for _, hold := range state.registry.byOwner {
-			if hold.PublicKeySHA256 != j.authority.PublicKeySHA256 {
-				return reservationJournalState{}, ErrReservationAuthorityMismatch
-			}
-		}
-	}
-
-	return state, nil
+	return readReservationJournalRecords(file, j.header, j.authority)
 }
 
 func (a *ReservationAuthority) List() ([]EgressReservation, error) {

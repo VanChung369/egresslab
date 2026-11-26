@@ -229,3 +229,31 @@ func TestRevokeLeaseIntentPolicy(t *testing.T) {
 		}
 	}
 }
+
+// The eighth vector: the preparation's bytes with the revocation's operation. Cross-checked with
+// OpenSSL 3 (pkeyutl -sign -rawin), same seed.
+func TestRevokeEgressLeaseSigningMessageGolden(t *testing.T) {
+	intent, err := NewRevokeEgressLeaseIntent(testPrepareLeaseIntent(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	private := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, ed25519.SeedSize))
+
+	token, err := Mint(private, Claims{
+		Version:  Version,
+		Intent:   intent,
+		HelperID: testHelper,
+		Nonce:    "00112233445566778899aabbccddeeff",
+		IssuedAt: 1795500000,
+		NotAfter: 1795500030,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const want = "eEGqTiEcjfhnoBNTQ_3cck8frTGITa2HuAxmDEhwxRe_SONZZN7T7Ito6UW1wTX8ze39YEwcEXuudlYI8DHlCQ"
+	if token.Signature != want {
+		t.Fatalf("revocation signature mismatch: %s", token.Signature)
+	}
+}

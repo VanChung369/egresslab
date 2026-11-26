@@ -65,12 +65,14 @@ func (a *ReservationAuthority) ReserveVerifiedEgress(
 }
 
 // reservationPreflight only rejects early (missing or corrupt journal, a profile already held, a
-// full registry) before any runtime call; the durable transaction decides uniqueness.
+// full registry or history) before any runtime call; the durable transaction decides uniqueness.
 func reservationPreflight(journal reservationJournalSpec, profileID string) error {
-	items, err := inspectReservationJournalSpec(journal)
+	state, err := loadReservationJournalState(journal)
 	if err != nil {
 		return err
 	}
+
+	items := state.registry.snapshot()
 
 	for _, item := range items {
 		if item.Owner.ProfileID == profileID {
@@ -78,7 +80,7 @@ func reservationPreflight(journal reservationJournalSpec, profileID string) erro
 		}
 	}
 
-	if len(items) >= maxEgressReservations {
+	if len(items) >= maxEgressReservations || len(state.seenIDs) >= maxHistoricalReservations {
 		return ErrReservationLimit
 	}
 

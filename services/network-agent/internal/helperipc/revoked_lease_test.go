@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -805,4 +807,102 @@ func TestContradictedGenerationGetsNoAuthorization(t *testing.T) {
 			t.Fatalf("candidate on a contradicted generation: %v", err)
 		}
 	})
+}
+
+func TestRevocationReceiptDespiteSealedCheckFailure(t *testing.T) {
+	f, backend, preparation := newPreparedLeaseFixture(t)
+
+	if _, err := runPrepareLease(f, preparation); err != nil {
+		t.Fatal(err)
+	}
+
+	f.backend.verifyErr = errors.New("synthetic firewall drift")
+
+	result, err := runRevokeLease(f, revokeRequest(t, f, preparation))
+	if err != nil || !result.GenerationRetired || backend.cleanups != 1 ||
+		!f.labs.candidateRetirements[preparation.Intent.ReservationNonce].retired {
+		t.Fatalf("retired generation without a receipt: %v", err)
+	}
+
+	if f.labs.labs[f.lab.ProfileID].State != LabFaulted {
+		t.Fatal("a lab that failed its sealed check was not faulted")
+	}
+}
+
+// cancelingCleanupBackend ends the operation's context right after a successful cleanup.
+type cancelingCleanupBackend struct {
+	*fakeGenerationProbeBackend
+
+	cancel context.CancelFunc
+}
+
+func (b *cancelingCleanupBackend) CleanupStage(ctx context.Context, namespace string) error {
+	err := b.fakeGenerationProbeBackend.CleanupStage(ctx, namespace)
+	b.cancel()
+
+	return err
+}
+
+func TestRevocationReceiptAfterDeadlineInSealedCheck(t *testing.T) {
+	f, backend, preparation := newPreparedLeaseFixture(t)
+	req := revokeRequest(t, f, preparation)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	canceling := &cancelingCleanupBackend{fakeGenerationProbeBackend: backend, cancel: cancel}
+	f.labs.tunnels, f.labs.multiProbes, f.labs.generationProbes = canceling, canceling, canceling
+
+	result, err := f.labs.revokeEgressLease(ctx, req, f.verifier, multiProbeTestRuntimeID)
+	if err != nil || !result.GenerationRetired || backend.cleanups != 1 {
+		t.Fatalf("retired generation without a receipt after the deadline: %v", err)
+	}
+}
+
+// A stalled log delays neither the receipt nor other lifecycle operations.
+func TestRevocationFaultLogOffResponsePath(t *testing.T) {
+	f, _, preparation := newPreparedLeaseFixture(t)
+	f.backend.verifyErr = errors.New("synthetic firewall drift")
+
+	lines := make(chan string, 1)
+	release := make(chan struct{})
+	var locked atomic.Bool
+
+	f.labs.logf = func(format string, args ...any) {
+		if f.labs.mu.TryLock() {
+			f.labs.mu.Unlock()
+		} else {
+			locked.Store(true)
+		}
+
+		lines <- fmt.Sprintf(format, args...)
+		<-release
+	}
+	t.Cleanup(func() { close(release) })
+
+	req := revokeRequest(t, f, preparation)
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := runRevokeLease(f, req)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stalled log held up the receipt")
+	}
+
+	select {
+	case line := <-lines:
+		if !strings.Contains(line, "synthetic firewall drift") || locked.Load() {
+			t.Fatalf("fault log %q, written under the lifecycle lock: %t", line, locked.Load())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fault was not logged")
+	}
 }

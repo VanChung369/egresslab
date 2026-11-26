@@ -3,6 +3,7 @@ package helperipc
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/VanChung369/egresslab/services/network-agent/internal/helperauth"
 )
@@ -180,7 +181,24 @@ func (l *LabLifecycle) revokeEgressLease(
 	if !l.mu.TryLock() {
 		return RevokedLeaseInfo{}, errLabBusy
 	}
-	defer l.mu.Unlock()
+
+	// Logged off the lock and off the response path: stalled log output must hold up neither the
+	// lifecycle nor a confirmed receipt.
+	var labFault error
+	var faultedNamespace string
+
+	logf := l.logf
+	if logf == nil {
+		logf = log.Printf
+	}
+
+	defer func() {
+		l.mu.Unlock()
+
+		if labFault != nil {
+			go logf("egress lease revocation: generation retired, lab %s faulted: %v", faultedNamespace, labFault)
+		}
+	}()
 
 	// blockCreation does not apply: this removes resources, for exactly their owner.
 	if l.closed || ctx.Err() != nil {
@@ -259,18 +277,20 @@ func (l *LabLifecycle) revokeEgressLease(
 
 	record.bind(expected.AuthorityID, expected.ReservationID)
 
+	// The receipt rests on the confirmed retirement alone: a sealed lab failing its check afterwards,
+	// or the operation running out of time there, leaves the lab faulted but does not withhold it.
 	if !record.retired {
 		if _, err := l.disconnectTunnelLocked(ctx, lab); err != nil {
-			return RevokedLeaseInfo{}, fmt.Errorf("%w: revoke managed generation: %w", errLabUncertain, err)
+			if !record.retired {
+				return RevokedLeaseInfo{}, fmt.Errorf("%w: revoke managed generation: %w", errLabUncertain, err)
+			}
+
+			labFault, faultedNamespace = err, lab.Namespace
 		}
 	}
 
 	if !record.retired {
 		return RevokedLeaseInfo{}, errLabUncertain
-	}
-
-	if ctx.Err() != nil {
-		return RevokedLeaseInfo{}, errLabUnavailable
 	}
 
 	result := RevokedLeaseInfo{

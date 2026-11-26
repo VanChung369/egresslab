@@ -55,7 +55,7 @@ The unique-IP invariant needs one authority across runtimes: two Linux runtimes,
 - A reservation owner is one managed tunnel's lifetime: profile, runtime, helper epoch, namespace and tunnel generation.
 - A candidate is admitted only when the helper's receipt agrees with the trusted runtime and its pinned key, the strict profile and its configured lab, the original V2 probe (generation, nonce, observation time and the unanimously verified address) and both capabilities this controller issued, whose signatures are checked against the pinned public key. The admission deadline never extends the helper's evidence: it is the earlier of 60 s after the probe was sent and the helper's deadline minus 5 s.
 - Four indexes (owner, public IPv4, profile and reservation ID) change together; validation, the collision checks and publication run under one mutex, so requests through one registry instance never hold the same address twice, and an existing hold is never overwritten or evicted.
-- Expiry ends eligibility for activation, not the hold: an address is released only once a later lifecycle confirms its owner can no longer use it, and no release exists yet.
+- Expiry ends eligibility for activation, not the hold: an address is released only once a confirmed retirement of its owner's generation is committed to the journal (Step 31D.3d.1).
 
 The registry alone is in memory and coordinates one process; Step 31C puts it behind a durable journal shared by controller processes. The signed reservation workflow (Step 31D.1) and the provisioned authority with its CLI commands (Step 31D.2) build on it; the HTTP API does not reach it. Lease preparation (Steps 31D.3a and 31D.3b) and the helper's generation-bound revocation (Step 31D.3c) build on it too; the controller's revocation and release (Step 31D.3d) and collision and recovery tests (Step 31E) come later; no application traffic is allowed.
 
@@ -70,7 +70,7 @@ The controller keeps exclusive IPv4 ownership in an append-only journal, `egress
 - A reservation is returned only after its record and, on Linux and macOS, the journal's directory entry are flushed. If eligibility ends during the flush, the hold stays and no grant is returned. A failure after the write began is uncertain: the caller must inspect durable state, not retry with a new capability. Every transaction, inspection included, flushes the journal before reading it, so a complete record left by a writer that died before its own flush is made durable instead of being reported from the cache.
 - Holds survive the process: an exit releases the lock, not the ownership. A record read back is a recovered hold; its timestamps lost the monotonic reading, so it keeps its address but is never eligible for activation. Expiry does not release an address either.
 
-The checksum chain detects corruption, not deliberate rewriting or a rollback to an earlier complete prefix. The authority does not coordinate separate data directories or hosts, and Windows has no directory flush. Locking and recovery are tested with real child processes on Windows and Linux; macOS runs the same tests in CI. Revocation and safe release (Steps 31D.3c and 31D.3d) remain pending; no application traffic is allowed.
+The checksum chain detects corruption, not deliberate rewriting or a rollback to an earlier complete prefix. The authority does not coordinate separate data directories or hosts, and Windows has no directory flush. Locking and recovery are tested with real child processes on Windows and Linux; macOS runs the same tests in CI. Revocation (Step 31D.3c) and the release journal (Step 31D.3d.1) exist, the release command (Step 31D.3d.2) is pending; no application traffic is allowed.
 
 ### Signed reservation orchestration (Step 31D.1)
 
@@ -93,7 +93,7 @@ The reservation authority lives in a fixed per-user configuration directory, `os
 - `init-reservations` and `list-reservations` are local and never reach a runtime. `-approve reserve-egress PROFILE_ID NAMESPACE` opens the authority first, then checks the trusted runtime, the profile's binding and the helper's configured lab, and runs one signed verification, candidate consumption and durable commit (Step 31D.1), followed since Step 31D.3b by the signed lease preparation; it takes no address, path or override arguments. Errors map to stable controller codes (`RESERVATION_AUTHORITY_UNAVAILABLE`, `RESERVATION_BUSY`, `EGRESS_IP_COLLISION`, `EGRESS_RESERVATION_HELD` and others); an uncertain or committed-expired outcome, or a receipt that could not be written after the commit, stays `STATE_UNCERTAIN`.
 - A reservation does not activate a lease, a proxy endpoint or application networking, and changes no profile, endpoint or binding; its output says `activation_allowed: false` and `network_ready: false`.
 
-The authority covers cooperating controller processes of one OS user that share the configuration root on a supported local filesystem; the deletion or rollback of all authority files is outside the guarantee boundary. No hold is released yet: a real `reserve-egress` keeps its address for good until Step 31D.3d adds safe release. Key rotation and authority migration remain pending.
+The authority covers cooperating controller processes of one OS user that share the configuration root on a supported local filesystem; the deletion or rollback of all authority files is outside the guarantee boundary. No hold is released yet: a real `reserve-egress` keeps its address for good until the release command (Step 31D.3d.2). Key rotation and authority migration remain pending.
 
 ### Prepared egress leases (Step 31D.3a)
 
@@ -113,15 +113,28 @@ A durable reservation is exclusive address ownership at the controller. A prepar
 - The helper's receipt must match the signed capability and the durable hold, the original evidence timestamps and the key fingerprint included, which the signed intent does not carry.
 - Any failure after the durable commit, whether signing, expiry, a refusal, a lost response or a mismatched receipt, keeps the address held and returns `EGRESS_PREPARATION_UNCONFIRMED`. That does not prove the helper made no prepared lease. Nothing is retried, released or activated.
 
-Application networking stays disabled. With no release yet, a cooperating controller cannot free the hold between the journal check and the submission; release must also revoke outstanding preparations (Step 31D.3d, with the helper's revocation of Step 31D.3c).
+Application networking stays disabled. With no release command yet, a cooperating controller cannot free the hold between the journal check and the submission; release must also revoke outstanding preparations (Step 31D.3d, with the helper's revocation of Step 31D.3c).
 
 ### Generation retirement (Step 31D.3c)
 
 Durable address ownership must outlive the invalidation of local authorization and an uncertain cleanup.
 
-- A reservation may be released only through a future authority transaction (Step 31D.3d) backed by a confirmed retirement of its exact managed tunnel generation: the helper's `RevokeEgressLeaseV1` receipt, checked against the authority, reservation, runtime, helper epoch and the signed revocation attempt, never a receipt a user supplies.
+- A reservation may be released only through an authority transaction (Step 31D.3d.1) backed by a confirmed retirement of its exact managed tunnel generation: the helper's `RevokeEgressLeaseV1` receipt, checked against the authority, reservation, runtime, helper epoch and the signed revocation attempt, never a receipt a user supplies.
 - Expiry, a missing prepared lease and a controller process exit are not release proofs.
 - The retirement records live in one helper epoch and do not authorize a release after an unverified runtime recovery.
+
+### Durable release journal (Step 31D.3d.1)
+
+The authority's append-only journal records releases as well as holds, on the same frames and checksum chain; a hold record is unchanged, a release record is `{"type":"release", "receipt":…, "released_at":…}` with the helper's retirement receipt and no key or reusable authorization.
+
+- A release needs trusted, generation-bound retirement evidence for the exact current hold (`docs/PRIVILEGED-HELPER.md`, "Durable release admission").
+- The release transaction reloads and validates the whole journal under its exclusive OS lock, compares the hold, checks the evidence, applies the release to the private replayed state and appends and flushes one release frame. The lock is never held while a helper cleans up. A failure after the write began is uncertain, as for a hold.
+- Only a durable release frame removes active ownership. Replay applies the frames in order; a release that names no current hold, another authority, generation or helper epoch, or the same hold twice, is corruption, as is any unknown record type, and V1 journals cannot carry releases.
+- Every reservation ID and owner ever held stays known after its release, so stale authorization cannot resurrect a released generation: a retired owner cannot reserve again, and a late release of an old hold cannot touch a later owner of the same address. A new generation of the same profile can.
+- At most 1024 holds are active and 4096 reservations exist in a journal's history, with room reserved for one release frame per historical hold (at most 8192 frames): a full history refuses new holds, already in the preflight, never a release.
+- Existing V2 journals stay readable; a controller older than this step refuses a journal with a release record, so do not downgrade after the first release.
+
+Journal compaction, migrating an authority between hosts (a Windows authority is not a macOS one) and recovery after lost helper retirement records remain pending; the release command comes in Step 31D.3d.2, and no application traffic is allowed.
 
 ### Windows / macOS / Linux
 

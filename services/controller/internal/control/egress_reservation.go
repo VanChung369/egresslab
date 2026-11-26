@@ -85,8 +85,8 @@ func newEgressReservationID() (string, error) {
 //	byOwner[owner].IPv4 == ip, byIP[ip] == owner, byProfile[owner.ProfileID] == owner,
 //	byID[reservation.ID] == owner
 //
-// There is deliberately no expiry, eviction, replacement or release yet: an address is released
-// only once a later lifecycle confirms its owner can no longer use it.
+// There is deliberately no expiry, eviction or replacement: the durable journal releases a hold only
+// with a confirmed retirement of its owner's generation (Step 31D.3d.1).
 type egressReservationRegistry struct {
 	mu sync.Mutex
 

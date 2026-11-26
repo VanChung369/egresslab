@@ -145,6 +145,8 @@ type LabLifecycle struct {
 
 	// The backend once named another generation for it: no later cleanup proves its retirement.
 	candidateGenerationContradicted bool
+
+	logf func(format string, args ...any) // nil: log.Printf
 }
 
 func NewLabLifecycle(backend LabBackend) *LabLifecycle {
