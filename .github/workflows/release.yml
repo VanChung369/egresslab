@@ -1,0 +1,56 @@
+name: Release Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version
+        required: true
+        default: v0.3.0-alpha.1
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/controller/go.mod
+          cache: false
+
+      - name: Test controller
+        working-directory: services/controller
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Test network agent
+        working-directory: services/network-agent
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build release packages
+        env:
+          VERSION: ${{ inputs.version }}
+        run: bash scripts/build-release.sh "$VERSION"
+
+      - name: Verify checksums
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          cd "dist/$VERSION"
+          sha256sum -c SHA256SUMS
+
+      - name: Upload release packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: egresslab-${{ inputs.version }}
+          path: dist/${{ inputs.version }}/
+          if-no-files-found: error

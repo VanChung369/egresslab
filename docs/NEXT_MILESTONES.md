@@ -28,6 +28,8 @@
 - Implement SOCKS5 data plane that runs only inside verified isolated routes
 - Exercise tunnel loss, DNS/IPv6 leak and IP collision scenarios
 
+Delivered as v0.3.0-alpha.1, the Network Engine MVP (Step 36): see `docs/DEV-LINUX-VM.md`. Native Linux end-to-end validation and safe desktop activation remain open.
+
 ## 0.4 — Desktop integration
 
 - Package controller securely as sidecar or IPC service

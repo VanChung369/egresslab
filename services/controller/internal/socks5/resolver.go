@@ -51,7 +51,9 @@ var (
 // verifier is not used: on Windows and macOS it may fetch missing certificates over the host's own
 // network, resolving their names outside the tunnel.
 //
-//go:embed dohroots/*.pem
+// Named one by one: a pattern would also embed any other, untracked file placed there.
+//
+//go:embed dohroots/gts-root-r1.pem dohroots/gts-root-r3.pem dohroots/gts-root-r4.pem
 var dohRootFiles embed.FS
 
 func dohRoots() (*x509.CertPool, error) {

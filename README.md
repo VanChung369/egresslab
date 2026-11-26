@@ -1,105 +1,68 @@
-# EgressLab — real implementation starter (v0.1.0)
+# EgressLab
 
-**Network Routing & Proxy Studio**. Desktop application with Tauri 2 + SvelteKit + TypeScript and a Go controller.
-This is **new source code**, using the EgressLab design v1.1.1 only as a UI/UX reference.
+Verified network isolation and proxy routing engine.
 
-## Implemented today
+EgressLab manages isolated WireGuard routes and exposes authenticated local SOCKS5 endpoints backed by verified public IPv4 reservations.
 
-- Real local HTTP API (not a mocked API)
-- CRUD for routing profile definitions and local proxy endpoint definitions
-- Persistent state in the OS user config directory
-- Duplicate port/name validation, policy enforcement flags on all profiles
-- SvelteKit frontend with overview, endpoint table, routing profiles, status pages and creation forms
-- Tauri 2 desktop wrapper source (not built in this environment)
-- **Safe default:** no VPN tunnel, proxy listener, external routing, or egress verification is claimed to work yet
+## Features
 
-An endpoint in `draft` state **does not accept connections**. The `start` API deliberately returns `409 ROUTE_NOT_VERIFIED`.
-This is the *first vertical slice*, not a working VPN-to-Proxy tool.
+- Linux network namespace isolation.
+- Managed WireGuard tunnels.
+- Kernel-enforced, default-deny firewall.
+- Continuous multi-source public IP verification.
+- Durable and exclusive IP reservation authority.
+- Generation-bound authorization and recovery.
+- Multi-runtime and multi-stream SOCKS5 proxy routing.
+- Isolated DNS-over-HTTPS hostname resolution.
+- Cross-platform controller for Windows, macOS and Linux.
+- Encrypted WireGuard configuration storage.
 
-## Run on Windows 11 (PowerShell; two terminals)
+## Release status
 
-Install Go 1.23+, Node.js 22+, and Yarn or npm. For the desktop shell, also install Rust + the Tauri prerequisites (C++ build tools and WebView2 as applicable).
+Network Engine MVP — Alpha.
 
-**Terminal 1: Go API**
+The network engine has been exercised on macOS with Lima and Windows with WSL2.
 
-```powershell
-cd services/controller
-go test ./...
-go run ./cmd/egresslab-controller
+The desktop interface manages configuration definitions. Privileged network activation requires explicitly approved CLI operations.
+
+## Architecture
+
+```text
+SOCKS5 Client
+    |
+Host Controller
+    |
+Authenticated Runtime Transport
+    |
+Privileged Linux Helper
+    |
+Kernel Firewall + WireGuard
+    |
+VPN Egress
 ```
 
-The API listens only on `http://127.0.0.1:8787`.
+## Supported environments
 
-**Terminal 2: SvelteKit UI**
+- Windows with WSL2.
+- macOS with Lima.
+- Native Linux builds are available but have not completed equivalent end-to-end validation.
 
-```powershell
-cd apps/desktop
-yarn install
-yarn dev
-```
+## Getting started
 
-Open `http://127.0.0.1:5173` to test the UI in Edge or Chrome.
+See [docs/DEV-LINUX-VM.md](docs/DEV-LINUX-VM.md) for runtime provisioning, trusted controller setup, WireGuard staging, reservation management and proxy activation. To verify and install the release archives, start with its section "Installing a release".
 
-To open the **Tauri desktop** window (Rust/Tauri prerequisites required), stop `yarn dev` if it is already running, then run:
+## Security boundaries
 
-```powershell
-yarn tauri dev
-```
+EgressLab does not allow automatic direct-network fallback.
 
-Tauri starts its own Vite dev server. The Go API must still be running in Terminal 1; automatic sidecar startup is **not implemented**.
+Reservations remain held until confirmed retirement or authorized reboot-bound recovery.
 
-To use npm instead of Yarn, replace `yarn install`, `yarn dev`, `yarn tauri dev` with `npm install`, `npm run dev`, `npm run tauri -- dev`.
+Public IP verification is periodic. It cannot guarantee instantaneous detection of VPN provider address changes.
 
-### macOS / Linux
+IP uniqueness is coordinated within one shared reservation authority, not across independent installations.
 
-Use the same commands in Terminal. Install Rust and the platform prerequisites before `yarn tauri dev`.
-
-### Manual API smoke test
-
-PowerShell:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8787/api/v1/health
-Invoke-RestMethod http://127.0.0.1:8787/api/v1/overview
-```
-
-Create a routing profile first, then create a proxy endpoint from the UI. Reload: both resources remain saved.
-
-## Structure
-
-```
-apps/desktop/                   SvelteKit + Tauri 2 desktop UI
-  src/routes/+page.svelte       Real API-connected screens
-  src/lib/api.ts                Typed HTTP client
-  src-tauri/                   Rust desktop shell
-services/controller/            Go HTTP controller
-  cmd/egresslab-controller/     Entrypoint
-  internal/control/             Store + REST handlers + tests
-services/network-agent/         Linux network agent (read-only HTTP API) + sudo-only lab CLIs
-docs/ARCHITECTURE.md            Boundaries and invariants
-docs/DEV-LINUX-VM.md            Linux VM setup, lab CLIs and what still needs a VM run
-docs/PRIVILEGED-HELPER.md       Required boundary before any privileged action over IPC (design)
-docs/NEXT_MILESTONES.md         Implementation sequence
-```
-
-The Linux network agent's HTTP API is read-only and refuses to run as root. Namespaces, firewall, WireGuard and egress-probe code exists only in lab CLIs that you run by hand with `sudo` on a Linux VM (see `docs/DEV-LINUX-VM.md`). The desktop's **Network Agents** and **VPN Tunnels** views show the agent's read-only discovery. Nothing is shown as connected or managed.
-
-CI (`.github/workflows/ci.yml`) runs gofmt, `go vet` and `go test` for both Go modules, plus Prettier and svelte-check for the desktop.
-
-## Security boundary and limitations
-
-The Go API is a loopback development control API with origin checks, not authenticated IPC.
-It must not be exposed to the LAN, the public internet or privileged network functions in its current state.
-The desktop and API currently run as separate processes. The SvelteKit frontend passes `svelte-check` and `vite build`. Go tests pass. The Rust/Tauri desktop bundle has **not** been built or run through rustfmt yet.
-
-## Design source
-
-EgressLab-v1.1.1.zip was treated as a layout and UX reference. No React prototype runtime or font binaries were copied into this project.
-
-## Next
-
-Connect a trusted Linux network agent, verify dedicated per-profile routes, and only then implement real proxy activation.
+SOCKS5 supports IPv4 TCP and hostname resolution. UDP and IPv6 routing are not supported.
 
 ## License
 
-Distributed under the [MIT License](LICENSE). Copyright (c) 2026 VanChung369.
+MIT. See [LICENSE](LICENSE).

@@ -1287,7 +1287,8 @@ The helper discards the worker's stderr, so the cause is unknown; it matches the
 failure seen in Steps 29B.1 and 29B.2b. After deleting that lab, six attempts all succeeded
 (2.9 to 4.0 s per controller command): two on one tunnel, and one on each of four more tunnels in
 fresh create, connect and probe cycles, the last as the first attempt after a helper restart. Each returned the same VPN exit address from both
-sources (`195.242.214.134`, not the host's address), `observed_at` equal to the Cloudflare
+sources (egress A, not the host's address; since Step 36 the docs call the two VPN egress addresses of
+the Lima runs egress A and egress B), `observed_at` equal to the Cloudflare
 observation, and `network_ready: false`. After a successful attempt the lab verified as
 `tunnel_configured`, the namespace had no process, the handshake was 16 s old, no
 `egresslab_probe4` set or permit remained, and the output chain was back to the sealed rules
@@ -1333,7 +1334,7 @@ signed protocol (not the pin); no continuous monitoring and no application traff
 
 Verified on Lima on 2026-11-25 with the real Proton tunnel (scratch Keychain key and profile,
 removed afterwards), through the controller: two separately approved `probe-egress-multi` attempts
-on one configured tunnel returned the same address from both sources (`195.242.214.134`), the
+on one configured tunnel returned the same address from both sources (egress A), the
 second passing the pin the first had set; afterwards the lab verified as `tunnel_configured` with
 no namespace process, no probe set or permit and the sealed output chain, and `disconnect` and
 `delete-lab` cleaned up. The first attempt of the session again failed in its `cloudflare_trace`
@@ -1450,7 +1451,7 @@ failed again in its `cloudflare_trace` worker about a second after submission, a
 faulted the lab and removed the tunnel cleanly (only `lo` left, no process, no probe set). On a
 fresh lab, two attempts on one tunnel (3.0 and 2.9 s per controller command) returned the
 generation `multi-probe-target` had reported, the same address from both sources
-(`195.242.214.134`), two different 32-hex nonces and `network_ready: false`. After `disconnect`,
+(egress A), two different 32-hex nonces and `network_ready: false`. After `disconnect`,
 `multi-probe-target` answered `INVALID_REQUEST`; the reconnect got a different generation, and an
 attempt on it returned that generation, the same address and a new nonce. The lab then verified as
 `tunnel_configured` with no namespace process, no `egresslab_probe4` set or permit and the sealed

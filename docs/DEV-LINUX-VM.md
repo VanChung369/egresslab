@@ -21,6 +21,48 @@ macOS Host
 
 The Controller manages EgressLab configuration, while the Linux Network Agent discovers and eventually manages Linux networking resources.
 
+## Installing a release
+
+Since v0.3.0-alpha.1, release archives hold prebuilt binaries. With them, this guide's build steps are not needed.
+
+**1. Verify every archive** in the folder that holds `SHA256SUMS`.
+
+Windows (PowerShell):
+
+```powershell
+Get-Content SHA256SUMS -ErrorAction Stop | ForEach-Object {
+    $expected, $file = $_ -split '\s+', 2
+    $actual = (Get-FileHash -Path $file -Algorithm SHA256 -ErrorAction Stop).Hash
+    if ($actual.ToLower() -ne $expected.ToLower()) { throw "Checksum mismatch: $file" }
+    Write-Host "OK: $file"
+}
+```
+
+macOS: `shasum -a 256 -c SHA256SUMS`. Linux: `sha256sum -c SHA256SUMS`.
+
+**2. Install the controller** on the host. Extract `egresslab-controller-<os>-<arch>` anywhere, and run `egresslab-controller-lab` and `egresslab-controller` from there.
+
+**3. Install the runtime** in the Linux guest (WSL2 or Lima). Take the archive whose architecture matches `uname -m`: `x86_64` is amd64, `aarch64` is arm64. Upgrade only after every related reservation is released and the old helper has stopped.
+
+The subshell starts from an empty folder and stops at the first failure with a non-zero status, so it never installs stale or partial binaries:
+
+```bash
+(
+    set -e
+    rm -rf runtime-release
+    mkdir runtime-release
+    tar -xzf egresslab-runtime-linux-amd64.tar.gz -C runtime-release
+    cd runtime-release
+    for binary in egresslab-agent egresslab-helper egresslab-helperctl egresslab-probe egresslab-proxy-dial egresslab-lab-recover; do
+        sudo install -o root -g root -m 0755 "$binary" "/usr/local/bin/$binary"
+    done
+)
+```
+
+**4. Provision only what is new.** An environment that is already provisioned keeps its signing key, vault, trust record and reservation authority; never create them again. A new environment follows the sections below: the helper, `trust-runtime`, the vault stage and `init-reservations`.
+
+**Versions.** `RELEASE-INFO.txt` names the release version and commit. The version that `egresslab-controller` reports (0.1.0, in its startup log and health response) is its control API version, which a release does not change.
+
 ## Prerequisites
 
 - macOS (Apple Silicon or Intel)
@@ -482,14 +524,14 @@ Environment:
 The Mac had no controller key and no authority, so `init-key` and `-approve init-reservations` provisioned them; a profile was created through the controller API, the runtime was trusted, and the WireGuard config was staged through `/dev/shm` and shredded. The helper ran with `-enable-multi-probe` (`PermitMultiProbeV2`, the provisioned ident.me pin) for the whole test and was stopped only once `list-reservations` showed no active hold: the append-only journal keeps every hold and release, and a hold whose helper stopped could not be released.
 
 Results:
-- Initial reservation and preparation: `-approve reserve-egress` succeeded on its first attempt in 3.8 s (no first-probe worker failure this time): state `prepared`, the reservation on generation A, the prepared lease bound to the same reservation and authority, public IPv4 195.242.214.134, `activation_allowed: false`, `network_ready: false`.
+- Initial reservation and preparation: `-approve reserve-egress` succeeded on its first attempt in 3.8 s (no first-probe worker failure this time): state `prepared`, the reservation on generation A, the prepared lease bound to the same reservation and authority, public IPv4 egress A, `activation_allowed: false`, `network_ready: false`.
 - Duplicate reservation refusal: a second `reserve-egress` answered `EGRESS_RESERVATION_HELD` in the preflight, before anything was signed; the generation and the lab were unchanged, and the helper logged nothing.
 - Durable ownership inspection: a new CLI process listed exactly that hold (journal 897 bytes).
 - Generation retirement and release: after waiting 65 s (the candidate had expired 47 s earlier), `-approve release-egress` released it in 0.5 s; the receipt named generation A and the original helper epoch, with `generation_retired: true`, `state: released`, `network_ready: false`.
 - Kernel cleanup verification: before the release the namespace had no process, `wg0`, a 27 s old handshake, no `egresslab_probe4` set or permit, the sealed output chain and the underlay table; afterwards `verify-lab` said `sealed`, the namespace held only `lo`, the underlay table was gone (only `ip nat` remained in the root namespace), and `list-reservations` was empty (journal 1771 bytes).
 - Reconnection with a new generation: `connect-tunnel` with the same profile, namespace and stage got generation B, different from A.
 - Reservation after release: `reserve-egress` succeeded in 3.4 s with a new reservation ID, the same profile, runtime, helper epoch and namespace, and generation B.
-- Same-address reuse: yes, the provider returned 195.242.214.134 again and it was reserved again.
+- Same-address reuse: yes, the provider returned egress A again and it was reserved again.
 - Stale release refusal: `release-egress` of the first reservation answered `EGRESS_RESERVATION_NOT_FOUND` before any helper call; reservation B and generation B stayed.
 - Final recovery scan: after releasing B (journal 3450 bytes: two holds, two releases) and `delete-lab`, `egresslab-lab-recover` found no EgressLab resources.
 
@@ -511,14 +553,14 @@ Results:
 - Distinct runtime identities: `runtime_3932195e…` with `helper_331ebe34…` (A) and `runtime_a9643767…` with `helper_6b62907e…` (B), both with `authorization_configured: true` and `PermitMultiProbeV2`; after `-approve trust-runtime` on B, `runtimes` listed both.
 - Shared controller signing key: both helpers reported `d54e6b1e…`, the Mac key.
 - Shared reservation authority: every reservation and release of both runtimes went to the one journal in the Mac default data directory.
-- Runtime A reservation: `reserve-egress` succeeded in 3.7 s: `prepared`, 195.242.214.134, `activation_allowed: false`, `network_ready: false`. `disconnect` then answered `sealed` (the namespace kept only `lo`), and `list-reservations` still listed the hold.
-- Runtime B observed address: with the same config under profile C, `probe-egress-multi` on runtime B saw 195.242.214.134 from both sources.
+- Runtime A reservation: `reserve-egress` succeeded in 3.7 s: `prepared`, egress A, `activation_allowed: false`, `network_ready: false`. `disconnect` then answered `sealed` (the namespace kept only `lo`), and `list-reservations` still listed the hold.
+- Runtime B observed address: with the same config under profile C, `probe-egress-multi` on runtime B saw egress A from both sources.
 - Collision refusal: `reserve-egress` on runtime B exited 1 after 3.2 s with `EGRESS_IP_COLLISION: commit durable reservation: public IPv4 already reserved` and printed no reservation or lease.
 - Durable ownership after refusal: the journal was byte for byte unchanged (4257 bytes, same SHA-256), and `list-reservations` listed only A's hold.
 - Runtime A retirement and release: after B disconnected its candidate-bearing generation, `release-egress` of A succeeded in 0.3 s, the first real release of a hold whose tunnel was already gone (and before its `eligible_until`): the receipt named A's generation and original helper epoch, with `generation_retired: true`; no hold remained (journal 5131 bytes).
 - Runtime B reservation after release: B reconnected profile C (a new generation), and `reserve-egress` succeeded in 3.1 s with a new reservation ID owned by runtime B and its helper epoch.
-- Same-address reuse across runtimes: yes, the provider returned 195.242.214.134 again and runtime B held it; it was released in turn (journal 6811 bytes).
-- Two client identities at once: with A on the first config and B on the second, both tunnels stayed up together. Each probe kept working after the other runtime connected, and again 150 s later, after both had renewed their handshakes; `reserve-egress` then held 195.242.214.134 (A) and 91.207.174.6 (B) at the same time, two independent owners, both released afterwards. The Free plan did not disconnect either tunnel during the 3 minutes they ran together.
+- Same-address reuse across runtimes: yes, the provider returned egress A again and runtime B held it; it was released in turn (journal 6811 bytes).
+- Two client identities at once: with A on the first config and B on the second, both tunnels stayed up together. Each probe kept working after the other runtime connected, and again 150 s later, after both had renewed their handshakes; `reserve-egress` then held egress A (runtime A) and egress B (runtime B) at the same time, two independent owners, both released afterwards. The Free plan did not disconnect either tunnel during the 3 minutes they ran together.
 - First-probe failure: the first `probe-egress-multi` on the second config, started right after `connect-tunnel` while A was up, failed (`source cloudflare_trace: managed egress probe failed`) and faulted the lab; after `delete-lab` and `create-lab` it worked alone, and then with A up as well. It matches the open first-probe failure (see "Next Milestone"); the provider's connection limit does not explain it, since both tunnels later ran together.
 - Final recovery scans: after every hold was released (journal 10164 bytes; this run added four holds and four releases) and the three labs were deleted, `egresslab-lab-recover` found no EgressLab resources in either VM.
 
@@ -540,7 +582,7 @@ Results:
 - Stress test repetitions: `-count=50` of the three race tests (150 races) passed on macOS. In every race the loser got `busy`: between two reservations the first child won 22 times and the second 28; between a release and a reservation the release won 29 times, and 21 times the reservation won the lock and answered `collision` while the release got `busy`; between two releases the first child released 23 times and the second 27. With the final test code, all five `TestAuthority*` tests (the three races, the sequential case and the fail-fast lock below) passed 50 times each on macOS and on Linux (Lima VM, arm64). With the `flock` call removed, the reservation and duplicate-release races failed 20 runs out of 20 (duplicate grants, two releases, a corrupt journal), and the release and reserve race did not fail in 20 runs.
 - Fail-fast lock: with a child process holding the authority marker and the journal, only the marker, or only the journal, a reservation, a release and a listing answered `ErrReservationBusy` at once, and the release succeeded after the child exited. With a blocking `flock`, this test failed 3 runs out of 3 while every race test still passed; with the V2 journal opened without its lock, the journal-only case failed 3 runs out of 3, and with the marker opened without its lock, the marker-only case did too.
 - Race detector: `-race -count=5` passed with no data race; `go test -race ./...` and `go build ./...` passed, `go vet` passed for darwin, linux (arm64, 386) and windows, and staticcheck reported only its two earlier unused-function warnings.
-- Real concurrent reservations: two `-approve reserve-egress` processes started within 1 ms of each other. B prepared 91.207.174.6 in 2.8 s; A answered `RESERVATION_BUSY` after 62 ms, when the CLI opened the authority, before any runtime call or signature (its lab stayed `tunnel_configured` on the same generation, and its helper logged nothing). A separate approved `reserve-egress` then prepared 195.242.214.134 for A in 3.5 s on that generation; `activation_allowed` and `network_ready` stayed `false`.
+- Real concurrent reservations: two `-approve reserve-egress` processes started within 1 ms of each other. B prepared egress B in 2.8 s; A answered `RESERVATION_BUSY` after 62 ms, when the CLI opened the authority, before any runtime call or signature (its lab stayed `tunnel_configured` on the same generation, and its helper logged nothing). A separate approved `reserve-egress` then prepared egress A for A in 3.5 s on that generation; `activation_allowed` and `network_ready` stayed `false`.
 - Real concurrent releases: two `-approve release-egress` processes started together. A was released in 0.4 s with `generation_retired: true`; B answered `RESERVATION_BUSY` after 60 ms, again when the CLI opened the authority, so its helper was not called, its tunnel stayed configured and its hold listed. No `EGRESS_RELEASE_UNCONFIRMED` occurred. A separate approved `release-egress` released B in 0.3 s.
 - Final durable ownership: no active hold; this run added two holds and two releases (journal 10164 to 13520 bytes).
 - Final recovery scans: after `delete-lab` of both labs, `egresslab-lab-recover` found no EgressLab resources in either VM; the helpers were then stopped and both vault stages revoked.
@@ -592,7 +634,7 @@ Tests:
 Real crash and reboot:
 - Rehearsal without a hold: `systemctl reboot` restarted the guest (Lima kept it `Running`), changed the boot ID and kept the runtime ID; the guest clock was within 0.03 s of the host.
 - The new controller read the real journal (13520 bytes, no hold) before writing anything.
-- Hold: `reserve-egress`, 10 s after `connect-tunnel`, prepared 195.242.214.134 as `reservation_15dc65fa…` in 3.7 s, owned by helper epoch `helper_146017d7…`, whose witness named the current boot `6deaa2d7…`; it was the only hold.
+- Hold: `reserve-egress`, 10 s after `connect-tunnel`, prepared egress A as `reservation_15dc65fa…` in 3.7 s, owned by helper epoch `helper_146017d7…`, whose witness named the current boot `6deaa2d7…`; it was the only hold.
 - Crash: `kill -KILL` of that helper's PID. Its log had no `EgressLab helper stopped`, `helper.sock` stayed, the hold stayed listed, and `egresslab-lab-recover` reported the orphan namespace (`owner pid 1335 is gone`) and its kept underlay table; neither was removed.
 - Same boot (added to the planned run): after the stale socket was removed as the helper's message instructs, a new epoch started (and logged that `CreateLab` is refused until the leftovers are recovered). `release-egress` answered `INVALID_EGRESS_RELEASE` (the original epoch is required) before signing; `recover-egress` answered `EGRESS_REVOCATION_UNCONFIRMED` with the helper's `AUTHORIZATION_DENIED`, and the helper logged `epoch witness: kernel reboot not established`. The hold stayed.
 - Reboot: boot `6deaa2d7…` became `d39d0bd8…`; the namespace, underlay table and socket were gone, and `egresslab-lab-recover` found nothing.
@@ -621,7 +663,7 @@ Tests:
 
 Real run:
 - Before: no hold, no helper, and the stage revoked in Step 31E.3, so the config was staged again.
-- The helper started at 14:16:49 (guest time). `reserve-egress`, 10 s after `connect-tunnel`, prepared 195.242.214.134 as `reservation_94ec6ade…` on `tunnelgen_bf491829…` (14:17:17 to 14:17:21); the original evidence was observed at 14:17:19 and the prepared lease expired at 14:18:18.
+- The helper started at 14:16:49 (guest time). `reserve-egress`, 10 s after `connect-tunnel`, prepared egress A as `reservation_94ec6ade…` on `tunnelgen_bf491829…` (14:17:17 to 14:17:21); the original evidence was observed at 14:17:19 and the prepared lease expired at 14:18:18.
 - Monitor: `Egress monitor healthy` at 14:17:44, 14:18:07, 14:18:31, 14:18:54, 14:19:18, 14:19:41 and 14:20:04, every 23 to 24 s, all with the same reservation, generation and address; four of them after the original evidence had expired. No monitor fault occurred.
 - At 14:19:41, right after a healthy line: `verify-lab` answered `tunnel_configured`, `list-reservations` showed the same reservation, address, generation and helper epoch, `multi-probe-target` the same generation, and `network_ready` stayed `false`.
 - At 14:20:04, right after a healthy line, `-approve release-egress` released it with a normal `RevokeEgressLeaseV1` receipt (`generation_retired: true`); no `LAB_BUSY` occurred. Journal: 17066 to 18747 bytes.
@@ -687,7 +729,7 @@ Tests: on macOS `go vet` (darwin, linux, windows for the controller), `go test -
 
 Real run (the egress address is compared, never printed):
 - `serve-socks` listened on `127.0.0.1:1080` only, with `network_ready: false`.
-- Through `curl -4 --socks5` (local name resolution, certificate verification on), `https://api.ipify.org` returned the reserved address 195.242.214.134 every time; the first request of a new stream took 2.3 to 11.1 s, later back-to-back requests about 2 s each.
+- Through `curl -4 --socks5` (local name resolution, certificate verification on), `https://api.ipify.org` returned the reserved address (egress A) every time; the first request of a new stream took 2.3 to 11.1 s, later back-to-back requests about 2 s each.
 - Refused as expected: a wrong password (RFC 1929 failure); `1.1.1.1`, TCP port 53 and `192.168.1.1` (reply 2, not allowed); a domain name through `--socks5-hostname` (reply 8).
 - A download of `https://proof.ovh.net/files/100Mb.dat` limited to 150 KB/s ran 400 s (curl's own limit) and received 61.6 MB at a steady rate across 18 monitor checks, with one stall of about 24 s (t=61 to 83 s) that began well before a check; no monitor fault. `speed.cloudflare.com` answered 403 to the VPN address.
 - `kill -KILL` of `serve-socks` during a download: curl got a partial file, the orphaned `limactl` forwarded the controller's closed stdin as EOF, so helperctl exited at once; a restarted `serve-socks` served a new request in 5.5 s.
@@ -711,7 +753,7 @@ Environment:
 Tests: on macOS `go vet` (darwin, linux, windows), `go test -race ./...` and `go build ./...` passed, including `TestServeEndpointArguments` (approval, arguments, runtime flags refused), `TestEndpointPlanLifecycle` (no hold, resolution, release) and `TestEndpointPlanRefusesOtherEndpoints`.
 
 Real run:
-- Both routes reserved, prepared and distinct: 195.242.214.134 (A) and 91.207.174.6 (B).
+- Both routes reserved, prepared and distinct: egress A (route A) and egress B (route B).
 - The two endpoints were created through the HTTP API (`POST /api/v1/endpoints`, as the desktop does); they stayed `draft`, and the API's start answered 409. `serve-endpoint` served each from its stored configuration, with no runtime or reservation given, on `127.0.0.1` only.
 - Two listeners started at the same moment: the second answered `RESERVATION_BUSY` at start (the authority's non-blocking lock) and was started again.
 - Concurrent requests to `https://api.ipify.org` through both endpoints, six rounds: 11 of 12 matched their own reserved address, and the two addresses always differed. The twelfth (round 1, A) was refused because its per-CONNECT check found the shared journal locked by B's (`egress reservation registry unavailable`); the same happened to one of two downloads started together. No CONNECT ever used the other route's address.
@@ -950,6 +992,72 @@ Limitations:
 
 Application networking as a whole remained disabled.
 
+### Release build and release binaries on Windows and WSL2 (Step 36)
+
+Release packages are built by `scripts/build-release.sh VERSION`, and officially by the manual GitHub Actions workflow "Release Build" (`.github/workflows/release.yml`, from `main` only). The workflow tests both modules, builds, verifies `SHA256SUMS` and uploads the archives as an artifact; it publishes no GitHub Release.
+
+How the script works:
+- It refuses a version that is not `vMAJOR.MINOR.PATCH[-PRERELEASE]`, a checkout with changes or untracked files, an existing `dist/VERSION`, and a missing tool (`git`, `go`, `tar`, `zip`, `sha256sum` or `shasum`, checked before anything is built).
+- It builds with `CGO_ENABLED=0`, `-trimpath` and `-buildvcs=true`. The macOS Keychain store uses `/usr/bin/security`, not cgo, so the cross builds keep it.
+- Archive hygiene:
+  - tar headers carry uid and gid 0 and explicit modes (binaries 0755, the rest 0644), never the builder's user or a checkout's or Windows mount's modes; zip leaves out uid and gid (`-X`);
+  - inherited `TAR_OPTIONS`, `ZIPOPT`, `ZIP` and `GZIP` are cleared, and macOS metadata files are suppressed;
+  - every archive is checked against its exact member list, directories included, and for tarballs executable binaries and numeric owner 0, before anything is hashed.
+- The output directory is reserved atomically, a symbolic link for `dist` is refused, and a failed build removes its partial output.
+- The resolver's three trust roots are embedded by name, so an untracked file in their folder cannot end up in the binary.
+- Output:
+  - six controller archives (`egresslab-controller` and `egresslab-controller-lab` for Windows, macOS and Linux, amd64 and arm64; zip for Windows, tar.gz otherwise);
+  - two Linux runtime archives (the agent, helper, helperctl, probe and proxy-dial workers, and `egresslab-lab-recover`);
+  - `SHA256SUMS`.
+- Every archive also holds `RELEASE-INFO.txt` (version, commit, role, OS, architecture), `LICENSE`, `README.md` and the three guides in `docs/`.
+- `dist/` is ignored by git.
+
+Trial build on 2026-11-26:
+- Where and with what:
+  - in WSL (Go 1.27.4, Info-ZIP 3.0), from a throwaway clone of `94ff972` with this step's files committed in the clone only;
+  - the official build uses the Go that `go.mod` names.
+- Refusals checked: an invalid version, an untracked file, and a second run into the same output.
+- The build:
+  - 24 binaries and 8 archives in 102 s; `sha256sum -c` passed, and so did the PowerShell check under "Installing a release" on Windows;
+  - every binary has the right format and architecture (PE32+ x86-64 and Aarch64, Mach-O x86_64 and arm64, ELF x86-64 and aarch64);
+  - the Unix binaries are executable;
+  - the checkout was still clean afterwards.
+- No archive holds a private key, a WireGuard config, a state file, a journal, a key file or a path from the build machine.
+- The docs named two real VPN egress addresses from the Lima runs. Since this step they are "egress A" and "egress B".
+
+Release binaries on Windows and WSL2 (the controller from `egresslab-controller-windows-amd64.zip`, the runtime from `egresslab-runtime-linux-amd64.tar.gz`):
+- Setup:
+  - The runtime archive's checksum was verified, and its six binaries were installed in `/usr/local/bin`, with no helper running and no hold.
+  - The existing signing key, vault, trust record and reservation authority were kept; nothing was provisioned again.
+  - `list-reservations` read the real authority; `runtime-status` reported the release helper reachable and authorized, and `helper-info` showed the trusted runtime ID.
+- Lifecycle, with the user's approval for one hold:
+  - `create-lab` and `connect-tunnel`; `probe-egress-multi` passed at the first attempt (3.0 s).
+  - `reserve-egress` prepared the hold in 3.6 s.
+  - An endpoint was created through the release HTTP controller (still `draft`), and the release `serve-endpoint` served it.
+- Hostname requests (`socks5h`) all came out at the reserved address:
+  - `api4.ipify.org` 3 of 3 and `ifconfig.co` 3 of 3;
+  - `api4.ipify.org` 8 of 8 concurrent;
+  - the Windows DNS cache held neither name, before or after.
+- Kill switch, with a 50 KB/s download running, after the lab's `wg0` was taken down as root:
+  - the lab had no route left;
+  - three requests during the outage were all refused, and none was answered by any other path;
+  - the lab was `faulted` 2 s later, when the keeper's next window found the tunnel changed;
+  - the download ended (curl 56) after the data already buffered on the host;
+  - a new request was refused, and the hold stayed in the journal.
+- After the fault:
+  - `release-egress` released the hold in 0.3 s with `generation_retired: true`;
+  - the endpoint was deleted, and `state.json` and `runtimes.json` were unchanged;
+  - `delete-lab` removed the faulted lab, and `egresslab-lab-recover` found nothing;
+  - the helper stopped, leaving no namespace or table.
+  - Journal: 6815 to 8497 bytes.
+
+Limitations:
+- The official artifact from GitHub Actions has not been built yet.
+- The lifecycle above ran on the first trial build. The script was hardened after Codex's review: archive modes and owners, member checks, the trust roots embedded by name. Its later trial builds, through GNU tar and through BSD tar (libarchive, as on macOS), passed their checks and checksums, and their Windows controller started, but the lifecycle was not repeated.
+- macOS with Lima and two runtimes were not exercised with release binaries here. Native Linux has not run end to end.
+- A fault found by the keeper's traffic window is not written to the helper log, unlike a monitor fault; the controller sees `LAB_FAULTED`.
+- `recover-egress` (after a guest reboot) was not repeated with release binaries.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
@@ -983,4 +1091,4 @@ Both checks that were pending for Windows ran on 2026-11-26; see "Windows and WS
 
 ## Next Milestone
 
-To be defined after Step 35, on top of the monitor traffic overlay and the isolated DNS resolver for domain names verified on Windows through WSL2 (Step 35), the proxy plane and an API-created endpoint verified on Windows through WSL2, with the fix for the Windows state files (Step 35), several streams per runtime verified on two Lima runtimes (Step 35), the endpoint-to-runtime integration verified on two Lima runtimes (Step 35), the SOCKS5 proxy runtime verified on Lima through the real tunnel (Step 34), the kernel-timed traffic gate verified in throwaway namespaces on Lima (Step 33), the continuous egress monitoring of prepared generations verified on Lima (Step 32), the reboot-bound reservation recovery verified on Lima through a real helper crash and guest reboot (Step 31E.3), the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting; in Step 31E.3 both reservations, 10 s after `connect-tunnel`, succeeded at the first attempt); since Step 32 a failed worker names a coded reason in the helper's error, but no failure has recurred since, so the cause is still unknown. WSL2 ran the single-source and multi-source paths on 2026-11-25 and the proxy plane, then the monitor overlay and the isolated DNS resolver, on 2026-11-26 (the first probe of every session succeeded); native Linux has not. See `docs/PRIVILEGED-HELPER.md`.
+The network engine MVP is complete: release v0.3.0-alpha.1 (Step 36), packaged and checked with its release binaries on Windows through WSL2. Further work belongs to the next product phase (VPN rotation, UDP, IPv6, automatic VM management, desktop activation, Universal Messenger integration), not to the engine MVP. It builds on the monitor traffic overlay and the isolated DNS resolver for domain names verified on Windows through WSL2 (Step 35), the proxy plane and an API-created endpoint verified on Windows through WSL2, with the fix for the Windows state files (Step 35), several streams per runtime verified on two Lima runtimes (Step 35), the endpoint-to-runtime integration verified on two Lima runtimes (Step 35), the SOCKS5 proxy runtime verified on Lima through the real tunnel (Step 34), the kernel-timed traffic gate verified in throwaway namespaces on Lima (Step 33), the continuous egress monitoring of prepared generations verified on Lima (Step 32), the reboot-bound reservation recovery verified on Lima through a real helper crash and guest reboot (Step 31E.3), the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting; in Step 31E.3 both reservations, 10 s after `connect-tunnel`, succeeded at the first attempt); since Step 32 a failed worker names a coded reason in the helper's error, but no failure has recurred since, so the cause is still unknown. WSL2 ran the single-source and multi-source paths on 2026-11-25 and the proxy plane, then the monitor overlay and the isolated DNS resolver, on 2026-11-26 (the first probe of every session succeeded); native Linux has not. See `docs/PRIVILEGED-HELPER.md`.
