@@ -54,7 +54,7 @@ func LoadRuntimeState(dataDir string) (*RuntimeState, error) {
 	path := filepath.Join(dataDir, RuntimeStateFile)
 	state := &RuntimeState{path: path, Runtimes: []TrustedRuntime{}, Bindings: []RuntimeBinding{}}
 
-	data, err := os.ReadFile(path)
+	data, err := readStateFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return state, nil
 	}
@@ -290,7 +290,7 @@ func (s *RuntimeState) Save() error {
 		return err
 	}
 
-	if err := os.Rename(tmp.Name(), s.path); err != nil {
+	if err := replaceStateFile(tmp.Name(), s.path); err != nil {
 		return err
 	}
 

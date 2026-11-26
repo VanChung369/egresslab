@@ -1,11 +1,14 @@
 package control
 
 import (
+	"errors"
 	"net/netip"
 	"time"
 )
 
 const LabOpenProxyStreamOp = "OpenProxyStreamV1"
+
+var ErrProxyDestinationNotAllowed = errors.New("proxy destination not allowed")
 
 // ValidLabProxyDestination mirrors helperauth.ValidProxyDestination: a canonical public IPv4 address
 // other than the probe sources, and a TCP port other than 0 and the DNS ports.
@@ -20,8 +23,12 @@ func ValidLabProxyDestination(destination netip.AddrPort, identPin string) bool 
 // preparation's binding under its own operation, plus one destination. The tenth golden vector pins
 // the signed bytes.
 func NewLabOpenProxyStreamIntent(binding LabIntent, destination netip.AddrPort) (LabIntent, error) {
-	if binding.Operation != LabPrepareEgressLeaseOp || !ValidLabProxyDestination(destination, binding.ProbeIPv4) {
+	if binding.Operation != LabPrepareEgressLeaseOp {
 		return LabIntent{}, ErrReservationReleaseInvalid
+	}
+
+	if !ValidLabProxyDestination(destination, binding.ProbeIPv4) {
+		return LabIntent{}, ErrProxyDestinationNotAllowed
 	}
 
 	expected, err := NewLabPrepareEgressLeaseIntent(binding.ProfileID, binding.Namespace, binding.ProbeIPv4,

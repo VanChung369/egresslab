@@ -156,6 +156,10 @@ func (s *session) serveSocksWithAuthority(reservationID, portArg string, authori
 
 		capability, err := authority.MintProxyStream(reservationID, destination, keys, rt, helper, s.d.now())
 		if err != nil {
+			if errors.Is(err, control.ErrProxyDestinationNotAllowed) {
+				return nil, socks5.ErrNotAllowed
+			}
+
 			if errors.Is(err, control.ErrReservationReleaseInvalid) || errors.Is(err, control.ErrReservationNotFound) {
 				return nil, errors.Join(socks5.ErrNotAllowed, err)
 			}

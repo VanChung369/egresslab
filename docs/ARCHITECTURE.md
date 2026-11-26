@@ -33,6 +33,7 @@ It uses the v1.1.1 Claude Design prototype as UX reference only; no HTML prototy
 
 JSON persistence lives in the user's OS config directory by default, configurable through `EGRESSLAB_DATA_DIR`.
 Write operations are serialized; persistence is atomic to a temporary file and rename on the current filesystem.
+On Windows, readers open the state files with delete sharing, and a save renames with POSIX semantics (`FileRenameInfoEx`). A save can therefore replace a file that another process (`serve-endpoint`, on every CONNECT) is reading. A transient refusal, such as a scanner under `%APPDATA%`, is retried: for up to 5 s on a save; on a read, 250 ms, or 25 ms for a missing file.
 
 ### Network API
 

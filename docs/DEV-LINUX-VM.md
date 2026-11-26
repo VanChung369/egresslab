@@ -724,7 +724,7 @@ Limitations:
 - In this run, concurrent CONNECTs on two listeners collided on the journal's exclusive lock and failed; nothing retries.
 - After this run, from the Codex review: journal reads (opening the authority, listing, lookups) take the lock shared, so listeners no longer block each other; only a concurrent write (reserve or release) still makes a CONNECT or a start busy. The per-CONNECT check moved after the helper call and the mint, right before the capability is sent, and the journal is read once instead of twice (the hold through the mint; endpoint, binding and trust from the controller's files). A later hold on the same helper keeps the binding, so it is now refused by the mint (`reservation is not held`) rather than as `endpoint binding changed`. Tests: `TestReservationAuthorityReadersShare`, `TestServeEndpointRevalidatesEachConnect` (the endpoint deleted during the helper call: no capability sent; it fails with the check moved before the call) and the later hold in `TestEndpointPlanLifecycle`. Re-run on Lima in the next test (several streams per runtime).
 - The checks resolve names on the host (curl's `--socks5`): they prove the data plane, not DNS isolation.
-- Windows, not tested: see Pending Windows checks.
+- Windows was not tested in this run; see "Windows and WSL2 run (Step 35)".
 
 Application networking as a whole remained disabled.
 
@@ -768,6 +768,70 @@ Limitations:
 
 Application networking as a whole remained disabled.
 
+### Windows and WSL2 run (Step 35)
+
+Environment:
+- Host OS: Windows 11 Pro (10.0.26300), Go 1.26.2; commit `412aa23` with this run's controller fixes. WSL2 Ubuntu 22.04, Linux 6.6.87, nft 1.0.2.
+- The helper, helperctl, `egresslab-proxy-dial`, the probe worker and `egresslab-lab-recover` were built from `412aa23` and installed in `/usr/local/bin` (helper `9b74d7d3…`). The controller CLI and the HTTP controller were built on Windows and reached the helper through `wsl.exe`.
+- The reservation authority was the real one in `%APPDATA%\EgressLab` (DPAPI key), with the controller's `state.json` and `runtimes.json` next to it.
+- One route: the multi-source helper with the proxy enabled, `profile_156714f52695b619`, and one endpoint on port 1080 created through the HTTP API.
+
+Tests:
+- On Windows, `go vet` (windows, linux, darwin) and `go test ./...` passed for both modules with Go 1.26.2 and 1.23.2: 478 controller and 1014 network-agent tests and subtests.
+- The shared journal lock tests passed 20 times in a row: `TestReservationAuthorityReadersShare`, `TestReservationAuthorityBusy` and the subprocess lock tests.
+- Windows has no C compiler here, so `-race` ran in WSL for both modules.
+- New: `TestStateFilesReplaceWhileRead`. Four readers load both state files the way each CONNECT does, while the test creates and deletes endpoints and saves the runtimes. It runs 3 s in `%TEMP%` unpaced and 3 s under the user config directory at about 100 saves a second. It allows no failed save or read, and no read that sees an empty state.
+  - Before the retries existed, it failed when the reader's delete sharing or the POSIX rename was reverted. With the retries, it no longer catches either.
+  - It creates, and then removes, a temporary directory under `%APPDATA%`.
+- New: `TestStateFileReplacedWhileOpen`. A reader holds its handle while a save replaces the file; the save must finish within 1 s, and the reader still reads the old content.
+- New: `TestStateFileRetriesWhileHeld`. Another handle holds the file without sharing, as a scanner can; a read and a replace succeed once it closes. A file that really is missing is still reported as missing.
+- New: `TestStateFileMissingBriefly`. The name appears 50 ms after a read starts, and the read returns the file; the test raises the missing-file budget so that it does not depend on scheduling.
+- Mutation checks, one at a time, each caught by exactly one of the three deterministic tests:
+  - the reader without delete sharing, and `os.Rename` instead of the POSIX rename: caught by `TestStateFileReplacedWhileOpen`;
+  - no read retry, and no replace retry: caught by `TestStateFileRetriesWhileHeld`;
+  - no missing-file retry: caught by `TestStateFileMissingBriefly`.
+- The four state-file tests passed 20 times in a row.
+
+Real run (the egress address is compared, never printed):
+- `wsl.exe` as a stream transport: random binary data went through unchanged, and closing stdin reached the guest as EOF. Unlike `limactl`, killing `wsl.exe` ended the guest process.
+- The helper started with the multi-source probe and the proxy, and committed its epoch witness.
+- `probe-egress-multi` succeeded at the first attempt (3.4 s); it was the first probe of the session.
+- `reserve-egress` held and prepared the address in 4.2 s. The monitor reported healthy throughout: 98 checks, all for this hold. The helper log had no fault or error line.
+- The traffic gate (`ct mark`, `meta skuid`) worked on nft 1.0.2. Through `serve-socks` on `127.0.0.1:1080`, requests to `https://api.ipify.org` returned the reserved address: 6 of 6, then 2 of 2.
+- Refused as expected: a wrong password (authentication); `1.1.1.1` and TCP port 53 (reply 2); a domain name (reply 8).
+- `serve-endpoint` served the same reservation for the API-created endpoint. The first request took 12 s, later ones about 1.3 s.
+- API churn: a CONNECT loop ran through `serve-endpoint` while the HTTP API created and deleted endpoints as fast as it answered.
+  - With the `412aa23` builds: 9 saves failed (`Access is denied` on the rename), and 3 CONNECTs were refused because `state.json` was being used by another process.
+  - With delete-sharing reads and the POSIX rename: no CONNECT failed, but saves under `%APPDATA%` still failed now and then.
+  - With the final build: in 60 s, 14414 saves with none failed, and 21 of 21 CONNECTs matched.
+- `-approve release-egress` with the helper up: released in 0.5 s with `generation_retired: true`. The list was empty and the monitor stopped.
+- After:
+  - The endpoint was deleted through the API. `state.json` was identical to before the run; `runtimes.json` differed only in the binding's `updated_at`.
+  - `disconnect` (`sealed`), then `delete-lab`; `egresslab-lab-recover` found nothing.
+  - No namespace, underlay table, probe or proxy process was left, and the helper stopped.
+  - Journal: 1772 bytes (one hold and its release).
+
+Found and fixed during the run:
+- State files on Windows (the pending check from the Codex review):
+  - Go's `os.ReadFile` opens a file without delete sharing, and `os.Rename` (`MoveFileEx`) refuses to replace a file that another process has open. A save during a CONNECT's read therefore failed with `Access is denied`, and a CONNECT during a save failed with a sharing violation.
+  - In a standalone reproduction with four readers, about 90% of saves failed; at a realistic rate, a few did. Delete sharing on the read side alone was not enough.
+  - Fix: readers now open with delete sharing. Saves rename through `SetFileInformationByHandle(FileRenameInfoEx)` with `POSIX_SEMANTICS`, which replaces the name even while readers hold the old file. Where that is unsupported, saves fall back to `os.Rename`.
+- Under `%APPDATA%`, where the real files live, a filesystem filter still refused some renames:
+  - When saves with new content came at about 250 to 300 a second, `SetFileInformationByHandle` answered `Access is denied`, sometimes for several seconds.
+  - Both files could still be opened for delete. The Restart Manager named no process holding either, except once `System` (PID 4) on the target. The likely filter is Defender, which runs behavior monitoring.
+  - It did not happen in `%TEMP%`, with unchanged content, or at about 130 saves a second or fewer.
+  - A read during a replace sometimes found no file at all, which `NewStore` and `LoadRuntimeState` would have taken for an empty state.
+  - Fix: a save retries such a refusal for up to 5 s. A read retries a sharing violation or a refusal for 250 ms, and a missing file for 25 ms.
+- A destination refused by policy was logged as `destination not allowed` followed by `invalid reservation release evidence`. It now has its own error (`ErrProxyDestinationNotAllowed`) and logs one line.
+
+Limitations:
+- The retries bound the filter's refusals; they do not remove them. At the unpaced rate, refusals longer than 5 s were observed: two consecutive saves each refused for their whole 3 s retry loop. A refusal that long still fails the save; the API answers an error and keeps the previous definition.
+- `-race` has not run on the Windows-only code (no C compiler on that machine).
+- The checks resolve names on the host: they prove the data plane, not DNS isolation.
+- Native Linux has not run the proxy or the endpoints.
+
+Application networking as a whole remained disabled.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
@@ -792,13 +856,13 @@ Ubuntu 22.04 (the WSL2 distribution) has no `whois` by default; Team Cymru serve
 
 If DNS returns several addresses, do not take the first one blindly. The provider does not promise a stable address. DNS at probe time, automatic replacement of the address and skipping certificate verification (`curl -k`) are not allowed. A host-side check reveals the host's own public IP to the provider; it is not a managed observation and never activates an egress lease. The helper reads the approved pin from `/etc/egresslab/multi-probe-pin` at startup (Step 29C.4b, see "Multi-source helper").
 
-## Pending Windows checks
+## Windows checks
 
-To run on a Windows machine; nothing below has been executed there.
+Both checks that were pending for Windows ran on 2026-11-26; see "Windows and WSL2 run (Step 35)".
 
-1. Shared journal read lock (Step 35): `go test -race ./internal/control/` in `services/controller`, in particular `TestReservationAuthorityReadersShare` (a shared `LockFileEx` beside another reader, refused to a writer), `TestReservationAuthorityBusy` and the subprocess lock tests. Only `go vet` and `go build` for `GOOS=windows` passed on macOS.
-2. Controller state files during `serve-endpoint` (Step 35, from the Codex review): every CONNECT reads `state.json` and `runtimes.json`, and Go opens files on Windows without delete sharing, so a save that renames over one of them at that moment can fail with a sharing violation; the API then answers an error and keeps the old definition. Check: while a listener serves CONNECTs in a loop, create and delete endpoints through the HTTP API. If saves fail, the fix belongs to the store's read path (open with `FILE_SHARE_DELETE`), which every lab command and the API share. It is not fixed yet.
+1. Shared journal read lock (Step 35): passed. The lock tests ran 20 times in a row, and `go test` passed for both modules with Go 1.26.2 and 1.23.2. `-race` needs cgo, which is missing on that Windows machine, so it ran in WSL.
+2. Controller state files during `serve-endpoint` (Step 35, from the Codex review): saves did fail, and so did some CONNECTs. This is fixed in the store's read and save paths, which every lab command and the API share: delete sharing, a POSIX rename, and bounded retries.
 
 ## Next Milestone
 
-The rest of Step 35 (no pause at monitor checks, DNS for domain names), on top of several streams per runtime verified on two Lima runtimes (Step 35), the endpoint-to-runtime integration verified on two Lima runtimes (Step 35), the SOCKS5 proxy runtime verified on Lima through the real tunnel (Step 34), the kernel-timed traffic gate verified in throwaway namespaces on Lima (Step 33), the continuous egress monitoring of prepared generations verified on Lima (Step 32), the reboot-bound reservation recovery verified on Lima through a real helper crash and guest reboot (Step 31E.3), the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting; in Step 31E.3 both reservations, 10 s after `connect-tunnel`, succeeded at the first attempt); since Step 32 a failed worker names a coded reason in the helper's error, but no failure has recurred since, so the cause is still unknown. WSL2 ran the single-source and multi-source paths on 2026-11-25; native Linux has not. See `docs/PRIVILEGED-HELPER.md`.
+The rest of Step 35 (no pause at monitor checks, DNS for domain names), on top of the proxy plane and an API-created endpoint verified on Windows through WSL2, with the fix for the Windows state files (Step 35), several streams per runtime verified on two Lima runtimes (Step 35), the endpoint-to-runtime integration verified on two Lima runtimes (Step 35), the SOCKS5 proxy runtime verified on Lima through the real tunnel (Step 34), the kernel-timed traffic gate verified in throwaway namespaces on Lima (Step 33), the continuous egress monitoring of prepared generations verified on Lima (Step 32), the reboot-bound reservation recovery verified on Lima through a real helper crash and guest reboot (Step 31E.3), the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting; in Step 31E.3 both reservations, 10 s after `connect-tunnel`, succeeded at the first attempt); since Step 32 a failed worker names a coded reason in the helper's error, but no failure has recurred since, so the cause is still unknown. WSL2 ran the single-source and multi-source paths on 2026-11-25 and the proxy plane on 2026-11-26 (whose first probe of the session succeeded); native Linux has not. See `docs/PRIVILEGED-HELPER.md`.

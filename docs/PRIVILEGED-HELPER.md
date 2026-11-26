@@ -2009,8 +2009,9 @@ runs in the foreground until interrupted and changes no global readiness.
   as the helper admits; up to eight more wait up to 10 s for a slot, the rest are refused. After the
   destination finished, an idle client is closed after 30 s.
 
-Limits of this prototype: traffic pauses for a few seconds at each monitor check; WSL2 and native
-Linux have not run it. Application networking as a whole stays disabled.
+Limits of this prototype: traffic pauses for a few seconds at each monitor check; native Linux has
+not run it (WSL2 did on 2026-11-26, see `docs/DEV-LINUX-VM.md`). Application networking as a whole
+stays disabled.
 
 ### Endpoint-to-runtime integration (Step 35)
 
@@ -2025,7 +2026,9 @@ later hold for the profile on the same helper (the binding is then unchanged), i
 (`reservation is not held`). Then the endpoint, the binding and the trust record are re-read, and
 the capability is sent only if they still agree (`endpoint binding changed` otherwise: another
 helper epoch, namespace, runtime or key). Both are refused until a new approved start. The HTTP API
-only stores endpoint definitions; its start still answers 409.
+only stores endpoint definitions; its start still answers 409. On Windows, these per-CONNECT reads
+and the API's saves of the same files no longer collide: readers share delete access, and saves
+rename with POSIX semantics, retrying transient refusals.
 
 Several streams per runtime (Step 35): the helper's streams share one keeper and its traffic windows
 (see Traffic windows and Preemption above), and `serve-socks` and `serve-endpoint` serve up to eight

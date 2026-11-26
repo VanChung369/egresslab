@@ -40,7 +40,7 @@ func TestMintProxyStream(t *testing.T) {
 		"DNS over TLS":      "93.184.216.34:853",
 	} {
 		if _, err := f.authority.MintProxyStream(hold.ID, netip.MustParseAddrPort(bad), f.signer, f.admission.runtime,
-			f.admission.helper, f.now); !errors.Is(err, ErrReservationReleaseInvalid) {
+			f.admission.helper, f.now); !errors.Is(err, ErrProxyDestinationNotAllowed) {
 			t.Fatalf("%s accepted: %v", name, err)
 		}
 	}

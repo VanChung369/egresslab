@@ -66,7 +66,7 @@ func NewStore(path string) (*Store, error) {
 		proxies:  []ProxyEndpoint{},
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := readStateFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
 	}
@@ -323,7 +323,7 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 
-	if err = os.Rename(tmp.Name(), s.path); err != nil {
+	if err = replaceStateFile(tmp.Name(), s.path); err != nil {
 		return err
 	}
 
