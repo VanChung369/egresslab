@@ -1338,11 +1338,39 @@ After: every hold released in 0.27 to 0.38 s with `generation_retired: true`, no
 
 Limitations:
 - A path that answers nothing is now cut when the health expires, up to 60 s after the last success, instead of at the first failed check (about 20 s). Nothing new crosses it meanwhile, since no window opens. Established streams may flow under the overlay until 14 s before the expiry. An address change is still caught by the first source that answers.
-- A check without an answer takes 10 to 13 s (the worker's 10 s limit), so about three in a row reach the expiry. Two in a row were seen twice in 11 minutes, once on each route.
+- A check without an answer takes 10 to 13 s (the worker's 10 s limit), so about three in a row reach the expiry. Two in a row were seen twice in 11 minutes, once on each route; three in a row ended a route once in the next run (see the next section).
 - Long checks still hold the lifecycle lock: a first stream or a release arriving then may get `LAB_BUSY`, and checks without an answer (about 10 s each) make long checks more frequent; one download was refused that way in the final run.
 - Near the end of a streak without answers, the overlay stops being eligible (it needs 14 s of health), so established streams can stall; one request took 16.6 s.
 - The clock check faulted B once; on Lima it treats any backward step of the wall clock during an attempt as a failure.
 - The released binaries (alpha.1, alpha.2) do not have this change; it needs a new release.
+
+### Release v0.3.0-alpha.2 rebuilt from `9daebee` on macOS and two Lima runtimes (Step 36)
+
+The user rebuilt the release from `9daebee` (this section's change) under the same version, v0.3.0-alpha.2. Two different artifacts now carry that name: the first from `063fe7f`, this one from `9daebee`. `RELEASE-INFO.txt` and the binaries' `vcs.revision` tell them apart, and checksums taken from the first no longer match. A new change should get a new version.
+
+Artifact, checked on 2026-11-27:
+- `shasum -a 256 -c SHA256SUMS` passed for all 8 archives. Owners and modes are as before, and no archive holds a key, a build-machine path or an egress address.
+- All 24 binaries embed Go 1.23.12, `vcs.revision=9daebee…` and `vcs.modified=false`.
+- A build on macOS from a clean clone of `9daebee` (Go 1.23.12, BSD tar) gave 24 of 24 binaries byte-identical to the official ones.
+- The docs in the archives are those of `9daebee`; the "Limitations:" heading is back.
+- The arm64 runtime went into both instances with the subshell under "Installing a release" (6 of 6 binaries match). The macOS controller read the existing authority.
+
+Real run, with the release binaries only:
+- `probe-egress-multi` on A with WireGuard's UDP port dropped: `EVIDENCE_UNAVAILABLE` after 11 s, and the lab stayed `tunnel_configured`. Once the drop was removed, the probe and the reservation passed at the first attempt; so did B's.
+- A 9-minute run on both routes (kept-alive series on A, downloads on B, name requests and `list-labs` every 15 s):
+  - B: 28 healthy checks and 6 without an answer from ident.me (once two in a row); no fault. Name requests 19 of 19 matched, `list-labs` always answered `tunnel_configured`, and five 110 s downloads kept their rate (about 17 MB each).
+  - A: 23 healthy checks and 7 without an answer from ident.me. The last three came in a row at 13:28:43, 13:28:57 and 13:29:10, with 32, 17 and 4 s of health left.
+  - The recheck after them ran into the health's expiry, and the lab was faulted at 13:29:14. The log reads `source cloudflare_trace: managed egress probe failed` with `context deadline exceeded`: the check's deadline is the health's expiry. This is the expiry cut, about 56 s after the last success.
+  - Until then, on A: 1293 of 1294 kept-alive requests matched (median 0.29 s, p95 0.77 s, maximum 8.0 s), and 18 of 18 name requests matched.
+- B with a download running, `wg0` taken down: faulted 2.5 s later, and a new request was refused.
+- A new hold on A, released while three downloads ran: 0.74 s, `generation_retired: true`; the lab ended `sealed`, and a new request was refused.
+- After: holds released, labs deleted, nothing for `egresslab-lab-recover`, helpers stopped, stages revoked. `state.json` and `reservation-authority.json` unchanged. Journal: 63964 to 68982 bytes. Both instances keep this runtime.
+
+Limitations:
+- Three checks in a row without an answer still end a route, since each takes 10 to 13 s and the health lasts 60 s. On that day ident.me's failures (all before TCP connected) came in bursts: three in a row once in 9 minutes on one route.
+  - A shorter connection timeout for the probe source would fit more rechecks into the health. So would a second source outside Cloudflare.
+  - Both are design decisions for later.
+- The expiry cut during a recheck is logged as the probe's context deadline, not as `monitor health expired`.
 
 ## Security Notes
 
