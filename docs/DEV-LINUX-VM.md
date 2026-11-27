@@ -1393,6 +1393,37 @@ Limitations:
 - A source that connects and then stays silent still takes up to 10 s per check.
 - The released binaries do not have this change; it needs a new release (a new version, such as v0.3.0-alpha.3).
 
+### Release v0.3.0-alpha.3 on macOS and two Lima runtimes (Step 36)
+
+The official artifact of `272917d` (the 4 s connect timeout), built by GitHub Actions and downloaded by the user, checked on 2026-11-27.
+
+Artifact:
+- `shasum -a 256 -c SHA256SUMS` passed for all 8 archives, and owners and modes are as before.
+- All 24 binaries embed Go 1.23.12, `vcs.revision=272917d…` and `vcs.modified=false`. The macOS arm64 binaries are ad-hoc signed by the linker.
+- No archive holds a key, a build-machine path or an egress address, and the docs are those of `272917d`.
+- A build on macOS from a clean clone of `272917d` (Go 1.23.12, BSD tar) gave 24 of 24 binaries byte-identical to the official ones.
+- The arm64 runtime went into both instances with the subshell under "Installing a release" (6 of 6 binaries match; helper `4f7faaea`, worker `e25ef9a6`). The macOS controller read the existing authority.
+
+Real run, with the release binaries only:
+- `probe-egress-multi` on A with WireGuard's UDP port dropped answered `EVIDENCE_UNAVAILABLE` after 4.5 s, and the lab stayed `tunnel_configured`. Both routes then probed and reserved at the first attempt.
+- A 10-minute run on both routes (kept-alive series on A, downloads on B, name requests and `list-labs` every 15 s):
+  - A: 30 healthy checks and 3 without an answer from ident.me, each followed by a success 5 to 11 s later; no fault.
+    - 1500 of 1500 kept-alive requests matched: median 0.29 s, p95 0.75 s, maximum 7.7 s; 18 took over 1 s.
+    - 22 of 22 name requests matched, and `list-labs` always answered `tunnel_configured`.
+  - B: 25 healthy checks and 4 without an answer, then a fault at 14:30:12.
+    - The reason was `source ident_me: managed egress probe failed: HTTPS_REQUEST_FAILED`: something came back through B's tunnel and was refused, so the check faulted, as designed. The worker reports only its fixed line, so what came back is not known.
+    - Until then: 19 of 19 name requests matched, and five 110 s downloads kept their rate.
+- ident.me at that time, from each instance's own network:
+  - with curl, 10 to 13 of 40 pinned requests failed, mostly before TCP connected, twice after TCP without TLS;
+  - the release worker, run 40 times on each instance as the probe user, got no answer 11 and 12 times (about 4 s each) and never reported `HTTPS probe failed`.
+- A, released while three downloads ran: 0.43 s, `generation_retired: true`; the lab ended `sealed`, and a new request was refused.
+- A new hold on B with a download running, `wg0` taken down: faulted 5.1 s later, and a new request was refused.
+- After: every hold released, labs deleted, nothing for `egresslab-lab-recover`, helpers stopped, stages revoked. `state.json` unchanged. Journal: 72326 to 77339 bytes. Both instances keep this runtime.
+
+Limitations:
+- A source that sends something wrong still faults the lab at once. Once in 10 minutes, on one route, ident.me's reply through the tunnel did. Telling an HTTP status apart from a TLS reply cut short would need more specific worker reasons; it is left as a decision.
+- ident.me was worse than earlier that day (about a quarter of requests failed). The no-answer path kept route A up throughout.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
