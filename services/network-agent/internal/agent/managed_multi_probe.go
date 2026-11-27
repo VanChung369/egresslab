@@ -248,10 +248,13 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 
 		var sample managedProbeSample
 
+		var noAnswer string
+
 		err := b.sealed.firewall.withMonitoredProbeWindowLocked(ctx, namespace, source.destination, overlay,
 			func(probeCtx context.Context) error {
 				body, err := config.run(probeCtx, namespace, source)
 				if errors.Is(err, ErrManagedProbeNoAnswer) {
+					noAnswer = managedProbeReasonOf(err)
 					return ErrManagedProbeNoAnswer
 				}
 
@@ -303,7 +306,8 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 
 			unanswered = true
 
-			return ManagedMultiProbeObservation{}, fmt.Errorf("source %s: %w", source.id, ErrManagedProbeSourceUnavailable)
+			return ManagedMultiProbeObservation{}, fmt.Errorf("source %s: %w (%s)", source.id,
+				ErrManagedProbeSourceUnavailable, noAnswer)
 		}
 
 		if err != nil {

@@ -98,14 +98,9 @@ func parseWorkerProbeRequest(args []string) (workerProbeRequest, error) {
 	return workerProbeRequest{sourceID: args[1], destination: destination}, nil
 }
 
-// probeFailure keeps a source that gave no answer apart from one that answered and was refused;
-// the helper maps these fixed lines to its codes.
+// probeFailure reports a source failure as its fixed line; the helper maps these lines to its codes.
 func probeFailure(err error) error {
-	if errors.Is(err, agent.ErrManagedProbeNoAnswer) {
-		return errors.New("HTTPS probe got no answer")
-	}
-
-	return errors.New("HTTPS probe failed")
+	return errors.New(agent.ManagedProbeFailureLine(err))
 }
 
 func run() error {

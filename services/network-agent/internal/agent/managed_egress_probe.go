@@ -19,8 +19,10 @@ var (
 	ErrManagedProbeFailed      = errors.New("managed egress probe failed")
 	ErrManagedHandshake        = errors.New("recent WireGuard handshake not verified")
 
-	// ErrManagedProbeNoAnswer: nothing came back from a source (no connection, TLS handshake or
-	// response in time, or a reset). A response that arrived and was refused is not one.
+	// ErrManagedProbeNoAnswer: a source gave no usable answer and no claim about the egress: nothing
+	// came back (no connection, TLS handshake or response in time, or a reset), or the verified host
+	// answered a service error (429, 5xx) or cut its reply short. Anything else that arrived and was
+	// refused is not one.
 	ErrManagedProbeNoAnswer = errors.New("probe source gave no answer")
 
 	// ErrManagedProbeSourceUnavailable: a source gave no answer, and afterwards its window was closed,

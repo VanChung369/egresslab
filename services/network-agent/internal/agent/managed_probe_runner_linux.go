@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -62,16 +61,18 @@ func (b *boundedProbeOutput) Write(data []byte) (int, error) {
 	return b.buf.Write(data)
 }
 
-const managedProbeNoAnswerReason = "HTTPS_NO_ANSWER"
-
 // managedProbeFailureReason maps the worker's fixed error lines to codes; its raw stderr never
 // reaches the helper log.
 func managedProbeFailureReason(stderr string) string {
-	switch strings.TrimSpace(stderr) {
-	case "HTTPS probe failed":
-		return "HTTPS_REQUEST_FAILED"
-	case "HTTPS probe got no answer":
-		return managedProbeNoAnswerReason
+	line := strings.TrimSpace(stderr)
+
+	for reason, known := range managedProbeReasons {
+		if line == known.line {
+			return reason
+		}
+	}
+
+	switch line {
 	case "probe must not run as root", "probe must have no supplementary groups", "unexpected probe privileges",
 		"incomplete probe privilege information":
 		return "WORKER_PRIVILEGE_CHECK_FAILED"
@@ -86,12 +87,7 @@ func managedProbeFailureReason(stderr string) string {
 
 // managedProbeWorkerError keeps a worker whose source gave no answer apart from one that failed.
 func managedProbeWorkerError(stderr string) error {
-	reason := managedProbeFailureReason(stderr)
-	if reason == managedProbeNoAnswerReason {
-		return fmt.Errorf("%w: %s: %w", ErrManagedProbeFailed, reason, ErrManagedProbeNoAnswer)
-	}
-
-	return fmt.Errorf("%w: %s", ErrManagedProbeFailed, reason)
+	return probeSourceFailure(managedProbeFailureReason(stderr), ErrManagedProbeFailed)
 }
 
 type managedProbeProcessRunner func(ctx context.Context, namespace string, workerArgs ...string) ([]byte, error)

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"strings"
 	"sync/atomic"
@@ -179,12 +180,82 @@ func fetchManagedProbeBody(ctx context.Context, source managedProbeHTTPSource) (
 	return readManagedProbeHTTPS(ctx, client, source.url())
 }
 
+// managedProbeReason is how the worker reports one class of source failure: its fixed line, and
+// whether the failure says nothing about the egress (it then renews nothing and faults nothing).
+type managedProbeReason struct {
+	line     string
+	noAnswer bool
+}
+
+// managedProbeReasons are the worker's failure classes; the helper maps the lines back. Only a source
+// that sent nothing, or the verified host answering a service error or cutting its reply short, has
+// no answer; anything unverified or refused faults.
+var managedProbeReasons = map[string]managedProbeReason{
+	"HTTPS_NO_ANSWER":          {line: "HTTPS probe got no answer", noAnswer: true},
+	"HTTPS_SOURCE_UNAVAILABLE": {line: "HTTPS probe source unavailable", noAnswer: true},
+	"HTTPS_REPLY_INCOMPLETE":   {line: "HTTPS probe reply incomplete", noAnswer: true},
+	"HTTPS_TLS_FAILED":         {line: "HTTPS probe TLS failed"},
+	"HTTPS_UNEXPECTED_STATUS":  {line: "HTTPS probe unexpected status"},
+	"HTTPS_INVALID_RESPONSE":   {line: "HTTPS probe invalid response"},
+	"HTTPS_REQUEST_FAILED":     {line: "HTTPS probe failed"},
+}
+
+// managedProbeSourceFailure is one source failure with its reason.
+type managedProbeSourceFailure struct {
+	reason string
+	err    error
+}
+
+func (f *managedProbeSourceFailure) Error() string { return f.err.Error() + ": " + f.reason }
+
+func (f *managedProbeSourceFailure) Unwrap() []error {
+	if managedProbeReasons[f.reason].noAnswer {
+		return []error{ErrManagedProbeNoAnswer, f.err}
+	}
+
+	return []error{f.err}
+}
+
+func probeSourceFailure(reason string, err error) error {
+	return &managedProbeSourceFailure{reason: reason, err: err}
+}
+
+// managedProbeReasonOf names a source failure's reason; an untyped one has no answer or failed.
+func managedProbeReasonOf(err error) string {
+	var failure *managedProbeSourceFailure
+	if errors.As(err, &failure) {
+		if _, ok := managedProbeReasons[failure.reason]; ok {
+			return failure.reason
+		}
+	}
+
+	if errors.Is(err, ErrManagedProbeNoAnswer) {
+		return "HTTPS_NO_ANSWER"
+	}
+
+	return "HTTPS_REQUEST_FAILED"
+}
+
+// ManagedProbeFailureLine is the worker's fixed line for a source failure; no source text reaches it.
+func ManagedProbeFailureLine(err error) string {
+	return managedProbeReasons[managedProbeReasonOf(err)].line
+}
+
 // readManagedProbeHTTPS requires HTTP 200, no content encoding and a body of 1 to 4096 bytes.
 func readManagedProbeHTTPS(ctx context.Context, client *http.Client, rawURL string) ([]byte, error) {
-	// Once the source sent a byte, at any layer, an interrupted reply is an answer, not silence.
-	var received atomic.Bool
+	// Once the source sent a byte, at any layer, its reply counts; only one from the verified host may
+	// fail without saying anything about the egress.
+	var trace probeConnTrace
+	var verified atomic.Bool
 
-	ctx = context.WithValue(ctx, probeReceivedKey{}, &received)
+	ctx = context.WithValue(ctx, probeReceivedKey{}, &trace)
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			if err == nil {
+				verified.Store(true)
+			}
+		},
+	})
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -195,31 +266,59 @@ func readManagedProbeHTTPS(ctx context.Context, client *http.Client, rawURL stri
 	request.Header.Set("Accept-Encoding", "identity")
 	request.Header.Set("Cache-Control", "no-cache, no-store")
 
+	// A verified reply is cut short when it ends in silence, a reset, or the source closing while more
+	// was still due; a complete line that does not parse is no interruption.
+	cut := func(err error) bool { return probeNoAnswer(err) || trace.closed.Load() }
+
 	response, err := client.Do(request)
 	if err != nil {
-		if !received.Load() && probeNoAnswer(err) {
-			return nil, fmt.Errorf("%w: %w", ErrManagedProbeNoAnswer, err)
+		switch {
+		case !trace.received.Load() && probeNoAnswer(err):
+			return nil, probeSourceFailure("HTTPS_NO_ANSWER", err)
+		case tlsAlertReceived(err):
+			return nil, probeSourceFailure("HTTPS_TLS_FAILED", err)
+		case verified.Load() && cut(err):
+			return nil, probeSourceFailure("HTTPS_REPLY_INCOMPLETE", err)
+		case verified.Load():
+			return nil, probeSourceFailure("HTTPS_INVALID_RESPONSE", err)
+		case trace.received.Load():
+			return nil, probeSourceFailure("HTTPS_TLS_FAILED", err)
 		}
 
-		return nil, err
+		return nil, probeSourceFailure("HTTPS_REQUEST_FAILED", err)
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("probe returned HTTP %d", response.StatusCode)
+		err := fmt.Errorf("probe returned HTTP %d", response.StatusCode)
+
+		// A busy or failing service is no claim about the address.
+		if verified.Load() && (response.StatusCode == http.StatusTooManyRequests ||
+			response.StatusCode >= 500 && response.StatusCode <= 599) {
+			return nil, probeSourceFailure("HTTPS_SOURCE_UNAVAILABLE", err)
+		}
+
+		return nil, probeSourceFailure("HTTPS_UNEXPECTED_STATUS", err)
 	}
 
 	if !identityEncodingOnly(response.Header.Values("Content-Encoding")) {
-		return nil, errors.New("unexpected probe response encoding")
+		return nil, probeSourceFailure("HTTPS_INVALID_RESPONSE", errors.New("unexpected probe response encoding"))
 	}
 
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxEgressProbeBytes+1))
 	if err != nil {
-		return nil, err
+		switch {
+		case tlsAlertReceived(err):
+			return nil, probeSourceFailure("HTTPS_TLS_FAILED", err)
+		case verified.Load() && cut(err):
+			return nil, probeSourceFailure("HTTPS_REPLY_INCOMPLETE", err)
+		}
+
+		return nil, probeSourceFailure("HTTPS_INVALID_RESPONSE", err)
 	}
 
 	if len(body) == 0 || len(body) > maxEgressProbeBytes {
-		return nil, ErrInvalidObservation
+		return nil, probeSourceFailure("HTTPS_INVALID_RESPONSE", ErrInvalidObservation)
 	}
 
 	return body, nil
@@ -288,9 +387,23 @@ func probeNoAnswer(err error) bool {
 		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
+// tlsAlertReceived reports an alert the source sent, which TLS 1.3 may deliver after the handshake.
+func tlsAlertReceived(err error) bool {
+	var opErr *net.OpError
+
+	return errors.As(err, &opErr) && opErr.Op == "remote error"
+}
+
 type probeReceivedKey struct{}
 
-// recordingProbeDial marks, in the request's context, that the source sent at least one byte.
+// probeConnTrace records, below TLS, whether the source sent a byte and whether it closed or reset
+// the connection.
+type probeConnTrace struct {
+	received atomic.Bool
+	closed   atomic.Bool
+}
+
+// recordingProbeDial traces the connection in the request's context.
 func recordingProbeDial(dial probeDialFunc) probeDialFunc {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		conn, err := dial(ctx, network, address)
@@ -298,8 +411,8 @@ func recordingProbeDial(dial probeDialFunc) probeDialFunc {
 			return nil, err
 		}
 
-		if received, ok := ctx.Value(probeReceivedKey{}).(*atomic.Bool); ok {
-			return receivingConn{Conn: conn, received: received}, nil
+		if trace, ok := ctx.Value(probeReceivedKey{}).(*probeConnTrace); ok {
+			return receivingConn{Conn: conn, trace: trace}, nil
 		}
 
 		return conn, nil
@@ -308,13 +421,17 @@ func recordingProbeDial(dial probeDialFunc) probeDialFunc {
 
 type receivingConn struct {
 	net.Conn
-	received *atomic.Bool
+	trace *probeConnTrace
 }
 
 func (c receivingConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if n > 0 {
-		c.received.Store(true)
+		c.trace.received.Store(true)
+	}
+
+	if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) {
+		c.trace.closed.Store(true)
 	}
 
 	return n, err
