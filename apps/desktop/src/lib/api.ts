@@ -1,3 +1,5 @@
+import { invoke, isTauri } from '@tauri-apps/api/core';
+
 export type RoutingProfile = {
   id: string;
   name: string;
@@ -39,7 +41,41 @@ export type Health = {
 
 const ROOT = (import.meta.env.VITE_EGRESSLAB_API_URL || 'http://127.0.0.1:8787').replace(/\/$/, '');
 
+type DesktopResponse<T> = {
+  version: number;
+  status: number;
+  body: T;
+};
+
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  // The desktop app talks to its controller only through the private IPC; it never falls back to HTTP.
+  if (isTauri()) {
+    let response: DesktopResponse<T | { error?: { code?: string; message?: string } }>;
+    try {
+      response = await invoke('controller_request', {
+        request: {
+          method: init.method ?? 'GET',
+          path,
+          body: init.body ? JSON.parse(String(init.body)) : null
+        }
+      });
+    } catch (error) {
+      // The supervisor rejects with its own message as a string.
+      throw new Error(typeof error === 'string' ? error : 'Desktop controller unavailable');
+    }
+
+    if (response.status < 200 || response.status >= 300) {
+      const body = response.body as { error?: { message?: string } };
+      throw new Error(body?.error?.message ?? `Request failed (${response.status})`);
+    }
+
+    return response.body as T;
+  }
+
+  if (!import.meta.env.DEV) {
+    throw new Error('Desktop runtime is required');
+  }
+
   let response: Response;
   try {
     response = await fetch(`${ROOT}/api/v1${path}`, {
@@ -88,24 +124,70 @@ export type DiscoveredTunnel = {
   source: string;
 };
 
-export const getAgents = () => api<{ items: AgentStatus[] }>('/agents');
-export const getTunnels = () => api<{ items: DiscoveredTunnel[] }>('/tunnels');
-export const getProfiles = () => api<{ items: RoutingProfile[] }>('/profiles');
-export const getEndpoints = () => api<{ items: ProxyEndpoint[] }>('/endpoints');
+// A list read page by page and this window's writes take turns, so no write shifts a page under a read.
+let turn: Promise<unknown> = Promise.resolve();
+
+function inTurn<T>(run: () => Promise<T>): Promise<T> {
+  const result = turn.then(run);
+  turn = result.catch(() => undefined);
+  return result;
+}
+
+// Lists are read page by page, so that no single reply outgrows the desktop IPC frame.
+function listAll<T>(path: string): Promise<{ items: T[] }> {
+  return inTurn(async () => {
+    const items: T[] = [];
+    let offset = 0;
+
+    for (;;) {
+      const page = await api<{ items: T[]; next_offset?: number }>(
+        `${path}?limit=200&offset=${offset}`
+      );
+      items.push(...page.items);
+
+      if (page.next_offset === undefined || page.next_offset <= offset) {
+        return { items };
+      }
+
+      offset = page.next_offset;
+    }
+  });
+}
+
+// Agents and tunnels asked for together share one snapshot, and one round of agent calls.
+let discovery: Promise<{ agents: AgentStatus[]; tunnels: DiscoveredTunnel[] }> | undefined;
+
+function getDiscovery() {
+  discovery ??= api<{ agents: AgentStatus[]; tunnels: DiscoveredTunnel[] }>('/discovery').finally(
+    () => {
+      discovery = undefined;
+    }
+  );
+
+  return discovery;
+}
+
+export const getAgents = () => getDiscovery().then((d) => ({ items: d.agents }));
+export const getTunnels = () => getDiscovery().then((d) => ({ items: d.tunnels }));
+export const getProfiles = () => listAll<RoutingProfile>('/profiles');
+export const getEndpoints = () => listAll<ProxyEndpoint>('/endpoints');
 export const getOverview = () => api<Overview>('/overview');
 export const getHealth = () => api<Health>('/health');
 export const createProfile = (name: string) =>
-  api<RoutingProfile>('/profiles', {
-    method: 'POST',
-    body: JSON.stringify({ name })
-  });
+  inTurn(() =>
+    api<RoutingProfile>('/profiles', {
+      method: 'POST',
+      body: JSON.stringify({ name })
+    })
+  );
 export const createEndpoint = (input: {
   name: string;
   protocol: string;
   port: number;
   profile_id: string;
-}) => api<ProxyEndpoint>('/endpoints', { method: 'POST', body: JSON.stringify(input) });
+}) =>
+  inTurn(() => api<ProxyEndpoint>('/endpoints', { method: 'POST', body: JSON.stringify(input) }));
 export const deleteProfile = (id: string) =>
-  api<void>(`/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  inTurn(() => api<void>(`/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }));
 export const deleteEndpoint = (id: string) =>
-  api<void>(`/endpoints/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  inTurn(() => api<void>(`/endpoints/${encodeURIComponent(id)}`, { method: 'DELETE' }));

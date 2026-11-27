@@ -7,7 +7,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -77,6 +79,37 @@ func errorFor(w http.ResponseWriter, err error) {
 	}
 }
 
+const maxPageLimit = 500
+
+// respondPage lists everything without a query, or one page for "limit" and "offset"; a page that
+// is not the last names the next offset.
+func respondPage[T any](w http.ResponseWriter, r *http.Request, items []T) {
+	if r.URL.RawQuery == "" {
+		respond(w, 200, map[string]any{"items": items})
+		return
+	}
+
+	query, queryErr := url.ParseQuery(r.URL.RawQuery)
+	limit, limitErr := strconv.Atoi(query.Get("limit"))
+	offset, offsetErr := strconv.Atoi(query.Get("offset"))
+
+	if queryErr != nil || len(query) != 2 || len(query["limit"]) != 1 || len(query["offset"]) != 1 || limitErr != nil ||
+		offsetErr != nil || limit < 1 || limit > maxPageLimit || offset < 0 {
+		fail(w, http.StatusBadRequest, "BAD_PAGE", fmt.Sprintf("Use limit (1-%d) and offset (0 or more)", maxPageLimit))
+		return
+	}
+
+	start := min(offset, len(items))
+	end := min(start+limit, len(items))
+
+	page := map[string]any{"items": items[start:end]}
+	if end < len(items) {
+		page["next_offset"] = end
+	}
+
+	respond(w, 200, page)
+}
+
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -108,7 +141,7 @@ func (a *API) Handler() http.Handler {
 	})
 
 	mux.HandleFunc("GET /api/v1/profiles", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, 200, map[string]any{"items": a.Store.Profiles()})
+		respondPage(w, r, a.Store.Profiles())
 	})
 
 	mux.HandleFunc("POST /api/v1/profiles", func(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +172,7 @@ func (a *API) Handler() http.Handler {
 	})
 
 	mux.HandleFunc("GET /api/v1/endpoints", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, 200, map[string]any{"items": a.Store.Endpoints()})
+		respondPage(w, r, a.Store.Endpoints())
 	})
 
 	mux.HandleFunc("POST /api/v1/endpoints", func(w http.ResponseWriter, r *http.Request) {
@@ -190,6 +223,17 @@ func (a *API) Handler() http.Handler {
 		}
 
 		respond(w, 200, map[string]any{"items": discoveredTunnels(a.Agent.Snapshot(r.Context()))})
+	})
+
+	// Agents and tunnels from one snapshot, so a client needs only one round of agent calls.
+	mux.HandleFunc("GET /api/v1/discovery", func(w http.ResponseWriter, r *http.Request) {
+		if a.Agent == nil {
+			respond(w, 200, map[string]any{"agents": []AgentStatus{}, "tunnels": []DiscoveredTunnel{}})
+			return
+		}
+
+		snapshot := a.Agent.Snapshot(r.Context())
+		respond(w, 200, map[string]any{"agents": []AgentStatus{snapshot}, "tunnels": discoveredTunnels(snapshot)})
 	})
 
 	mux.HandleFunc("GET /api/v1/agents", func(w http.ResponseWriter, r *http.Request) {

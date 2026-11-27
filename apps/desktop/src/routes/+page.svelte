@@ -318,10 +318,9 @@
               <span class="empty-icon">↯</span>
               <h2>Local controller is offline</h2>
               <p>
-                Start the Go controller to read and manage real configuration data. The UI does not
-                substitute mock network status.
+                The local controller did not respond. Check that it can start, or restart EgressLab.
+                The UI does not substitute mock network status.
               </p>
-              <code>cd services/controller &amp;&amp; go run ./cmd/egresslab-controller</code>
               <button type="button" class="btn primary" on:click={() => void refresh()}
                 >Retry connection</button
               >

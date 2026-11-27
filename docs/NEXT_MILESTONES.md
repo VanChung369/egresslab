@@ -32,7 +32,7 @@ Delivered as v0.3.0-alpha.1, the Network Engine MVP (Step 36): see `docs/DEV-LIN
 
 ## 0.4 — Desktop integration
 
-- Package controller securely as sidecar or IPC service
+- [x] Package controller securely as sidecar or IPC service (Step 37: Rust supervisor, private stdin/stdout IPC, writer lock; see `docs/ARCHITECTURE.md`)
 - Handle app/window lifecycle and system tray
 - Add diagnostic workflow and runtime metrics
 - Implement accessibility and keyboard shortcuts

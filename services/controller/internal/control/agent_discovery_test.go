@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -14,7 +15,19 @@ import (
 func discoveryAgent(t *testing.T, routes map[string]string) *AgentClient {
 	t.Helper()
 
+	client, _ := countingDiscoveryAgent(t, routes)
+
+	return client
+}
+
+func countingDiscoveryAgent(t *testing.T, routes map[string]string) (*AgentClient, *atomic.Int64) {
+	t.Helper()
+
+	var calls atomic.Int64
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+
 		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer "+testAgentToken() {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -40,7 +53,7 @@ func discoveryAgent(t *testing.T, routes map[string]string) *AgentClient {
 		t.Fatal(err)
 	}
 
-	return client
+	return client, &calls
 }
 
 func fullDiscoveryRoutes() map[string]string {
@@ -139,5 +152,44 @@ func TestTunnelsAPIListsDiscoveredWireGuardOnly(t *testing.T) {
 
 	if strings.TrimSpace(recorder.Body.String()) != `{"items":[]}` {
 		t.Fatalf("unexpected response without agent: %s", recorder.Body.String())
+	}
+}
+
+func TestDiscoveryAPIUsesOneSnapshot(t *testing.T) {
+	client, calls := countingDiscoveryAgent(t, fullDiscoveryRoutes())
+	handler := (&API{Store: newTestStore(t), Started: time.Now(), Agent: client}).Handler()
+
+	get := func(path string) []byte {
+		request := httptest.NewRequest(http.MethodGet, "/api/v1"+path, nil)
+		request.Host = "127.0.0.1:8787"
+
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, recorder.Code, recorder.Body.String())
+		}
+
+		return recorder.Body.Bytes()
+	}
+
+	get("/agents")
+	perSnapshot := calls.Swap(0)
+
+	var discovery struct {
+		Agents  []AgentStatus      `json:"agents"`
+		Tunnels []DiscoveredTunnel `json:"tunnels"`
+	}
+
+	if err := json.Unmarshal(get("/discovery"), &discovery); err != nil {
+		t.Fatal(err)
+	}
+
+	if perSnapshot == 0 || calls.Load() != perSnapshot {
+		t.Fatalf("discovery made %d agent calls, one snapshot makes %d", calls.Load(), perSnapshot)
+	}
+
+	if len(discovery.Agents) != 1 || len(discovery.Tunnels) != 1 || discovery.Tunnels[0].Name != "wg-office" {
+		t.Fatalf("unexpected discovery: %+v", discovery)
 	}
 }

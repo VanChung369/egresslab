@@ -61,6 +61,8 @@ The subshell starts from an empty folder and stops at the first failure with a n
 
 **4. Provision only what is new.** An environment that is already provisioned keeps its signing key, vault, trust record and reservation authority; never create them again. A new environment follows the sections below: the helper, `trust-runtime`, the vault stage and `init-reservations`.
 
+**Controllers.** Since Step 37 the HTTP controller and the desktop app's controller take a writer lock on their data directory. Stop a controller from an earlier release before starting a new one: the old one takes no lock.
+
 **Versions.** `RELEASE-INFO.txt` names the release version and commit. The version that `egresslab-controller` reports (0.1.0, in its startup log and health response) is its control API version, which a release does not change.
 
 ## Prerequisites
@@ -1424,6 +1426,96 @@ Limitations:
 - A source that sends something wrong still faults the lab at once. Once in 10 minutes, on one route, ident.me's reply through the tunnel did. Telling an HTTP status apart from a TLS reply cut short would need more specific worker reasons; it is left as a decision.
 - ident.me was worse than earlier that day (about a quarter of requests failed). The no-answer path kept route A up throughout.
 
+### Desktop supervisor and private IPC on macOS (Step 37)
+
+Environment: macOS 15.3.2 (arm64), Go 1.25.1 and 1.23.12, Rust 1.92.0, Node 24, Tauri CLI 2.12.6, `@tauri-apps/api` 2.12.5. Every run used a scratch `EGRESSLAB_DATA_DIR`; the real `state.json` and `runtimes.json` were unchanged afterwards.
+
+Tests:
+- Go: `TestDesktopIPC`, `TestDesktopIPCDelete`, `TestDesktopIPCDeniedRoutes`, `TestDesktopIPCEndsOnMalformedRequest`, `TestControllerWriterLock`.
+  - Denied routes: start, a lowercase method, a query string, the `/api/v1` prefix, an empty path, PUT and PATCH, a bad or traversing ID, a trailing slash, the wrong kind of ID, and a request line as the method.
+  - Malformed requests: not JSON, an unknown field, trailing data, another version, an oversized line.
+  - Every reply is checked to be exactly one line.
+  - `go vet` passed for three systems, and `go test -race` (Go 1.25.1) and `go test` (Go 1.23.12) passed for the module.
+- Rust (`cargo test`, against the real sidecar and a scratch directory):
+  - create, list, restart, read back and delete a profile;
+  - `start` refused with 403;
+  - a second writer refused;
+  - an oversized request refused;
+  - no controller left after the session ends.
+  - `cargo fmt` and `cargo clippy` are clean.
+- Frontend: `svelte-check` reports 0 errors (the two accessibility warnings predate this step), and Prettier is clean.
+- Mutation checks:
+  - opening the allowlist, accepting unknown fields, or not mapping the busy lock failed a Go test;
+  - removing the writer lock from `main.go` failed `refuses_a_second_writer`.
+
+`yarn tauri dev` with a scratch data directory:
+- The webview's first requests started the controller (`target/debug/egresslab-controller -desktop`) as the app's child. Its copy matches `binaries/` by hash.
+- Nothing listened on 8787, and the controller had no socket.
+- A second controller on the same directory, in desktop or HTTP mode, exited with "another EgressLab controller is using this data directory".
+- With the app terminated (SIGTERM) or killed (SIGKILL), the controller exited 0.5 s later on EOF. No controller, app or Vite process was left.
+
+Not checked here:
+- The UI itself (Overview, creating and deleting profiles and endpoints in the window) and a normal quit (Cmd+Q, the `RunEvent::Exit` path). These need someone at the window.
+- Windows (see "Windows checks").
+
+Notes:
+- Codex's review found five issues. Four are fixed; the fifth is left as a decision.
+  - A list over 1 MiB ended the controller without a reply, so the UI could never load. Now such a reply is a `500 IPC_REPLY_TOO_LARGE` error and the session goes on (`TestDesktopIPCOversizedReply`). Pagination is left for later.
+  - The sidecar was built for the host even when Tauri targets another architecture. Now it follows `TAURI_ENV_TARGET_TRIPLE`; an x86_64 build from this arm64 Mac produced an x86_64 Mach-O.
+  - Quitting during a slow request waited up to 15 s for the session lock. Now shutdown kills the controller through a handle kept outside that lock (`shutdown_does_not_wait_for_a_request`, which fails with the old shutdown).
+  - A rejected `invoke` reached the UI as a string, and the page showed a generic message. It is now an `Error` carrying the supervisor's message.
+  - Left as a decision: in `yarn tauri dev`, a process that already holds port 5173 would serve the page that gets the desktop IPC. This is a development-mode risk from the guide's configuration; checking that the port is free before `tauri dev` would narrow it.
+- Codex's second review repeated the two open points (port 5173 in development mode, pagination). It also found five more, all fixed:
+  - A shutdown that began while a controller was starting could miss it and wait for the request's timeout. The new controller is now registered under the lock shutdown takes, and the shutdown flag is checked again there before any work is sent (`shutdown_during_start_sends_nothing`).
+  - The 15 s deadline started only when a request got the session. It now starts when the request is made, and a request whose time ran out while it waited is refused without being sent (`expired_requests_are_not_sent`).
+  - A universal macOS build stopped in the sidecar hook. Now both architectures are built and combined with `lipo`, and the result holds x86_64 and arm64.
+  - The bundle advertised Tauri's default macOS minimum. The sidecar built with Go 1.25 needs macOS 12.0 (its `LC_BUILD_VERSION`), and that is now the bundle's minimum.
+  - The Rust tests picked any sidecar in `binaries/`. They now take the one for the target they are built for; `build.rs` exports the triple.
+  - Removing the first two fixes failed their tests. Seven Rust tests now pass.
+- Codex's third review repeated the two open points. Two more issues are fixed; two minor ones are left for later. Codex did not review this last round.
+  - Fixed: a universal build left only the combined sidecar, while Tauri's per-architecture Rust builds each need their own. Now all three are built (arm64, x86_64, universal).
+  - Fixed: the time left was measured before a new controller started, so a request could still be sent after its deadline. It is now measured again after the start (`expired_after_start_is_not_sent`, which fails without it).
+  - Left for later: with an agent token and a slow agent, `/agents` and `/tunnels` each make the same upstream calls and now run one after the other, so the second can run out of time.
+  - Left for later: when another controller holds the data directory, the desktop sees only a pipe error, not the reason the sidecar logged.
+  - Eight Rust tests now pass.
+- After the fixes, the app was started again with a scratch directory:
+  - the controller was the app's child, nothing listened on 8787, and the controller had no socket;
+  - it exited 0.5 s after the app ended, and nothing was left;
+  - the real files were unchanged.
+- `cargo` created `src-tauri/Cargo.lock` and `src-tauri/gen/` (schemas). `gen/` is now ignored; `Cargo.lock` is for the app and is left to commit.
+
+Follow-up on 2026-11-27, for the open points above:
+- **Pagination.** `GET` profiles and endpoints take `?limit=N&offset=M` and answer `next_offset` while more follow; the desktop reads pages of 200. Desktop IPC passes this one query form, and only on those two lists. `TestDesktopIPCListPages` covers pages and an offset past the end; `TestListPageRefusals` covers a zero or too-large limit, a negative offset, a missing, repeated or extra parameter, and a non-number.
+- **One discovery request.** `GET /discovery` answers agents and tunnels from one snapshot, and the UI's two lists share that one request, so a slow agent is asked once per refresh.
+- **Lock reason in the UI.** A controller refused by the writer lock exits with status 3. The supervisor waits up to 0.5 s for the exit status after a failed request and, on 3, answers "Another EgressLab controller is using this data directory. Stop it, then retry." (`reports_a_controller_already_running`, against the real sidecar; nine Rust tests pass).
+- **Dev port.** `yarn tauri:dev` first checks that nothing accepts connections on 127.0.0.1:5173 and stops if something does; Vite runs with `--strictPort`. Checked both ways: with a listener on the port it stopped, and on a free port the app started.
+- **CSP.** `http://127.0.0.1:8787` is removed; the window allows only Tauri's IPC origins and the dev server.
+- Checks:
+  - Go: `go test -race` (Go 1.25.1) and `go test` (Go 1.23.12) passed, and `go vet` passed for three systems.
+  - Rust: `cargo fmt --check` and `cargo clippy -- -D warnings` are clean.
+  - Frontend: Prettier is clean, and `svelte-check` reports 0 errors and the same two warnings.
+- Mutation checks, each failed a test:
+  - a `next_offset` on the last page;
+  - a page one item too long;
+  - accepting a repeated `limit` or one over 500;
+  - dropping `/discovery` from the allowlist;
+  - allowing a page query on any list;
+  - another exit status in the supervisor.
+- With a controller holding a scratch directory, `yarn tauri:dev` on that directory started four controllers for the first refresh, and each exited with the lock message. The window itself could not be captured from this terminal (no screen-recording permission), so the banner is for someone at the window to confirm. Afterwards no controller, app or Vite process was left.
+- Codex's fourth review (of this follow-up; it changed nothing, the tree hash was the same before and after) found four issues. Three are fixed; Codex did not review the fixes.
+  - A malformed query (`%zz`, `&`, a malformed extra pair, `;`) was dropped by Go's parser, so it listed everything or passed as a valid page. The raw query is now parsed strictly and refused with `BAD_PAGE` (added to `TestListPageRefusals`; going back to the lenient parser fails it).
+  - With more than 200 items, a delete from the window could land between two pages of a refresh, which then kept the deleted item and dropped a valid one. The window's writes and paged reads now take turns. The real `api.ts` was bundled with a fake IPC of 250 profiles, and a delete was sent between pages. With the fix the read was a whole snapshot from before the delete; with the delete's turn removed, it kept `p0` and dropped `p200`.
+  - The pipe worker did not know the deadline, so a request delayed in the hand-off could still be written after it expired. The worker now refuses an expired request and closes the pipe (`worker_does_not_send_an_expired_request`; without the check the controller received the request and the test failed 3 of 3 times). Ten Rust tests pass.
+  - Left as a decision: development mode still trusts whatever serves port 5173. The preflight narrows this, but a process can take the port while the sidecar builds, and plain `yarn tauri dev` skips the check. A process of the same user can already write the data directory, so the risk is from another local user. A full fix would tie the page to this launch, or load bundled assets in development.
+- Also added after the review, since nothing tested the single snapshot: `TestDiscoveryAPIUsesOneSnapshot` counts the agent's calls. `/discovery` makes as many as one `/agents` (4), and a second snapshot in the handler fails it (8). The real `api.ts`, bundled with a fake IPC, sent one `/discovery` for `getAgents()` and `getTunnels()` together, and two without the shared promise.
+- After these fixes, `yarn tauri:dev` ran on a fresh scratch directory:
+  - the controller was the app's child and kept its PID for 20 s;
+  - nothing listened on 8787, and the controller had no socket;
+  - after the app got SIGTERM, the controller was gone within 250 ms, and no app, controller or Vite process was left;
+  - the real `state.json` and `runtimes.json` matched their hashes from before the run.
+- The sidecar answered the UI's exact requests (`/profiles?limit=200&offset=0`, the same for endpoints, and `/discovery`) with 200.
+- The two harness checks of `api.ts` were run once by hand; the desktop app has no frontend test suite to keep them in.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
@@ -1449,6 +1541,12 @@ Ubuntu 22.04 (the WSL2 distribution) has no `whois` by default; Team Cymru serve
 If DNS returns several addresses, do not take the first one blindly. The provider does not promise a stable address: on 2026-11-27, `4.ident.me` had moved, the old pin no longer answered, and every multi-source probe faulted its lab until the pin was provisioned again (see "Release binaries on macOS and two Lima runtimes (Step 36)"). DNS at probe time, automatic replacement of the address and skipping certificate verification (`curl -k`) are not allowed. A host-side check reveals the host's own public IP to the provider; it is not a managed observation and never activates an egress lease. The helper reads the approved pin from `/etc/egresslab/multi-probe-pin` at startup (Step 29C.4b, see "Multi-source helper").
 
 ## Windows checks
+
+Pending (Step 37): run `yarn tauri:dev` on Windows with a scratch `EGRESSLAB_DATA_DIR`, and check five things:
+- the sidecar starts without a console window and answers;
+- a second controller is refused through `LockFileEx`, and with a controller already holding the directory, the window shows "Another EgressLab controller is using this data directory";
+- nothing listens on 8787;
+- no controller is left after the app exits normally and after the app process is killed.
 
 Both checks that were pending for Windows ran on 2026-11-26; see "Windows and WSL2 run (Step 35)".
 

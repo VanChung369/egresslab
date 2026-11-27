@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"log"
 	"net"
@@ -14,6 +15,7 @@ import (
 
 func main() {
 	address := flag.String("listen", "127.0.0.1:8787", "Loopback HTTP control API address")
+	desktop := flag.Bool("desktop", false, "Serve private desktop IPC over stdin/stdout")
 	flag.Parse()
 
 	host, _, err := net.SplitHostPort(*address)
@@ -30,6 +32,18 @@ func main() {
 
 		root = filepath.Join(config, "EgressLab")
 	}
+
+	storeLock, err := control.LockControllerStore(root)
+	if errors.Is(err, control.ErrControllerRunning) {
+		// The desktop supervisor reads this exit status to say why the controller stopped.
+		log.Print("Controller store unavailable: ", err)
+		os.Exit(control.ExitControllerRunning)
+	}
+
+	if err != nil {
+		log.Fatal("Controller store unavailable: ", err)
+	}
+	defer storeLock.Close()
 
 	store, err := control.NewStore(filepath.Join(root, "state.json"))
 	if err != nil {
@@ -48,6 +62,14 @@ func main() {
 		Store:   store,
 		Started: time.Now(),
 		Agent:   agent,
+	}
+
+	if *desktop {
+		if err := control.ServeDesktopIPC(os.Stdin, os.Stdout, api.Handler()); err != nil {
+			log.Fatal("Desktop IPC: ", err)
+		}
+
+		return
 	}
 
 	server := &http.Server{

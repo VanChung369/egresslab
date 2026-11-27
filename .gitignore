@@ -10,6 +10,8 @@ apps/desktop/.vite/
 *.conf
 # Tauri / Rust
 apps/desktop/src-tauri/target/
+/apps/desktop/src-tauri/binaries/
+/apps/desktop/src-tauri/gen/
 # Release builds
 /dist/
 # Go / state

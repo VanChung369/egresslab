@@ -7,7 +7,7 @@ It uses the v1.1.1 Claude Design prototype as UX reference only; no HTML prototy
 
 ### Components
 
-1. **Desktop UI** — SvelteKit SPA rendered inside a Tauri 2 window. It calls the local Go API.
+1. **Desktop UI** — SvelteKit SPA rendered inside a Tauri 2 window. Since Step 37 it reaches the Go controller only through Tauri's Rust supervisor and private pipes (see "Desktop supervisor and private IPC"); the HTTP API is for development.
 2. **Go Control Plane** — persists routing profiles and proxy endpoint *definitions*; exposes read-only status and CRUD endpoints. It does not handle network traffic.
 3. **Linux Network Agent** (`services/network-agent`) has two parts:
    - **Read-only HTTP API**: GET-only discovery (system info, capabilities, links, namespaces) behind a bearer token. It must run unprivileged.
@@ -42,12 +42,37 @@ On Windows, readers open the state files with delete sharing, and a save renames
 `GET /api/v1/endpoints`, `POST /api/v1/endpoints`, `DELETE /api/v1/endpoints/{id}`,
 `POST /api/v1/endpoints/{id}/start` (always `409 ROUTE_NOT_VERIFIED` in v0.1),
 `GET /api/v1/tunnels` (WireGuard interfaces discovered by the agent, all `managed=false`),
-`GET /api/v1/agents` (agent health plus sanitized read-only discovery; empty without `EGRESSLAB_AGENT_TOKEN`).
+`GET /api/v1/agents` (agent health plus sanitized read-only discovery; empty without `EGRESSLAB_AGENT_TOKEN`),
+`GET /api/v1/discovery` (both of the last two from one agent snapshot, as `{agents, tunnels}`).
+
+`GET` profiles and endpoints list everything without a query. With `?limit=N&offset=M` (each exactly once, `limit` 1–500, `offset` 0 or more, nothing else) they answer one page, plus `next_offset` when more items follow; any other query, a malformed one included, is `400 BAD_PAGE`.
 
 On startup, the controller re-validates every invariant of the persisted state and refuses to start if any fails. The checks cover ID formats, unique names, ports and IDs, endpoint-to-profile references, statuses, the loopback listener, and enabled policy flags.
 
 This API is intentionally *not* a remote management API and listens on loopback only.
 CORS is restricted to local development and Tauri origins. This is not full process authentication.
+
+### Desktop supervisor and private IPC (Step 37)
+
+The desktop app starts and owns its controller; nothing listens on 127.0.0.1:8787 in desktop mode.
+
+- **The sidecar.** The Go controller is bundled as a Tauri sidecar (`bundle.externalBin`). `yarn build:sidecar` builds it as `src-tauri/binaries/egresslab-controller-<target triple>`, for the target Tauri names (`TAURI_ENV_TARGET_TRIPLE`), or for the Rust host when run alone. For `universal-apple-darwin` it builds the arm64 and x86_64 sidecars, which Tauri's per-architecture Rust builds need, and combines them with `lipo`. The macOS bundle requires macOS 12.0, which the sidecar built with Go 1.25 needs. The Rust supervisor starts it with `-desktop` on the first request from the main window, and only that binary.
+- **The pipe protocol.** One JSON object per line on stdin (`version`, `method`, `path`, `body`), one per line on stdout (`version`, `status`, `body`); logs stay on stderr.
+  - Requests are served one at a time, at most 32 KiB each.
+  - A reply over 1 MiB is answered with `500 IPC_REPLY_TOO_LARGE` instead, and the session goes on. The desktop reads profiles and endpoints in pages of 200 (see "Network API"), so a list never needs one large reply. Pages are separate requests. The desktop is the only writer, and its window runs its writes and its paged reads in turn, so no write lands between the pages of one read.
+  - A malformed request (not JSON, an unknown field, trailing data, another version, an oversized line) ends the controller without a reply.
+- **Routes.** The controller replays an allowlist through its existing HTTP handlers in memory (`httptest.NewRecorder`), with no socket:
+  - `GET` health, overview, profiles, endpoints, agents, tunnels and discovery, plus one page of profiles or endpoints in exactly the form `?limit=N&offset=M`;
+  - `POST` profiles and endpoints;
+  - `DELETE` a profile or endpoint by a well-formed ID.
+
+  Anything else, `POST /endpoints/{id}/start` included, answers `403 IPC_OPERATION_DENIED`.
+- **The supervisor** (`apps/desktop/src-tauri/src/controller.rs`) answers only the main window's `controller_request` command. It sends one request at a time. Each has 15 s from the moment it is made, including the wait behind earlier requests. One whose time ran out before it was sent, including while a new controller started, is refused without being sent; the pipe worker checks the deadline again right before it writes. A request that failed or timed out after being sent discards the controller and is never replayed; the next request starts a new one. The JavaScript side gets no shell permission. The UI asks for agents and tunnels with one `/discovery` request, so the agent is asked once per refresh and no request waits behind another one's agent calls.
+- **Lifetime.** The controller is killed when the app exits, at once, even while a request waits on it. A controller that was starting when the exit began is stopped before any work is sent to it. If the app dies, the controller sees EOF on stdin and exits.
+- **Development mode trusts the dev server.** The dev window loads whatever serves `127.0.0.1:5173`, and that page can call `controller_request`. Tauri only checks that the port answers, so if another process already holds the port, its page gets the desktop IPC. `yarn tauri:dev` therefore refuses to start while anything accepts connections on that port, and Vite runs with `--strictPort`. The check runs once before launch, so it cannot stop a process that takes the port later; plain `yarn tauri dev` skips it. A packaged app loads its bundled frontend instead.
+- **Content Security Policy.** The window may connect only to Tauri's IPC origins and the dev server; `127.0.0.1:8787` is not allowed, so the desktop window cannot reach an HTTP controller even by mistake.
+- **One writer.** Both modes take an exclusive OS lock on `controller-writer.lock` in the data directory before loading the Store (`flock` or `LockFileEx`, as for the journal). A second controller exits with status 3 and "another EgressLab controller is using this data directory"; after any failed request the supervisor waits up to 0.5 s for the controller's exit status, and turns 3 into "Another EgressLab controller is using this data directory. Stop it, then retry." for the UI. The file stays; the lock ends with its handle. Controllers built before Step 37 take no lock, so stop them before starting a new one.
+- **In the browser.** `yarn dev` in a browser still uses the HTTP API on 8787. The desktop build never falls back to it.
 
 ### Shared egress reservation authority (Step 31B)
 
@@ -224,7 +249,7 @@ An explicitly approved `serve-endpoint` command resolves a stored SOCKS5 endpoin
 ### Windows / macOS / Linux
 
 The Go control plane can run natively on Windows and macOS.
-The Linux network agent will later run in WSL2, a VM or on a Linux host. A running WSL2 process is not yet wired to the desktop shell.
+The Linux network agent will later run in WSL2, a VM or on a Linux host. A running WSL2 process is not yet wired to the desktop shell. Since Step 37 the desktop shell starts its own controller (see "Desktop supervisor and private IPC").
 
 ### UX source
 
