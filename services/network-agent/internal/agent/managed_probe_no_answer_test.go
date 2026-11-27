@@ -302,3 +302,12 @@ func TestManagedMultiProbeNoAnswer(t *testing.T) {
 		})
 	}
 }
+
+// A source that does not accept a connection gives no answer within the connect timeout, well
+// inside the attempt's own limit, so that more rechecks fit into the monitor's health.
+func TestManagedProbeConnectTimeout(t *testing.T) {
+	if d := newManagedProbeDialer(); d.Timeout != managedProbeConnectTimeout ||
+		managedProbeConnectTimeout > egressProbeTimeout/2 {
+		t.Fatalf("connect timeout %v", d.Timeout)
+	}
+}

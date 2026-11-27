@@ -1372,6 +1372,27 @@ Limitations:
   - Both are design decisions for later.
 - The expiry cut during a recheck is logged as the probe's context deadline, not as `monitor health expired`.
 
+### A shorter connection timeout for probe sources (Step 36)
+
+The rebuilt alpha.2 run above lost a route after three checks in a row without an answer, each taking 10 to 13 s. Since this change, the worker gives a source 4 s to accept the TCP connection; TLS and the response keep their 10 s limit. A check whose source does not connect takes about 5 s, so about six fit into the 60 s health instead of about three.
+
+Tests: `TestManagedProbeConnectTimeout`, which fails with the timeout back at 10 s. On macOS, `go vet` (three systems) and `go test` passed with Go 1.25.1 (`-race`) and Go 1.23.12; the agent's Linux tests passed in `egresslab`. Codex's review found nothing.
+
+On Lima with the helper (`6119e7c2`) and worker (`3655e5c5`) built from the working tree; the rebuilt alpha.2 helper and worker were reinstalled afterwards.
+- `probe-egress-multi` on A with WireGuard's UDP port dropped answered `EVIDENCE_UNAVAILABLE` after 4.7 s; the same probe took 11 s with the 10 s timeout. The lab stayed configured, and both routes then probed and reserved at the first attempt.
+- A 9-minute run on both routes (kept-alive series on A, downloads on B, name requests and `list-labs` every 15 s):
+  - no fault on either route;
+  - A: 30 healthy checks and 6 without an answer; B: 29 and 4; all 10 from ident.me.
+  - A single check without an answer was followed by a success 5 to 10 s later.
+  - Once on A two came in a row, 14 s apart. That source had connected but not answered TLS, which still waits 10 s. The success followed with 16 s of health left.
+  - A's kept-alive requests: 1500 of 1500 matched; median 0.28 s, p95 0.76 s, maximum 7.9 s; 31 took over 1 s.
+  - 20 of 20 name requests matched on each route; `list-labs` always answered `tunnel_configured`; five 110 s downloads on B kept their rate.
+- Holds released in 0.65 and 0.82 s with `generation_retired: true`, and cleaned up as before. Journal: 68982 to 72326 bytes.
+
+Limitations:
+- A source that connects and then stays silent still takes up to 10 s per check.
+- The released binaries do not have this change; it needs a new release (a new version, such as v0.3.0-alpha.3).
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.

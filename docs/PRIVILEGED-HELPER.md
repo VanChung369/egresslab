@@ -1914,6 +1914,9 @@ lease's exact tunnel generation:
     before the expiry;
   - if no check succeeds before the health expires, at most 60 s after the last source observation,
     the tunnel is faulted as before, also when a check without an answer itself ends past it.
+  - The worker gives a source 4 s to accept the TCP connection; TLS and the response keep the
+    10 s limit. A check whose source does not connect therefore takes about 5 s, so about six fit
+    into the health instead of about three.
 
   A path that answers nothing is therefore cut when the health expires rather than at the first
   failed check, though nothing new crosses it meanwhile. An address change is still caught by the

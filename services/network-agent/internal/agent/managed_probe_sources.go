@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 const (
@@ -19,6 +20,11 @@ const (
 	managedIdentSourceID      = "ident_me"
 
 	managedProbeMaxHeaderBytes = 16 * 1024
+
+	// managedProbeConnectTimeout bounds the TCP connection to a source, which leaves more rechecks
+	// within the monitor's health when a source does not answer: the failures seen so far all came
+	// before TCP connected. TLS and the response keep egressProbeTimeout.
+	managedProbeConnectTimeout = 4 * time.Second
 )
 
 // managedProbeHTTPSource is one mandatory HTTPS source: its HTTPS identity (host and path) and the
@@ -156,6 +162,10 @@ func newManagedProbeHTTPClient(host string, destination netip.Addr, dial probeDi
 	}
 }
 
+func newManagedProbeDialer() *net.Dialer {
+	return &net.Dialer{Timeout: managedProbeConnectTimeout}
+}
+
 // fetchManagedProbeBody makes one request to a validated source. The worker runs it inside the
 // source's own firewall window.
 func fetchManagedProbeBody(ctx context.Context, source managedProbeHTTPSource) ([]byte, error) {
@@ -163,9 +173,7 @@ func fetchManagedProbeBody(ctx context.Context, source managedProbeHTTPSource) (
 		return nil, err
 	}
 
-	dialer := &net.Dialer{Timeout: egressProbeTimeout}
-
-	client := newManagedProbeHTTPClient(source.host, source.destination, dialer.DialContext)
+	client := newManagedProbeHTTPClient(source.host, source.destination, newManagedProbeDialer().DialContext)
 	defer client.CloseIdleConnections()
 
 	return readManagedProbeHTTPS(ctx, client, source.url())
