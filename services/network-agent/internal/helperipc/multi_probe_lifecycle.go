@@ -249,7 +249,7 @@ func (l *LabLifecycle) executeMultiProbe(
 
 	requested := *req.Intent
 
-	lab, exists := l.labs[requested.ProfileID]
+	lab, exists := l.labs.get(requested.ProfileID)
 	if !exists {
 		return MultiProbeInfo{}, errLabNotFound
 	}
@@ -318,7 +318,7 @@ func (l *LabLifecycle) executeMultiProbe(
 	// Ownership is kept, as faulted, while the attempt runs.
 	faulted := lab
 	faulted.State = LabFaulted
-	l.labs[lab.ProfileID] = faulted
+	l.labs.set(lab.ProfileID, faulted)
 
 	var observation MultiProbeObservation
 
@@ -373,7 +373,7 @@ func (l *LabLifecycle) executeMultiProbe(
 	}
 
 	// Every source was verified and the backend resealed the firewall.
-	l.labs[lab.ProfileID] = lab
+	l.labs.set(lab.ProfileID, lab)
 	l.verifiedEvidence = verified
 
 	return info, nil

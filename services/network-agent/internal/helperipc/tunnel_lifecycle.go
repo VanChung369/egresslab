@@ -81,13 +81,13 @@ func (l *LabLifecycle) connectTunnelLocked(
 	l.tunnelProfile = lab.ProfileID
 	sealed := lab
 	lab.State = LabFaulted
-	l.labs[lab.ProfileID] = lab
+	l.labs.set(lab.ProfileID, lab)
 
 	if err := l.tunnels.ConnectStage(ctx, lab.ProfileID, lab.Namespace, intent.StageID); err != nil {
 		// The vault refused the stage before anything ran: the lab is untouched.
 		if errors.Is(err, ErrStageNotFound) {
 			l.tunnelProfile = ""
-			l.labs[lab.ProfileID] = sealed
+			l.labs.set(lab.ProfileID, sealed)
 
 			return LabInfo{}, err
 		}
@@ -97,7 +97,7 @@ func (l *LabLifecycle) connectTunnelLocked(
 	}
 
 	lab.State = LabTunnelConfigured
-	l.labs[lab.ProfileID] = lab
+	l.labs.set(lab.ProfileID, lab)
 
 	return lab, nil
 }
@@ -132,7 +132,7 @@ func (l *LabLifecycle) clearTunnelLocked(ctx context.Context, lab LabInfo) error
 
 	if err := l.tunnels.CleanupStage(ctx, lab.Namespace); err != nil {
 		lab.State = LabFaulted
-		l.labs[lab.ProfileID] = lab
+		l.labs.set(lab.ProfileID, lab)
 
 		return fmt.Errorf("%w: tunnel cleanup: %w", errLabUncertain, err)
 	}
@@ -147,7 +147,7 @@ func (l *LabLifecycle) clearTunnelLocked(ctx context.Context, lab LabInfo) error
 
 	if !proofAllowed {
 		lab.State = LabFaulted
-		l.labs[lab.ProfileID] = lab
+		l.labs.set(lab.ProfileID, lab)
 
 		return fmt.Errorf("%w: contradictory tunnel generation", errLabUncertain)
 	}
@@ -175,7 +175,7 @@ func (l *LabLifecycle) disconnectTunnelLocked(ctx context.Context, lab LabInfo) 
 	}
 
 	lab.State = LabSealed
-	l.labs[lab.ProfileID] = lab
+	l.labs.set(lab.ProfileID, lab)
 
 	return l.verifyLocked(ctx, lab)
 }
@@ -186,7 +186,7 @@ func (l *LabLifecycle) verifyTunnelLocked(ctx context.Context, lab LabInfo) (Lab
 	if l.tunnels == nil || l.tunnelProfile != lab.ProfileID {
 		l.invalidateEvidenceLocked(lab.ProfileID)
 		lab.State = LabFaulted
-		l.labs[lab.ProfileID] = lab
+		l.labs.set(lab.ProfileID, lab)
 
 		return LabInfo{}, errLabUncertain
 	}
@@ -198,7 +198,7 @@ func (l *LabLifecycle) verifyTunnelLocked(ctx context.Context, lab LabInfo) (Lab
 
 	l.invalidateEvidenceLocked(lab.ProfileID)
 	lab.State = LabFaulted
-	l.labs[lab.ProfileID] = lab
+	l.labs.set(lab.ProfileID, lab)
 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), tunnelCleanupTimeout)
 	defer cancel()

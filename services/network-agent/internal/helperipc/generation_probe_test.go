@@ -170,7 +170,7 @@ func TestGenerationProbeLifecycle(t *testing.T) {
 		t.Fatalf("a capability for the old tunnel authorized the new one: %v", err)
 	}
 
-	if backend.calls != 1 || f.labs.verifiedEvidence != nil || f.labs.labs[f.lab.ProfileID].State != LabTunnelConfigured {
+	if backend.calls != 1 || f.labs.verifiedEvidence != nil || f.labs.labs.peek(f.lab.ProfileID).State != LabTunnelConfigured {
 		t.Fatal("the stale capability changed the new tunnel")
 	}
 
@@ -489,9 +489,9 @@ func TestReadMultiProbeTargetRefusals(t *testing.T) {
 
 	setState := func(state string) func() {
 		return func() {
-			lab := f.labs.labs[f.lab.ProfileID]
+			lab := f.labs.labs.peek(f.lab.ProfileID)
 			lab.State = state
-			f.labs.labs[f.lab.ProfileID] = lab
+			f.labs.labs.set(f.lab.ProfileID, lab)
 		}
 	}
 

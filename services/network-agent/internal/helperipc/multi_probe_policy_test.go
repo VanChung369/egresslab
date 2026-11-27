@@ -43,14 +43,14 @@ func TestReadMultiProbePolicy(t *testing.T) {
 			code: CodeStateUncertain},
 		"retained faulted tunnel": {
 			setup: func() {
-				lab := f.labs.labs[f.lab.ProfileID]
+				lab := f.labs.labs.peek(f.lab.ProfileID)
 				lab.State = LabFaulted
-				f.labs.labs[f.lab.ProfileID] = lab
+				f.labs.labs.set(f.lab.ProfileID, lab)
 			},
 			undo: func() {
-				lab := f.labs.labs[f.lab.ProfileID]
+				lab := f.labs.labs.peek(f.lab.ProfileID)
 				lab.State = LabTunnelConfigured
-				f.labs.labs[f.lab.ProfileID] = lab
+				f.labs.labs.set(f.lab.ProfileID, lab)
 			},
 			code: CodeStateUncertain,
 		},
@@ -97,7 +97,7 @@ func TestReadMultiProbePolicy(t *testing.T) {
 		t.Fatalf("policy of a lifecycle without the multi-source probe: %v", err)
 	}
 
-	if backend.calls != 0 || backend.cleanups != 0 || f.labs.labs[f.lab.ProfileID].State != LabTunnelConfigured {
+	if backend.calls != 0 || backend.cleanups != 0 || f.labs.labs.peek(f.lab.ProfileID).State != LabTunnelConfigured {
 		t.Fatal("reading the policy touched the backend or the lab")
 	}
 }

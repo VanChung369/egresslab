@@ -74,7 +74,7 @@ func (l *LabLifecycle) readMultiProbePolicy(
 	}
 
 	// A tunnel whose removal was not confirmed stays tracked on its faulted lab: recovery first.
-	if lab, ok := l.labs[l.tunnelProfile]; l.tunnelProfile != "" && (!ok || lab.State == LabFaulted) {
+	if lab, ok := l.labs.get(l.tunnelProfile); l.tunnelProfile != "" && (!ok || lab.State == LabFaulted) {
 		return MultiProbePolicyInfo{}, errLabUncertain
 	}
 

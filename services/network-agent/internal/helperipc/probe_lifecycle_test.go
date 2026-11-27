@@ -97,7 +97,7 @@ func TestSignedProbeLifecycle(t *testing.T) {
 		t.Fatalf("unexpected result: %+v %v", result, err)
 	}
 
-	if f.labs.labs[f.lab.ProfileID].State != LabTunnelConfigured || f.labs.tunnelProfile != f.lab.ProfileID {
+	if f.labs.labs.peek(f.lab.ProfileID).State != LabTunnelConfigured || f.labs.tunnelProfile != f.lab.ProfileID {
 		t.Fatal("configured tunnel state lost")
 	}
 
@@ -155,16 +155,16 @@ func TestProbeRefusalsKeepTheCapability(t *testing.T) {
 		t.Fatalf("probe during another operation: %v", err)
 	}
 
-	sealed := f.labs.labs[f.lab.ProfileID]
+	sealed := f.labs.labs.peek(f.lab.ProfileID)
 	sealed.State = LabSealed
-	f.labs.labs[f.lab.ProfileID] = sealed
+	f.labs.labs.set(f.lab.ProfileID, sealed)
 
 	if _, err := f.labs.executeProbe(ctx, req, f.verifier); labCode(err) != CodeLabFaulted {
 		t.Fatalf("probe without a tunnel: %v", err)
 	}
 
 	sealed.State = LabTunnelConfigured
-	f.labs.labs[f.lab.ProfileID] = sealed
+	f.labs.labs.set(f.lab.ProfileID, sealed)
 
 	if backend.probeCalls != 0 {
 		t.Fatal("a refused probe reached the backend")
@@ -196,7 +196,7 @@ func TestProbeFailureFaultsLab(t *testing.T) {
 				t.Fatal("failed probe returned an address")
 			}
 
-			if f.labs.labs[f.lab.ProfileID].State != LabFaulted {
+			if f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted {
 				t.Fatal("lab not faulted")
 			}
 

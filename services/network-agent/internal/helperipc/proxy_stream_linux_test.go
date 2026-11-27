@@ -5,6 +5,7 @@ package helperipc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -313,7 +314,7 @@ func TestProxyStreamRefusals(t *testing.T) {
 			p.f.labs.mu.Lock()
 			defer p.f.labs.mu.Unlock()
 
-			if p.f.labs.labs[p.f.lab.ProfileID].State != LabTunnelConfigured {
+			if p.f.labs.labs.peek(p.f.lab.ProfileID).State != LabTunnelConfigured {
 				t.Fatal("refused stream changed the lab")
 			}
 
@@ -361,7 +362,7 @@ func TestProxyStreamClosedByRelease(t *testing.T) {
 	}
 
 	// Interrupting the window was no failure of the tunnel.
-	if state := p.f.labs.labs[p.f.lab.ProfileID].State; state != LabSealed {
+	if state := p.f.labs.labs.peek(p.f.lab.ProfileID).State; state != LabSealed {
 		t.Fatalf("release left the lab %s", state)
 	}
 }
@@ -387,8 +388,38 @@ func TestProxyStreamsShareWindows(t *testing.T) {
 	echoOnce(t, second, "second")
 	echoOnce(t, first, "first again")
 
+	// The registry answers inside each window, while the keeper holds the lifecycle lock.
+	var listMu sync.Mutex
+	var lists []error
+
+	p.f.labs.mu.Lock()
+	p.windows.inWindow = func() {
+		listed, err := Call(context.Background(), p.socket, OpListLabs)
+		if err == nil && (len(listed.Labs) != 1 || listed.Labs[0].State != LabTunnelConfigured) {
+			err = fmt.Errorf("unexpected registry: %+v", listed.Labs)
+		}
+
+		listMu.Lock()
+		lists = append(lists, err)
+		listMu.Unlock()
+	}
+	p.f.labs.mu.Unlock()
+
 	// Both cross the next windows.
 	time.Sleep(2500 * time.Millisecond)
+
+	listMu.Lock()
+	if len(lists) == 0 {
+		t.Error("no window opened")
+	}
+
+	for _, err := range lists {
+		if err != nil {
+			t.Errorf("ListLabs in a window: %v", err)
+		}
+	}
+	listMu.Unlock()
+
 	echoOnce(t, first, "later")
 	echoOnce(t, second, "later")
 

@@ -32,12 +32,22 @@ func TestEgressMonitorHealthy(t *testing.T) {
 	p.monitor.checkedAt = p.monitor.checkedAt.Add(-egressMonitorInterval)
 	before := p.monitor.checkedAt
 
+	// The registry answers while the check holds the lifecycle lock.
+	var listed []LabInfo
+	var listErr error
+
+	backend.mutate = func(*MultiProbeObservation) { listed, listErr = f.labs.snapshot() }
+
 	if err := f.labs.monitorPreparedOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
+	if listErr != nil || len(listed) != 1 || listed[0].State != LabTunnelConfigured {
+		t.Fatalf("ListLabs during a check: %+v %v", listed, listErr)
+	}
+
 	if backend.calls != 2 || backend.cleanups != 0 || f.labs.preparedLease != p || !p.monitor.checkedAt.After(before) ||
-		!p.monitor.fresh(time.Now()) || f.labs.labs[f.lab.ProfileID].State != LabTunnelConfigured {
+		!p.monitor.fresh(time.Now()) || f.labs.labs.peek(f.lab.ProfileID).State != LabTunnelConfigured {
 		t.Fatal("monitor did not renew health")
 	}
 
@@ -67,7 +77,7 @@ func TestEgressMonitorSkipsBusyLifecycle(t *testing.T) {
 	f.labs.mu.Unlock()
 
 	if err != nil || backend.calls != 1 || p.monitor != health || f.labs.preparedLease != p ||
-		f.labs.labs[f.lab.ProfileID].State != LabTunnelConfigured {
+		f.labs.labs.peek(f.lab.ProfileID).State != LabTunnelConfigured {
 		t.Fatal("a busy lifecycle was monitored")
 	}
 }
@@ -118,7 +128,7 @@ func TestEgressMonitorFaults(t *testing.T) {
 
 			err := f.labs.monitorPreparedOnce(context.Background())
 
-			if err == nil || f.labs.preparedLease != nil || f.labs.labs[f.lab.ProfileID].State != LabFaulted {
+			if err == nil || f.labs.preparedLease != nil || f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted {
 				t.Fatal("failed monitor did not fault the lab")
 			}
 
@@ -174,7 +184,7 @@ func TestEgressMonitorStopsAfterRelease(t *testing.T) {
 	}
 
 	if backend.calls != calls || backend.cleanups != cleanups || f.labs.preparedLease != nil ||
-		f.labs.labs[f.lab.ProfileID].State != LabTunnelConfigured {
+		f.labs.labs.peek(f.lab.ProfileID).State != LabTunnelConfigured {
 		t.Fatal("an old monitor affected a new generation")
 	}
 }

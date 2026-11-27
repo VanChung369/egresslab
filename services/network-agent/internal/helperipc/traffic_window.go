@@ -44,13 +44,16 @@ func (l *LabLifecycle) WithPreparedTrafficWindow(
 	}
 	defer l.mu.Unlock()
 
+	l.labs.settle(true)
+	defer l.labs.settle(false)
+
 	p := l.preparedLease
 
 	if l.closed || p == nil || p.info.ReservationID != reservationID {
 		return errLabAuthorization
 	}
 
-	lab, exists := l.labs[p.info.ProfileID]
+	lab, exists := l.labs.get(p.info.ProfileID)
 
 	if !exists || lab.Namespace != p.info.Namespace || l.tunnelProfile != p.info.ProfileID {
 		l.blockCreation = true

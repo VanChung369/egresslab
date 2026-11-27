@@ -52,7 +52,7 @@ func TestLabLifecycleIPC(t *testing.T) {
 	labs.mu.Lock()
 	defer labs.mu.Unlock()
 
-	if backend.created != 1 || backend.deleted != 1 || len(labs.labs) != 0 {
+	if backend.created != 1 || backend.deleted != 1 || labs.labs.count() != 0 {
 		t.Fatal("unexpected backend operations")
 	}
 }

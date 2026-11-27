@@ -136,7 +136,7 @@ func (l *LabLifecycle) reserveEgressCandidate(
 
 	requested := *req.Intent
 
-	lab, exists := l.labs[requested.ProfileID]
+	lab, exists := l.labs.get(requested.ProfileID)
 	if !exists {
 		return CandidateInfo{}, errLabNotFound
 	}
@@ -239,7 +239,7 @@ func (l *LabLifecycle) reserveEgressCandidate(
 	if err != nil {
 		faulted := lab
 		faulted.State = LabFaulted
-		l.labs[lab.ProfileID] = faulted
+		l.labs.set(lab.ProfileID, faulted)
 
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), tunnelCleanupTimeout)
 		defer cleanupCancel()

@@ -141,7 +141,7 @@ func (l *LabLifecycle) probeMonitoredGenerationLocked(ctx context.Context, p *pr
 // the generation; the durable hold stays with the controller. The caller must hold l.mu.
 func (l *LabLifecycle) faultMonitoredTunnelLocked(lab LabInfo, cause error) error {
 	lab.State = LabFaulted
-	l.labs[lab.ProfileID] = lab
+	l.labs.set(lab.ProfileID, lab)
 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), tunnelCleanupTimeout)
 	defer cancel()
@@ -167,7 +167,9 @@ func (l *LabLifecycle) monitorPreparedOnce(ctx context.Context) error {
 		return nil
 	}
 
+	l.labs.settle(true)
 	renewed, err := l.monitorPreparedLocked(ctx)
+	l.labs.settle(false)
 	l.mu.Unlock()
 
 	if renewed != nil {
@@ -186,7 +188,7 @@ func (l *LabLifecycle) monitorPreparedLocked(ctx context.Context) (*PreparedLeas
 		return nil, nil
 	}
 
-	lab, exists := l.labs[p.info.ProfileID]
+	lab, exists := l.labs.get(p.info.ProfileID)
 
 	// Ownership is inconsistent: drop the authorization, but clean up no arbitrary namespace.
 	if !exists || lab.Namespace != p.info.Namespace || l.tunnelProfile != p.info.ProfileID {

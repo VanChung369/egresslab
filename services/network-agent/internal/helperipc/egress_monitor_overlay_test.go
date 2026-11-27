@@ -245,7 +245,7 @@ func TestEgressMonitorDriftClosesStreams(t *testing.T) {
 		t.Fatal("drift accepted")
 	}
 
-	if len(probes.overlays) != 1 || f.labs.preparedLease != nil || f.labs.labs[f.lab.ProfileID].State != LabFaulted ||
+	if len(probes.overlays) != 1 || f.labs.preparedLease != nil || f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted ||
 		f.labs.proxyPlane.Load() != nil || plane.ctx.Err() == nil || plane.streaming() {
 		t.Fatal("drift left the streams or the lab running")
 	}

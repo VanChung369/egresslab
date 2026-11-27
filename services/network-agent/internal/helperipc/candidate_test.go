@@ -73,7 +73,7 @@ func TestCandidateConsumesEvidenceOnce(t *testing.T) {
 	candidate := f.labs.localCandidate
 
 	if backend.verifies != before+1 || backend.calls != 1 || backend.cleanups != 0 ||
-		f.labs.labs[f.lab.ProfileID].State != LabTunnelConfigured {
+		f.labs.labs.peek(f.lab.ProfileID).State != LabTunnelConfigured {
 		t.Fatal("reservation probed again or changed the tunnel")
 	}
 
@@ -155,9 +155,9 @@ func TestCandidateRefusalsPreserveEvidence(t *testing.T) {
 func TestCandidateRefusesUnusableLab(t *testing.T) {
 	t.Run("sealed lab", func(t *testing.T) {
 		f, _, req := newVerifiedCandidateFixture(t)
-		lab := f.labs.labs[f.lab.ProfileID]
+		lab := f.labs.labs.peek(f.lab.ProfileID)
 		lab.State = LabSealed
-		f.labs.labs[f.lab.ProfileID] = lab
+		f.labs.labs.set(f.lab.ProfileID, lab)
 
 		if _, err := runCandidateRequest(f, req); labCode(err) != CodeInvalidRequest {
 			t.Fatalf("sealed lab: %v", err)
@@ -299,7 +299,7 @@ func TestCandidateVerificationFailure(t *testing.T) {
 				t.Fatalf("failed reservation returned a candidate: %+v %v", result, err)
 			}
 
-			if backend.cleanups != 1 || f.labs.labs[f.lab.ProfileID].State != LabFaulted {
+			if backend.cleanups != 1 || f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted {
 				t.Fatal("invalid rollback state")
 			}
 
@@ -338,7 +338,7 @@ func TestCandidateGenerationChangeDuringVerification(t *testing.T) {
 		t.Fatalf("generation change accepted: %v", err)
 	}
 
-	if f.labs.localCandidate != nil || f.labs.labs[f.lab.ProfileID].State != LabFaulted || backend.cleanups != 1 {
+	if f.labs.localCandidate != nil || f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted || backend.cleanups != 1 {
 		t.Fatal("candidate published or tunnel kept after a generation change")
 	}
 }

@@ -256,7 +256,7 @@ func TestStaleStageLeavesLabSealed(t *testing.T) {
 		t.Fatalf("stale stage: %v", err)
 	}
 
-	if f.labs.tunnelProfile != "" || f.labs.labs[f.lab.ProfileID].State != LabSealed {
+	if f.labs.tunnelProfile != "" || f.labs.labs.peek(f.lab.ProfileID).State != LabSealed {
 		t.Fatal("a refused stage faulted the lab")
 	}
 
@@ -283,7 +283,7 @@ func TestTunnelCleanupFailureBlocksDelete(t *testing.T) {
 
 	if f.backend.deleted != 0 ||
 		f.labs.tunnelProfile != lab.ProfileID ||
-		f.labs.labs[lab.ProfileID].State != LabFaulted {
+		f.labs.labs.peek(lab.ProfileID).State != LabFaulted {
 		t.Fatal("unsafe namespace deletion or lost ownership")
 	}
 
@@ -302,7 +302,7 @@ func TestTunnelCleanupFailureBlocksDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if f.backend.deleted != 1 || len(f.labs.labs) != 0 || f.labs.tunnelProfile != "" {
+	if f.backend.deleted != 1 || f.labs.labs.count() != 0 || f.labs.tunnelProfile != "" {
 		t.Fatal("shutdown cleanup incomplete")
 	}
 }
@@ -321,7 +321,7 @@ func TestTunnelVerificationFailureFaultsLab(t *testing.T) {
 		t.Fatalf("unexpected verify result: %v", err)
 	}
 
-	if f.tunnels.cleanups != 1 || f.labs.labs[lab.ProfileID].State != LabFaulted {
+	if f.tunnels.cleanups != 1 || f.labs.labs.peek(lab.ProfileID).State != LabFaulted {
 		t.Fatal("verification failure was ignored")
 	}
 
@@ -349,7 +349,7 @@ func TestTunnelVerificationKeepsFailedCleanup(t *testing.T) {
 		t.Fatalf("unexpected verify result: %v", err)
 	}
 
-	if f.labs.tunnelProfile != lab.ProfileID || f.labs.labs[lab.ProfileID].State != LabFaulted {
+	if f.labs.tunnelProfile != lab.ProfileID || f.labs.labs.peek(lab.ProfileID).State != LabFaulted {
 		t.Fatal("tunnel slot released after a failed cleanup")
 	}
 }
@@ -362,7 +362,7 @@ func TestFailedTunnelAttemptRetainsOwnership(t *testing.T) {
 		t.Fatalf("unexpected connect failure: %v", err)
 	}
 
-	if f.labs.tunnelProfile != f.lab.ProfileID || f.labs.labs[f.lab.ProfileID].State != LabFaulted {
+	if f.labs.tunnelProfile != f.lab.ProfileID || f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted {
 		t.Fatal("failed attempt was forgotten")
 	}
 

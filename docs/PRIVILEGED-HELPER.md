@@ -67,7 +67,9 @@ design.
   - serialized lifecycle operations;
   - rollback, cleanup at normal shutdown, and retention of faulted resources.
 - `ListLabs`: the helper's profile-to-namespace registry (bookkeeping only; `VerifyLab` checks the
-  kernel).
+  kernel). It answers `LAB_BUSY` while another lifecycle operation runs, since that operation's lab
+  may not be settled yet. Since Step 36 it answers while the lifecycle lock is held only by the proxy
+  streams' traffic windows or the egress monitor's check: those change a lab only to fault it.
 - The client checks that the production socket is served by root (`SO_PEERCRED`) before it sends
   anything.
 - `egresslab-helperctl` covers every helper operation except `AuthorizeCheck`, including
@@ -2000,7 +2002,8 @@ runs in the foreground until interrupted and changes no global readiness.
   fails gets that failure's code (`LAB_FAULTED`, `STATE_UNCERTAIN`), not an authorization refusal;
   if the tunnel's cleanup is still running when its wait ends, `STATE_UNCERTAIN`.
   Other operations (verify, disconnect, delete) answer `LAB_BUSY` while streams run:
-  stop the listener or release first.
+  stop the listener or release first. `ListLabs` still answers (since Step 36; before, it was
+  `LAB_BUSY` too), and so it does during a monitor check.
 - **Transport.** The controller runs `egresslab-helperctl proxy-stream` through the runtime launcher.
   The capability travels in a frame on stdin, the helper's acknowledgement comes back as a frame,
   then both directions are framed (data, FIN, and END from the guest), because neither a killed
@@ -2011,8 +2014,8 @@ runs in the foreground until interrupted and changes no global readiness.
   destination finished, an idle client is closed after 30 s.
 
 Limits of this prototype: since Step 35 a short pause remains around each monitor check (see Monitor
-traffic overlay below); native Linux has not run it (WSL2 did on 2026-11-26, see
-`docs/DEV-LINUX-VM.md`). Application networking as a whole stays disabled.
+traffic overlay below); native Linux has not run it (WSL2 did on 2026-11-26, two Lima runtimes on
+2026-11-27, see `docs/DEV-LINUX-VM.md`). Application networking as a whole stays disabled.
 
 ### Endpoint-to-runtime integration (Step 35)
 
@@ -2083,8 +2086,9 @@ Short pauses remain:
 - between the two sources' windows;
 - when a probe outlives the overlay's element.
 
-On WSL2, the longest request on one kept-alive connection across eight checks took 2.8 s. The real
-nft captures and the kernel behaviour are in `docs/DEV-LINUX-VM.md`.
+On WSL2, the longest request on one kept-alive connection across eight checks took 2.8 s; on Lima
+(nft 1.0.9), 1.85 s and 1.53 s across six checks each. The real nft captures and the kernel
+behaviour are in `docs/DEV-LINUX-VM.md`.
 
 ### Isolated DNS for domain names (Step 35)
 

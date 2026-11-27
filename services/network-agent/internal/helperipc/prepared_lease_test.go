@@ -67,7 +67,7 @@ func TestPreparedLeaseConsumesCandidateOnce(t *testing.T) {
 	}
 
 	if backend.verifies != before+1 || backend.calls != 1 || backend.cleanups != 0 ||
-		f.labs.labs[f.lab.ProfileID].State != LabTunnelConfigured {
+		f.labs.labs.peek(f.lab.ProfileID).State != LabTunnelConfigured {
 		t.Fatal("preparation probed again or changed the tunnel")
 	}
 
@@ -228,7 +228,7 @@ func TestPreparedLeaseVerificationFailure(t *testing.T) {
 				t.Fatalf("failed preparation published a lease: %v", err)
 			}
 
-			if backend.cleanups != 1 || f.labs.labs[f.lab.ProfileID].State != LabFaulted {
+			if backend.cleanups != 1 || f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted {
 				t.Fatal("incorrect rollback state")
 			}
 
@@ -254,7 +254,7 @@ func TestPreparedLeaseGenerationChange(t *testing.T) {
 	}
 
 	if f.labs.preparedLease != nil || f.labs.localCandidate != nil || backend.cleanups != 1 ||
-		f.labs.labs[f.lab.ProfileID].State != LabFaulted {
+		f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted {
 		t.Fatal("invalid state after the generation change")
 	}
 }

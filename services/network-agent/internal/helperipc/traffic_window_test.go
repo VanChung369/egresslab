@@ -15,6 +15,7 @@ type fakeTrafficWindowBackend struct {
 	healthUntil time.Time
 	err         error
 	window      time.Duration // the run deadline, like the kernel element's; 2 s when zero
+	inWindow    func()        // runs in each open window, before its run
 }
 
 func (b *fakeTrafficWindowBackend) WithTrafficWindow(
@@ -43,6 +44,10 @@ func (b *fakeTrafficWindowBackend) WithTrafficWindow(
 
 	runCtx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
+
+	if b.inWindow != nil {
+		b.inWindow()
+	}
 
 	// As the real gate: a run that outlives its window, or a cancelled window, fails.
 	return errors.Join(run(runCtx), runCtx.Err())
@@ -82,7 +87,7 @@ func TestPreparedTrafficWindow(t *testing.T) {
 
 	if f.labs.preparedLease != p || p.info != info || p.evidence != evidence || p.monitor != health ||
 		!windows.healthUntil.Equal(health.renewBy()) ||
-		f.labs.labs[f.lab.ProfileID].State != LabTunnelConfigured {
+		f.labs.labs.peek(f.lab.ProfileID).State != LabTunnelConfigured {
 		t.Fatal("traffic window changed the lease or outlived the renewal deadline")
 	}
 
@@ -91,7 +96,7 @@ func TestPreparedTrafficWindow(t *testing.T) {
 
 	err := f.labs.WithPreparedTrafficWindow(context.Background(), result.ReservationID, 1001, run)
 	if err == nil || called || windows.opened != 1 || f.labs.preparedLease != nil || windows.cleanups != 1 ||
-		f.labs.labs[f.lab.ProfileID].State != LabFaulted {
+		f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted {
 		t.Fatal("expired monitoring health allowed traffic")
 	}
 }
@@ -144,7 +149,7 @@ func TestPreparedTrafficWindowRefusals(t *testing.T) {
 			}
 
 			if !errors.Is(err, want) || windows.opened != opened || windows.cleanups != 0 || f.labs.preparedLease != p ||
-				f.labs.labs[f.lab.ProfileID].State != LabTunnelConfigured {
+				f.labs.labs.peek(f.lab.ProfileID).State != LabTunnelConfigured {
 				t.Fatalf("unexpected refusal: %v", err)
 			}
 		})
@@ -169,7 +174,7 @@ func TestPreparedTrafficWindowFaults(t *testing.T) {
 			err := f.labs.WithPreparedTrafficWindow(context.Background(), result.ReservationID, 1001,
 				func(context.Context) error { return nil })
 
-			if err == nil || f.labs.preparedLease != nil || f.labs.labs[f.lab.ProfileID].State != LabFaulted {
+			if err == nil || f.labs.preparedLease != nil || f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted {
 				t.Fatal("failed window did not fault the lab")
 			}
 

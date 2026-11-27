@@ -137,7 +137,7 @@ func (l *LabLifecycle) executeProbe(ctx context.Context, req Request, v *helpera
 
 	intent := *req.Intent
 
-	lab, exists := l.labs[intent.ProfileID]
+	lab, exists := l.labs.get(intent.ProfileID)
 	if !exists {
 		return ProbeInfo{}, errLabNotFound
 	}
@@ -166,7 +166,7 @@ func (l *LabLifecycle) executeProbe(ctx context.Context, req Request, v *helpera
 	// Ownership is kept, as faulted, while the probe runs.
 	faulted := lab
 	faulted.State = LabFaulted
-	l.labs[lab.ProfileID] = faulted
+	l.labs.set(lab.ProfileID, faulted)
 
 	observation, err := l.probes.ProbeConfigured(ctx, lab.Namespace)
 
@@ -195,7 +195,7 @@ func (l *LabLifecycle) executeProbe(ctx context.Context, req Request, v *helpera
 	}
 
 	// The backend closed its window and verified the tunnel again.
-	l.labs[lab.ProfileID] = lab
+	l.labs.set(lab.ProfileID, lab)
 
 	return info, nil
 }

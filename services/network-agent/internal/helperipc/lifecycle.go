@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -125,7 +126,7 @@ type LabLifecycle struct {
 	mu sync.Mutex
 
 	backend LabBackend
-	labs    map[string]LabInfo // profile ID -> lab
+	labs    labRegistry
 
 	blockCreation bool // kernel state uncertain; cleared only by a helper restart
 	closed        bool
@@ -156,8 +157,107 @@ type LabLifecycle struct {
 	proxyHalt  atomic.Int32 // releases waiting to preempt the streams
 }
 
+// labRegistry maps profile IDs to labs; lifecycle operations change it under l.mu. settled marks a
+// holder of l.mu that changes a lab only to fault it (the streams' traffic windows, the monitor's
+// checks): ListLabs answers during those, as the keeper holds l.mu almost all the time, and stays
+// busy during any other operation, whose labs may not be settled yet.
+type labRegistry struct {
+	mu      sync.RWMutex
+	labs    map[string]LabInfo
+	closed  bool
+	settled bool
+}
+
+func (r *labRegistry) get(profileID string) (LabInfo, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	lab, ok := r.labs[profileID]
+
+	return lab, ok
+}
+
+func (r *labRegistry) set(profileID string, lab LabInfo) {
+	r.mu.Lock()
+	r.labs[profileID] = lab
+	r.mu.Unlock()
+}
+
+func (r *labRegistry) remove(profileID string) {
+	r.mu.Lock()
+	delete(r.labs, profileID)
+	r.mu.Unlock()
+}
+
+func (r *labRegistry) count() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return len(r.labs)
+}
+
+// list is sorted by profile ID.
+func (r *labRegistry) list() []LabInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.listLocked()
+}
+
+func (r *labRegistry) listLocked() []LabInfo {
+	items := make([]LabInfo, 0, len(r.labs))
+	for _, lab := range r.labs {
+		items = append(items, lab)
+	}
+
+	sort.Slice(items, func(i, j int) bool { return items[i].ProfileID < items[j].ProfileID })
+
+	return items
+}
+
+func (r *labRegistry) close() {
+	r.mu.Lock()
+	r.closed = true
+	r.mu.Unlock()
+}
+
+// settle is set and cleared by the holder of l.mu, before it unlocks.
+func (r *labRegistry) settle(on bool) {
+	r.mu.Lock()
+	r.settled = on
+	r.mu.Unlock()
+}
+
+func (r *labRegistry) snapshot(onlySettled bool) ([]LabInfo, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.closed {
+		return nil, errLabUnavailable
+	}
+
+	if onlySettled && !r.settled {
+		return nil, errLabBusy
+	}
+
+	return r.listLocked(), nil
+}
+
+func (l *LabLifecycle) snapshot() ([]LabInfo, error) {
+	if l == nil {
+		return nil, errLabUnavailable
+	}
+
+	if l.mu.TryLock() {
+		defer l.mu.Unlock()
+		return l.labs.snapshot(false)
+	}
+
+	return l.labs.snapshot(true)
+}
+
 func NewLabLifecycle(backend LabBackend) *LabLifecycle {
-	return &LabLifecycle{backend: backend, labs: make(map[string]LabInfo)}
+	return &LabLifecycle{backend: backend, labs: labRegistry{labs: make(map[string]LabInfo)}}
 }
 
 func isLifecycleOp(op string) bool {
@@ -226,7 +326,7 @@ func (l *LabLifecycle) execute(ctx context.Context, req Request, v *helperauth.V
 		return LabInfo{}, errLabAuthorization
 	}
 
-	lab, exists := l.labs[intent.ProfileID]
+	lab, exists := l.labs.get(intent.ProfileID)
 	if !exists {
 		return LabInfo{}, errLabNotFound
 	}
@@ -271,11 +371,11 @@ func (l *LabLifecycle) createLocked(
 		return LabInfo{}, errLabUncertain
 	}
 
-	if len(l.labs) >= maxManagedLabs {
+	if l.labs.count() >= maxManagedLabs {
 		return LabInfo{}, errLabLimit
 	}
 
-	if _, exists := l.labs[intent.ProfileID]; exists {
+	if _, exists := l.labs.get(intent.ProfileID); exists {
 		return LabInfo{}, errLabExists
 	}
 
@@ -306,7 +406,7 @@ func (l *LabLifecycle) createLocked(
 	lab := LabInfo{ProfileID: intent.ProfileID, Namespace: name, State: LabFaulted}
 
 	// Tracked before sealing, so a failed rollback is not forgotten.
-	l.labs[lab.ProfileID] = lab
+	l.labs.set(lab.ProfileID, lab)
 
 	if err := l.backend.Seal(ctx, name); err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), lifecycleCleanupTimeout)
@@ -314,7 +414,7 @@ func (l *LabLifecycle) createLocked(
 		cancel()
 
 		if cleanupErr == nil {
-			delete(l.labs, lab.ProfileID)
+			l.labs.remove(lab.ProfileID)
 			return LabInfo{}, fmt.Errorf("seal namespace %s (rolled back): %w", name, err)
 		}
 
@@ -324,7 +424,7 @@ func (l *LabLifecycle) createLocked(
 	}
 
 	lab.State = LabSealed
-	l.labs[lab.ProfileID] = lab
+	l.labs.set(lab.ProfileID, lab)
 
 	return lab, nil
 }
@@ -341,7 +441,7 @@ func (l *LabLifecycle) verifyLocked(ctx context.Context, lab LabInfo) (LabInfo, 
 
 	if err := l.backend.Verify(ctx, lab.Namespace); err != nil {
 		lab.State = LabFaulted
-		l.labs[lab.ProfileID] = lab
+		l.labs.set(lab.ProfileID, lab)
 
 		return LabInfo{}, fmt.Errorf("%w: %w", errLabFaulted, err)
 	}
@@ -357,12 +457,12 @@ func (l *LabLifecycle) deleteLocked(ctx context.Context, lab LabInfo) (LabInfo, 
 
 	if err := l.backend.Delete(ctx, lab.Namespace); err != nil {
 		lab.State = LabFaulted
-		l.labs[lab.ProfileID] = lab
+		l.labs.set(lab.ProfileID, lab)
 
 		return LabInfo{}, fmt.Errorf("%w: %w", errLabFaulted, err)
 	}
 
-	delete(l.labs, lab.ProfileID)
+	l.labs.remove(lab.ProfileID)
 	lab.State = LabDeleted
 
 	return lab, nil
@@ -379,6 +479,7 @@ func (l *LabLifecycle) Close() error {
 	defer l.mu.Unlock()
 
 	l.closed = true
+	l.labs.close()
 	l.closeProxyStreamsLocked()
 	l.verifiedEvidence = nil
 	l.localCandidate = nil
@@ -386,7 +487,7 @@ func (l *LabLifecycle) Close() error {
 
 	var errs []error
 
-	for _, lab := range l.labs {
+	for _, lab := range l.labs.list() {
 		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
 		_, err := l.deleteLocked(ctx, lab)
 		cancel()

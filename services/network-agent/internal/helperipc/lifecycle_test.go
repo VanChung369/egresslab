@@ -163,7 +163,7 @@ func TestLabLifecycleCreateVerifyDelete(t *testing.T) {
 	}
 
 	deleted, err := labs.execute(ctx, existingLabRequest(OpDeleteLab, lab), v)
-	if err != nil || deleted.State != LabDeleted || len(labs.labs) != 0 {
+	if err != nil || deleted.State != LabDeleted || labs.labs.count() != 0 {
 		t.Fatalf("deletion failed: %v", err)
 	}
 
@@ -229,7 +229,7 @@ func TestLabLifecycleRollsBackSealFailure(t *testing.T) {
 		t.Fatal("seal failure accepted")
 	}
 
-	if backend.deleted != 1 || len(labs.labs) != 0 || labs.blockCreation {
+	if backend.deleted != 1 || labs.labs.count() != 0 || labs.blockCreation {
 		t.Fatal("creation was not rolled back")
 	}
 }
@@ -243,7 +243,7 @@ func TestLabLifecycleRetainsFailedRollback(t *testing.T) {
 		t.Fatal("failed rollback accepted")
 	}
 
-	lab := labs.labs[lifecycleProfile]
+	lab := labs.labs.peek(lifecycleProfile)
 	if lab.State != LabFaulted || !labs.blockCreation {
 		t.Fatal("failed resource was forgotten")
 	}
@@ -259,7 +259,7 @@ func TestLabLifecycleRetainsFailedRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(labs.labs) != 0 {
+	if labs.labs.count() != 0 {
 		t.Fatal("failed lab not removed")
 	}
 
@@ -289,7 +289,7 @@ func TestLabLifecycleFaultsOnVerificationFailure(t *testing.T) {
 		t.Fatal("firewall drift accepted")
 	}
 
-	if labs.labs[lab.ProfileID].State != LabFaulted {
+	if labs.labs.peek(lab.ProfileID).State != LabFaulted {
 		t.Fatal("lab not marked faulted")
 	}
 
@@ -320,7 +320,7 @@ func TestLabLifecycleFailedDeleteKeepsOwnership(t *testing.T) {
 		t.Fatal("failed deletion reported success")
 	}
 
-	if got := labs.labs[lab.ProfileID]; got.State != LabFaulted || got.Namespace != lab.Namespace {
+	if got := labs.labs.peek(lab.ProfileID); got.State != LabFaulted || got.Namespace != lab.Namespace {
 		t.Fatalf("lab after failed deletion: %+v", got)
 	}
 
@@ -353,7 +353,7 @@ func TestLabLifecycleCapacityAndClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(labs.labs) != 0 || backend.deleted != maxManagedLabs {
+	if labs.labs.count() != 0 || backend.deleted != maxManagedLabs {
 		t.Fatal("shutdown cleanup incomplete")
 	}
 
@@ -375,7 +375,7 @@ func TestLabLifecycleCloseKeepsUndeletableLabs(t *testing.T) {
 		t.Fatal("failed cleanup not reported")
 	}
 
-	if len(labs.labs) != 1 {
+	if labs.labs.count() != 1 {
 		t.Fatal("undeletable lab forgotten")
 	}
 }
@@ -539,7 +539,7 @@ func TestLabLifecyclePreflightGate(t *testing.T) {
 
 	// Verify and delete stay possible whatever the gate says.
 	backend.preflightErr = ErrLabRecoveryRequired
-	lab := labs.labs[lifecycleProfile]
+	lab := labs.labs.peek(lifecycleProfile)
 
 	if _, err := labs.execute(ctx, existingLabRequest(OpDeleteLab, lab), v); err != nil {
 		t.Fatalf("delete blocked by the gate: %v", err)

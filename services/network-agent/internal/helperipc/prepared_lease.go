@@ -123,7 +123,7 @@ func (l *LabLifecycle) prepareEgressLease(
 
 	requested := *req.Intent
 
-	lab, exists := l.labs[requested.ProfileID]
+	lab, exists := l.labs.get(requested.ProfileID)
 	if !exists {
 		return PreparedLeaseInfo{}, errLabNotFound
 	}
@@ -230,7 +230,7 @@ func (l *LabLifecycle) prepareEgressLease(
 	if err != nil {
 		faulted := lab
 		faulted.State = LabFaulted
-		l.labs[lab.ProfileID] = faulted
+		l.labs.set(lab.ProfileID, faulted)
 
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), tunnelCleanupTimeout)
 		defer cleanupCancel()

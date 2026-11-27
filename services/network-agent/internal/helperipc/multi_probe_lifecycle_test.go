@@ -146,7 +146,7 @@ func TestSignedMultiProbeLifecycle(t *testing.T) {
 		t.Fatalf("legacy probe ran on a multi-source lifecycle: %v", err)
 	}
 
-	if backend.calls != 0 || backend.cleanups != 0 || f.labs.labs[f.lab.ProfileID].State != LabTunnelConfigured {
+	if backend.calls != 0 || backend.cleanups != 0 || f.labs.labs.peek(f.lab.ProfileID).State != LabTunnelConfigured {
 		t.Fatal("a refused operation reached the backend or changed the lab")
 	}
 
@@ -157,7 +157,7 @@ func TestSignedMultiProbeLifecycle(t *testing.T) {
 	}
 
 	if backend.calls != 1 || f.labs.tunnelProfile != f.lab.ProfileID ||
-		f.labs.labs[f.lab.ProfileID].State != LabTunnelConfigured {
+		f.labs.labs.peek(f.lab.ProfileID).State != LabTunnelConfigured {
 		t.Fatal("configured tunnel state lost")
 	}
 
@@ -235,16 +235,16 @@ func TestMultiProbeRefusals(t *testing.T) {
 
 	backend.pin = netip.MustParseAddr("9.9.9.9")
 
-	sealed := f.labs.labs[f.lab.ProfileID]
+	sealed := f.labs.labs.peek(f.lab.ProfileID)
 	sealed.State = LabSealed
-	f.labs.labs[f.lab.ProfileID] = sealed
+	f.labs.labs.set(f.lab.ProfileID, sealed)
 
 	if _, err := f.labs.executeMultiProbe(ctx, req, f.verifier); labCode(err) != CodeLabFaulted {
 		t.Fatalf("probe without a tunnel: %v", err)
 	}
 
 	sealed.State = LabTunnelConfigured
-	f.labs.labs[f.lab.ProfileID] = sealed
+	f.labs.labs.set(f.lab.ProfileID, sealed)
 
 	if backend.calls != 0 || backend.cleanups != 0 {
 		t.Fatal("a refused operation reached the backend")
@@ -310,7 +310,7 @@ func TestMultiProbeFailureFaultsLab(t *testing.T) {
 				t.Fatalf("failed probe returned evidence: %+v %v", result, err)
 			}
 
-			if f.labs.labs[f.lab.ProfileID].State != LabFaulted || backend.calls != 1 || backend.cleanups != 1 {
+			if f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted || backend.calls != 1 || backend.cleanups != 1 {
 				t.Fatal("failed probe did not fault the lab and roll back")
 			}
 

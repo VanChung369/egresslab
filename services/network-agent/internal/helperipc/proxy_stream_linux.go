@@ -87,7 +87,7 @@ func (l *LabLifecycle) authorizeProxyRequestLocked(req Request, k proxyKeeper, r
 		return netip.AddrPort{}, errLabAuthorization
 	}
 
-	lab, exists := l.labs[p.info.ProfileID]
+	lab, exists := l.labs.get(p.info.ProfileID)
 	if !exists || lab.Namespace != p.info.Namespace || lab.State != LabTunnelConfigured ||
 		l.tunnelProfile != p.info.ProfileID {
 		return netip.AddrPort{}, errLabUncertain

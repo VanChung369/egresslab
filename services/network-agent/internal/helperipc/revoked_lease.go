@@ -248,7 +248,7 @@ func (l *LabLifecycle) revokeEgressLease(
 	if !record.retired {
 		var exists bool
 
-		lab, exists = l.labs[candidate.ProfileID]
+		lab, exists = l.labs.get(candidate.ProfileID)
 		if !exists || lab.Namespace != candidate.Namespace || l.tunnelProfile != candidate.ProfileID ||
 			l.candidateGeneration != candidate.TunnelGeneration {
 			return RevokedLeaseInfo{}, errLabUncertain

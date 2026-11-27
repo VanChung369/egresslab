@@ -65,7 +65,7 @@ func TestRevokePreparedLease(t *testing.T) {
 		t.Fatal("generation was not retired")
 	}
 
-	if f.labs.labs[f.lab.ProfileID].State != LabSealed {
+	if f.labs.labs.peek(f.lab.ProfileID).State != LabSealed {
 		t.Fatal("revoked lab was not sealed")
 	}
 }
@@ -196,7 +196,7 @@ func TestRevokeLeaseCleanupFailure(t *testing.T) {
 	}
 
 	if f.labs.preparedLease != nil || f.labs.tunnelProfile != f.lab.ProfileID || f.labs.candidateGeneration == "" ||
-		f.labs.labs[f.lab.ProfileID].State != LabFaulted {
+		f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted {
 		t.Fatal("uncertain tunnel ownership was forgotten")
 	}
 
@@ -517,7 +517,7 @@ func TestDeleteLabWithContradictoryGeneration(t *testing.T) {
 
 	record := f.labs.candidateRetirements[candidate.ReservationNonce]
 	if record.retired || f.labs.tunnelProfile != "" || f.labs.candidateGeneration != "" || backend.cleanups != 1 ||
-		f.labs.labs[f.lab.ProfileID].State != LabFaulted {
+		f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted {
 		t.Fatal("contradictory cleanup recorded as retirement or kept the slot")
 	}
 
@@ -824,7 +824,7 @@ func TestRevocationReceiptDespiteSealedCheckFailure(t *testing.T) {
 		t.Fatalf("retired generation without a receipt: %v", err)
 	}
 
-	if f.labs.labs[f.lab.ProfileID].State != LabFaulted {
+	if f.labs.labs.peek(f.lab.ProfileID).State != LabFaulted {
 		t.Fatal("a lab that failed its sealed check was not faulted")
 	}
 }

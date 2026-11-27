@@ -120,7 +120,7 @@ func (l *LabLifecycle) readMultiProbeTarget(
 		return MultiProbeTargetInfo{}, errLabUncertain
 	}
 
-	lab, exists := l.labs[intent.ProfileID]
+	lab, exists := l.labs.get(intent.ProfileID)
 	if !exists {
 		return MultiProbeTargetInfo{}, errLabNotFound
 	}

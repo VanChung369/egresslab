@@ -29,6 +29,17 @@ func TestListLabsLifecycle(t *testing.T) {
 		t.Fatalf("unexpected registry: %+v %v", listed, err)
 	}
 
+	// A holder that only faults labs (the streams' windows, the monitor) leaves the registry readable.
+	labs.mu.Lock()
+	labs.labs.settle(true)
+	listed, err = Call(ctx, socket, OpListLabs)
+	labs.labs.settle(false)
+	labs.mu.Unlock()
+
+	if err != nil || len(listed.Labs) != 1 || listed.Labs[0] != *created.Lab {
+		t.Fatalf("ListLabs during a settled hold: %+v %v", listed, err)
+	}
+
 	// A faulted lab stays listed until it is deleted.
 	labs.mu.Lock()
 	backend.verifyErr = os.ErrDeadlineExceeded
