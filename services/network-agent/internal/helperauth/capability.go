@@ -271,8 +271,15 @@ func validateStructure(c Claims) error {
 	return validateIntent(c.Intent)
 }
 
+// MaxIssueSkew is how far a capability's issued_at may lie ahead of the helper's clock: the
+// controller mints with the host's clock, and a VM's clock can run behind it. Expiry has no skew,
+// and the nonce stays single-use until not_after. It is a second under the controller's 5 s
+// allowance for evidence, so that issued_at's truncation to the second never lets the helper accept
+// an attempt that the controller then refuses.
+const MaxIssueSkew = 4 * time.Second
+
 func validateTime(c Claims, now time.Time) error {
-	if now.Unix() < c.IssuedAt || now.Unix() >= c.NotAfter {
+	if now.Unix() < c.IssuedAt-int64(MaxIssueSkew/time.Second) || now.Unix() >= c.NotAfter {
 		return ErrInvalidCapability
 	}
 
@@ -343,7 +350,8 @@ func signingMessage(c Claims) ([]byte, error) {
 // a fresh helper ID for every process (NewHelperID): capabilities minted for an earlier process
 // name another helper and are refused.
 //
-// An observed wall-clock rollback disables authorization for this verifier.
+// While the wall clock reads earlier than the latest second it has seen, the verifier refuses
+// every capability.
 //
 // The verifier must not be copied after use.
 type Verifier struct {
@@ -352,9 +360,10 @@ type Verifier struct {
 	helperID string
 	used     map[string]int64 // nonce -> not_after
 	now      func() time.Time
+	logf     func(format string, args ...any)
 
 	lastWall    int64 // latest wall-clock second seen by checkedTimeLocked
-	clockFailed bool
+	clockBehind bool  // the clock now reads earlier than lastWall
 }
 
 func NewVerifier(public ed25519.PublicKey, helperID string) (*Verifier, error) {
@@ -367,13 +376,15 @@ func NewVerifier(public ed25519.PublicKey, helperID string) (*Verifier, error) {
 		helperID: helperID,
 		used:     make(map[string]int64),
 		now:      time.Now,
+		logf:     logDetached,
 	}, nil
 }
 
 // VerifyAndConsume checks the signature, the binding to expected and to this helper, the
 // validity window and the nonce, then consumes the nonce. A capability that fails any check
-// before the replay check leaves its nonce unused. After an observed clock rollback it returns
-// ErrAuthorizationClockUnsafe for every capability. It runs no network commands.
+// before the replay check leaves its nonce unused. While the wall clock reads earlier than the
+// latest second it has seen, it returns ErrAuthorizationClockUnsafe for every capability. It runs
+// no network commands.
 func (v *Verifier) VerifyAndConsume(capability SignedCapability, expected Intent) error {
 	return v.verify(capability, expected, true)
 }
@@ -384,8 +395,23 @@ func (v *Verifier) Check(capability SignedCapability, expected Intent) error {
 	return v.verify(capability, expected, false)
 }
 
-// ClockSafe reads the clock as an authorization does: false once a wall-clock rollback has been
-// observed. Work authorized earlier checks it again before it acts.
+// Unexpired reads the clock as an authorization does and reports whether a capability consumed
+// earlier is still before its not_after: work queued since its arrival checks it before it acts.
+func (v *Verifier) Unexpired(capability SignedCapability) bool {
+	if v == nil {
+		return false
+	}
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	now, err := v.checkedTimeLocked()
+
+	return err == nil && now.Unix() < capability.Claims.NotAfter
+}
+
+// ClockSafe reads the clock as an authorization does: false while the wall clock reads earlier
+// than the latest second seen. Work authorized earlier checks it again before it acts.
 func (v *Verifier) ClockSafe() bool {
 	if v == nil {
 		return false

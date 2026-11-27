@@ -450,10 +450,17 @@ func TestMultiProbeResponseValidation(t *testing.T) {
 		t.Fatal("evidence without a capability accepted")
 	}
 
+	// The host's clock may run up to MaxIssueSkew ahead of the runtime's, no more.
 	late := *req.Capability
-	late.Claims.IssuedAt = info.FinishedAt.Unix() + 1
+	late.Claims.IssuedAt = info.StartedAt.Add(helperauth.MaxIssueSkew).Unix()
 	lateRequest := req
 	lateRequest.Capability = &late
+
+	if !validMultiProbeResponse(lateRequest, resp) {
+		t.Fatal("evidence within the host's clock skew refused")
+	}
+
+	late.Claims.IssuedAt++
 
 	if validMultiProbeResponse(lateRequest, resp) {
 		t.Fatal("evidence from before the capability was issued accepted")

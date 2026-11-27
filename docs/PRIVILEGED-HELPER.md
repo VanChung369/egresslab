@@ -45,15 +45,17 @@ design.
 - Ed25519 capability minting and verification (`internal/helperauth`).
 - Each capability is bound to one operation, profile, namespace, target and helper. The target is
   the stage for `ConnectTunnel` and the IPv4 address for `PermitProbe`.
-- Short-lived capabilities: 30 seconds at most.
+- Short-lived capabilities: 30 seconds at most between `issued_at` and `not_after`; with the 4 s
+  allowance for the host's clock, a helper whose clock runs behind can accept one for up to 34 s.
 - Cryptographically random 128-bit nonces.
 - A random 128-bit helper epoch (the helper ID), generated at every helper start. The operator
   cannot set or reuse one.
 - After a restart, capabilities minted for the earlier process are refused, consumed or not.
 - Replay protection scoped to the epoch: a process-local replay cache with atomic nonce
   consumption, capped at 4096 live nonces.
-- An observed wall-clock rollback permanently disables authorization for the current helper
-  process.
+- While the wall clock reads earlier than the latest second the helper has seen (a rollback), it
+  refuses every capability; it resumes once the clock catches up (until 2026-11-27 a rollback
+  disabled authorization until the helper restarted).
 - Public-key SHA-256 fingerprints.
 - `HelperInfo`, a read-only IPC operation that returns the helper ID, the key fingerprint and the
   runtime ID.
@@ -296,17 +298,23 @@ signatures, so a non-Go controller can implement the format. A `CreateLab` inten
 - The helper keeps a replay cache of nonces until `not_after`, for the current epoch. A
   capability is single-use. Checks that fail before the replay check leave the nonce unused.
 - The helper's answer is only `authorization denied`. It does not say which check failed.
-- Validity is checked to the second (`issued_at <= now < not_after`) with no clock-skew allowance.
-  The controller runs on Windows and the helper in WSL, so their clocks must agree to well under a
-  second, or tolerance must be added before the controller mints.
-- Clock rollback: if the wall clock reads an earlier second than at a previous signature-valid
-  check, authorization stays disabled until the helper restarts. Nonces are pruned only at times
-  the helper has recorded, so a pruned nonce can never be accepted again. The guard sees only
-  times it observed: an unused capability can still look valid again if the clock steps back
-  with no check in between.
-- The clock fault is silent. The client gets `authorization denied`, `HelperInfo` still reports
-  `authorization_configured: true`, and nothing is logged. On WSL, a backward time correction that
-  crosses a second boundary between two checks triggers it; restart the helper.
+- Validity is checked to the second: `issued_at - 4 s <= now < not_after`. The controller mints with
+  the host's clock and a VM's clock can run behind it, so `issued_at` may lie up to 4 s ahead
+  (`MaxIssueSkew`, since 2026-11-27; none before). That is a second under the controller's 5 s
+  allowance for evidence, so `issued_at`'s truncation to the second never lets the helper accept an
+  attempt that the controller then refuses. Expiry has no allowance, and a nonce stays single-use
+  until `not_after`.
+- Clock rollback: while the wall clock reads an earlier second than the latest one recorded at a
+  signature-valid check, every capability is refused, and the latest second is never lowered.
+  Nonces are pruned only at recorded times, so a pruned nonce has its `not_after` at or before the
+  latest second and could only look valid again at an earlier time, which is refused. Once the
+  clock catches up, authorization resumes. The helper logs `Authorization paused: the wall clock
+  went back Ns behind ...` once, and `Authorization resumed` when it catches up, without blocking
+  (a stalled log sink drops lines); clients get
+  `authorization denied` meanwhile. The guard sees only times it observed: an unused capability
+  can still look valid again if the clock steps back with no check in between. Until 2026-11-27 a
+  rollback disabled authorization, silently, until the helper restarted, and a hold prepared
+  before then could only be released through `recover-egress` after a guest reboot.
 - The controller mints a capability only after the desktop user confirms the action, and only
   when the profile passes its invariants (unique IP, kill-switch). The lab CLI checks the
   invariants and requires `-approve`; a desktop confirmation flow is not implemented.
@@ -626,8 +634,8 @@ right before each signature.
   (verified with Lima 2.3.0). The command line reaches the guest through ssh, so the transport
   passes only plain tokens.
 - **Clocks:** the Windows controller mints with the Windows clock, and the helper checks with
-  the WSL clock. With no skew allowance, a WSL clock behind Windows across a second boundary
-  refuses a fresh capability.
+  the WSL clock. A WSL clock up to 4 s behind Windows is allowed (`MaxIssueSkew`); until
+  2026-11-27, one behind across a second boundary refused a fresh capability.
 
 ### Tunnels from the controller
 
@@ -1307,9 +1315,8 @@ times in order inside at most 80 s, `observed_at` equal to the first source, and
 most 180 whole seconds old at `finished_at`. It then binds the evidence to the request: started
 after the capability was issued and after the request was sent, finished before the answer
 arrived, `observed_at` at most 90 s old and the handshake at most 185 s old at receipt, all with
-5 s of host/runtime clock skew. That allowance covers the evidence only: the helper checks the
-capability's `issued_at` against its own clock with none, so a runtime clock behind the host's
-refuses fresh capabilities. Strict JSON decoding refuses unknown fields, and a failure
+5 s of host/runtime clock skew. The helper checks the capability's `issued_at` against its own clock
+with 4 s (none until 2026-11-27, when a runtime clock behind the host's refused fresh capabilities). Strict JSON decoding refuses unknown fields, and a failure
 document that carries any metadata field, even as `null`, is treated as a runtime failure, not a
 coded refusal. A well-formed policy the controller does not accept (an unknown version or an
 invalid pin) answers `RUNTIME_UNTRUSTED`.
@@ -1957,8 +1964,8 @@ lease's exact tunnel generation:
     A step moves that age by its size, so a wall clock jumped 60 s or more ahead still ends it.
   - A step backwards is still not tolerated everywhere. A WireGuard handshake from before the step
     can then read as being in the future, which faults the tunnel. A receipt can read as from the
-    client's future, which the client refuses. And a rollback that `helperauth` observes disables
-    signed operations for the epoch.
+    client's future, which the client refuses. And while the clock reads earlier than the latest
+    second `helperauth` has seen, signed operations are refused (they resume once it catches up).
 
   A path that answers nothing is therefore cut when the health expires rather than at the first
   failed check, though nothing new crosses it meanwhile. An address change is still caught by the
@@ -2055,8 +2062,8 @@ runs in the foreground until interrupted and changes no global readiness.
   chains windows (6 s each, 250 ms apart) while any stream or request remains, giving way to a due
   monitor check; the gate closes only while the monitor probes. A request's capability is consumed
   on arrival, so the wait for a window cannot outlast it; inside an open window the keeper binds
-  each queued request to the prepared lease (and refuses it if a wall-clock rollback has been seen
-  since) and dials, but only while at least 6 s of the window are
+  each queued request to the prepared lease (and refuses it if its capability has expired since, or
+  while the clock reads earlier than the latest time the verifier has seen) and dials, but only while at least 6 s of the window are
   left (later requests wait for the next window), and every dial ends 2 s before the window's
   deadline, so its worker's cleanup never runs the window past it; a late dial may hold the window
   past 6 s, never past its deadline. A stream's own failure never fails the window. The last stream

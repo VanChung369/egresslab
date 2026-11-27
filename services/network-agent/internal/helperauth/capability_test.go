@@ -137,8 +137,14 @@ func TestCapabilitySignatureTimeAndIdentity(t *testing.T) {
 	}
 	requireInvalid(t, v.VerifyAndConsume(signed, connectIntent()), "other helper")
 
-	v.now = func() time.Time { return now.Add(-time.Second) }
+	// issued_at may lie MaxIssueSkew ahead of the helper's clock, no more.
+	v.now = func() time.Time { return now.Add(-MaxIssueSkew - time.Second) }
 	requireInvalid(t, v.VerifyAndConsume(token, connectIntent()), "not yet valid")
+
+	v.now = func() time.Time { return now.Add(-MaxIssueSkew) }
+	if err := v.Check(token, connectIntent()); err != nil {
+		t.Fatalf("issued within the skew: %v", err)
+	}
 
 	// Time only moves forward here: a step back would trip the rollback guard (epoch_test.go).
 	v.now = func() time.Time { return now.Add(MaxTTL - time.Second) }

@@ -1789,8 +1789,8 @@ Real run on WSL2, with the user's approval for one hold:
   - WSL keeps the working-tree helper and worker. To go back to alpha.3, install the two binaries from `/root/egresslab-bin-backup-alpha3` into `/usr/local/bin`.
 
 Limitations:
-- The controller and the helper still compare their own clocks with no or 1 s allowance: a capability's `issued_at`, and `multiProbeWithin` on the controller. A WSL clock more than a second behind Windows can therefore still refuse a request (see "Clocks" in `docs/PRIVILEGED-HELPER.md`).
-- Steps backwards were not tested on a real helper: correcting a forward step would trip `helperauth`'s rollback check.
+- The helper compared a capability's `issued_at` with its own clock with no allowance, so a WSL clock behind Windows could refuse a request. Since the next section but one it allows 4 s.
+- Steps backwards were not tested on a real helper: at the time, correcting a forward step would have tripped `helperauth`'s rollback check, which then held until a helper restart (see the next sections).
 - This needs a new release.
 
 ### Stream logs and network agent CI on Windows and macOS (2026-11-27)
@@ -1811,6 +1811,35 @@ Limitations:
   - 32 stream lines could fill the 32-line log queue ahead of the fault line; the queue now holds 128.
 - The new fault line prints its error as the monitor's fault line always did.
 - Not yet seen on a real helper: the next run's long connections will show their reason.
+
+### Clock rollback and host clock skew in authorization (2026-11-27)
+
+What changed (`helperauth`):
+- A rollback no longer disables authorization until a restart. While the wall clock reads earlier than the latest second seen, every capability is refused, and the latest second is never lowered. Once the clock catches up, authorization resumes.
+  - Replay stays impossible: nonces are pruned only at recorded times, so a pruned nonce could only look valid again at an earlier time, which is refused.
+  - The helper logs one line when authorization pauses, with how far behind the clock is, and one when it resumes. Before, the fault was silent.
+  - Before, a rollback left a hold that `release-egress` could no longer release; only `recover-egress` after a guest reboot could.
+- `issued_at` may lie up to 4 s ahead of the helper's clock (`MaxIssueSkew`). That is a second under the controller's 5 s allowance for evidence, so the truncation of `issued_at` to the second never lets the helper accept an attempt that the controller refuses.
+  - The same allowance applies where the helper and `helperctl` compare an attempt's start with the capability's issue.
+  - Expiry has no allowance, so a helper whose clock runs behind can accept a capability for up to 34 s instead of 30.
+- A proxy request waiting for a window is refused at admission if its capability has expired meanwhile, or while the clock is behind. The permanent fault used to cover that.
+
+Tests:
+- `TestClockRollbackCannotRestoreConsumedNonce` covers four cases:
+  - a capability minted at the rolled-back time is refused;
+  - so is one a second before the latest time;
+  - authorization resumes at the latest second;
+  - the consumed capability is never accepted again.
+- `TestClockRollbackLogged`: one line on pause, one on resume.
+- `TestClockRollbackLiveNonceAndExpiry`: a consumed capability still live after the catch-up stays consumed, and `Unexpired` turns false at `not_after` and while the clock is behind.
+- `issued_at` exactly 4 s ahead is accepted, and 5 s is refused, both by the verifier and by the response check.
+- 7 mutations each failed a test: the latest time lowered by a rollback, a rollback refusing nothing, no skew, an unbounded skew, the probe start without the skew, no pause line, and `Unexpired` ignoring `not_after`.
+- Codex reviewed it. Fixed:
+  - a queued proxy request could dial after its capability expired, once the clock had caught up;
+  - the log lines were written under the verifier's lock, so a stalled sink could stall authorization; they are now queued without blocking;
+  - near the boundary, the helper could accept an attempt that the controller refused (hence 4 s);
+  - the docs overstated the 30 s limit.
+- `go test -race` passed in WSL, and `go test` and `go vet` (windows, darwin, linux) on Windows.
 
 ## Security Notes
 

@@ -168,7 +168,8 @@ func validMultiProbeForCapability(
 	return validMultiProbeForCapabilityAcross(info, intent, capability, 0)
 }
 
-// validMultiProbeForCapabilityAcross allows the start a wall-clock step earlier than the issue.
+// validMultiProbeForCapabilityAcross allows the start a wall-clock step earlier than the issue, on
+// top of the skew between the host's clock and this one (helperauth.MaxIssueSkew).
 func validMultiProbeForCapabilityAcross(
 	info *MultiProbeInfo,
 	intent *helperauth.Intent,
@@ -184,7 +185,7 @@ func validMultiProbeForCapabilityAcross(
 		return false
 	}
 
-	return !info.StartedAt.Before(time.Unix(capability.Claims.IssuedAt, 0).Add(-step))
+	return !info.StartedAt.Before(time.Unix(capability.Claims.IssuedAt, 0).Add(-helperauth.MaxIssueSkew - step))
 }
 
 // multiProbeWithin requires evidence that started no earlier than from, with the agent's 1 s

@@ -5,15 +5,39 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
+	"sync"
 	"time"
 )
 
-// ErrAuthorizationClockUnsafe wraps ErrInvalidCapability. Once returned, the verifier refuses every
-// capability until the helper restarts with a fresh epoch.
+// ErrAuthorizationClockUnsafe wraps ErrInvalidCapability. The verifier returns it while the wall
+// clock reads earlier than the latest second it has seen, and accepts capabilities again once the
+// clock has caught up.
 var ErrAuthorizationClockUnsafe = fmt.Errorf(
-	"%w: helper clock unsafe; restart required",
+	"%w: helper clock behind the latest time seen",
 	ErrInvalidCapability,
 )
+
+var (
+	verifierLogs   = make(chan string, 8)
+	verifierLogger sync.Once
+)
+
+// logDetached never blocks the verifier, which logs under its lock: a stalled sink drops lines.
+func logDetached(format string, args ...any) {
+	verifierLogger.Do(func() {
+		go func() {
+			for line := range verifierLogs {
+				log.Print(line)
+			}
+		}()
+	})
+
+	select {
+	case verifierLogs <- fmt.Sprintf(format, args...):
+	default:
+	}
+}
 
 // NewHelperID creates a fresh random 128-bit helper epoch. A helper generates one at every start
 // and never reuses an identity from a previous process, so capabilities minted for an earlier
@@ -47,21 +71,28 @@ func (v *Verifier) Identity() (helperID, publicKeySHA256 string) {
 
 // checkedTimeLocked reads the wall clock. It must be called with v.mu held.
 //
-// If the wall clock reads earlier than at a previous call, to the second, authorization stays
-// disabled for this verifier. Nonces are pruned only at times recorded here, so a pruned nonce can
-// never become valid again: its not_after is at or before the last recorded time.
+// While the wall clock reads earlier than the latest second recorded here, every capability is
+// refused, and the latest second is never lowered. Nonces are pruned only at times recorded here,
+// so a pruned nonce has its not_after at or before the latest second: it could only look valid
+// again at an earlier time, which is refused. Once the clock catches up, authorization resumes.
+// Until 2026-11-27 a rollback disabled authorization until the helper restarted.
 func (v *Verifier) checkedTimeLocked() (time.Time, error) {
-	if v.clockFailed {
-		return time.Time{}, ErrAuthorizationClockUnsafe
-	}
-
 	now := v.now()
 	seconds := now.Unix()
 
 	if seconds <= 0 || (v.lastWall != 0 && seconds < v.lastWall) {
-		v.clockFailed = true
+		if !v.clockBehind {
+			v.clockBehind = true
+			v.logf("Authorization paused: the wall clock went back %ds behind the latest time seen; "+
+				"capabilities are refused until it catches up", v.lastWall-seconds)
+		}
 
 		return time.Time{}, ErrAuthorizationClockUnsafe
+	}
+
+	if v.clockBehind {
+		v.clockBehind = false
+		v.logf("Authorization resumed: the wall clock caught up")
 	}
 
 	v.lastWall = seconds

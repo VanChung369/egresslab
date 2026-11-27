@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -96,6 +98,8 @@ func TestHelperEpochInvalidatesOldCapabilities(t *testing.T) {
 	}
 }
 
+// A rollback refuses every capability until the clock is back at the latest second seen, and never
+// lets a consumed nonce be accepted again.
 func TestClockRollbackCannotRestoreConsumedNonce(t *testing.T) {
 	now := time.Unix(1795500000, 0)
 	token, verifier, private := testToken(t, connectIntent(), now)
@@ -147,11 +151,59 @@ func TestClockRollbackCannotRestoreConsumedNonce(t *testing.T) {
 		t.Fatal("a rolled-back clock reported safe")
 	}
 
-	// Moving the clock forward does not clear the fault. A new helper epoch is required.
+	// A capability minted at the rolled-back time is refused too, and the latest time is not lowered.
+	behind := now.Add(5 * time.Second)
+
+	if err := verifier.VerifyAndConsume(mint(behind), connectIntent()); !errors.Is(err, ErrAuthorizationClockUnsafe) {
+		t.Fatalf("a capability behind the latest time accepted: %v", err)
+	}
+
+	verifier.now = func() time.Time { return later.Add(-time.Second) }
+
+	if err := verifier.Check(mint(later.Add(-time.Second)), connectIntent()); !errors.Is(err, ErrAuthorizationClockUnsafe) {
+		t.Fatalf("authorization resumed before the clock caught up: %v", err)
+	}
+
+	// Once the clock is back at the latest second, authorization resumes; the consumed capability
+	// has expired by then, so it can never be accepted again.
 	verifier.now = func() time.Time { return later }
 
-	if err := verifier.VerifyAndConsume(mint(later), connectIntent()); !errors.Is(err, ErrAuthorizationClockUnsafe) {
-		t.Fatalf("clock fault was cleared: %v", err)
+	if !verifier.ClockSafe() {
+		t.Fatal("a clock that caught up reported unsafe")
+	}
+
+	if err := verifier.VerifyAndConsume(token, connectIntent()); err == nil || errors.Is(err, ErrAuthorizationClockUnsafe) {
+		t.Fatalf("the consumed capability after the catch-up: %v", err)
+	}
+
+	if err := verifier.VerifyAndConsume(mint(later), connectIntent()); err != nil {
+		t.Fatalf("authorization did not resume: %v", err)
+	}
+}
+
+// A rollback logs one line when authorization pauses and one when it resumes.
+func TestClockRollbackLogged(t *testing.T) {
+	now := time.Unix(1795500000, 0)
+	token, verifier, _ := testToken(t, connectIntent(), now)
+
+	var lines []string
+	verifier.logf = func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+
+	if err := verifier.Check(token, connectIntent()); err != nil {
+		t.Fatal(err)
+	}
+
+	verifier.now = func() time.Time { return now.Add(-2 * time.Second) }
+	_ = verifier.ClockSafe()
+	_ = verifier.ClockSafe()
+
+	verifier.now = func() time.Time { return now }
+	_ = verifier.ClockSafe()
+	_ = verifier.ClockSafe()
+
+	if len(lines) != 2 || !strings.Contains(lines[0], "paused") || !strings.Contains(lines[0], "2s behind") ||
+		!strings.Contains(lines[1], "resumed") {
+		t.Fatalf("log lines: %q", lines)
 	}
 }
 
@@ -163,5 +215,44 @@ func TestClockAtOrBeforeEpochIsUnsafe(t *testing.T) {
 
 	if err := verifier.VerifyAndConsume(token, connectIntent()); !errors.Is(err, ErrAuthorizationClockUnsafe) {
 		t.Fatalf("zero clock: %v", err)
+	}
+}
+
+// A consumed capability still live when the clock catches up stays consumed; work queued since it
+// was consumed sees it expire, and sees nothing while the clock is behind.
+func TestClockRollbackLiveNonceAndExpiry(t *testing.T) {
+	now := time.Unix(1795500000, 0)
+	token, verifier, _ := testToken(t, connectIntent(), now)
+
+	if err := verifier.VerifyAndConsume(token, connectIntent()); err != nil {
+		t.Fatal(err)
+	}
+
+	verifier.now = func() time.Time { return now.Add(10 * time.Second) }
+
+	if !verifier.Unexpired(token) {
+		t.Fatal("a live capability reported expired")
+	}
+
+	verifier.now = func() time.Time { return now.Add(5 * time.Second) }
+
+	if verifier.Unexpired(token) {
+		t.Fatal("a capability judged by a clock behind the latest time")
+	}
+
+	verifier.now = func() time.Time { return now.Add(10 * time.Second) }
+
+	if err := verifier.VerifyAndConsume(token, connectIntent()); !errors.Is(err, ErrCapabilityReplay) {
+		t.Fatalf("a live nonce after the catch-up: %v", err)
+	}
+
+	verifier.now = func() time.Time { return time.Unix(token.Claims.NotAfter, 0) }
+
+	if verifier.Unexpired(token) {
+		t.Fatal("an expired capability reported unexpired")
+	}
+
+	if (*Verifier)(nil).Unexpired(token) {
+		t.Fatal("nil verifier")
 	}
 }

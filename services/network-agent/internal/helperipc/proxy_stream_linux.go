@@ -78,8 +78,8 @@ func (l *LabLifecycle) authorizeProxyRequestLocked(req Request, k proxyKeeper, r
 	destination, _ := req.Intent.ProxyDestination()
 	p := l.preparedLease
 
-	// A rollback observed since the capability was consumed disables it too.
-	if !v.ClockSafe() {
+	// Consumed on arrival: it must still be unexpired now, by a clock that is not behind.
+	if !v.Unexpired(*req.Capability) {
 		return netip.AddrPort{}, errLabAuthorization
 	}
 
