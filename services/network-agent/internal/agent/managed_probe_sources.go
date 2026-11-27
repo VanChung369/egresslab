@@ -12,7 +12,6 @@ import (
 	"net/netip"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -382,9 +381,17 @@ func probeNoAnswer(err error) bool {
 		return true
 	}
 
-	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) ||
-		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+	return probeErrnoIn(err, probeLostErrnos) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+func probeErrnoIn(err error, errnos []error) bool {
+	for _, errno := range errnos {
+		if errors.Is(err, errno) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // tlsAlertReceived reports an alert the source sent, which TLS 1.3 may deliver after the handshake.
@@ -430,7 +437,7 @@ func (c receivingConn) Read(p []byte) (int, error) {
 		c.trace.received.Store(true)
 	}
 
-	if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) {
+	if errors.Is(err, io.EOF) || probeErrnoIn(err, probeResetErrnos) {
 		c.trace.closed.Store(true)
 	}
 

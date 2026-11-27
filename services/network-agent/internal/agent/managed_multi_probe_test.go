@@ -121,10 +121,6 @@ func TestManagedMultiProbeLifecycle(t *testing.T) {
 		{mode: "drift after second source", windows: 2, text: "fwmark"},
 		{mode: "stale handshake", windows: 2, want: ErrManagedHandshake},
 		{mode: "wrong handshake peer", windows: 2, want: ErrManagedHandshake},
-		{mode: "clock stepped back between sources", windows: 2, want: ErrInvalidObservation, text: "clock"},
-		{mode: "clock stepped forward before finish", windows: 2, want: ErrInvalidObservation, text: "clock"},
-		{mode: "clock swung back between sources", windows: 2, want: ErrInvalidObservation, text: "clock"},
-		{mode: "clock nudged back between sources", windows: 2, want: ErrInvalidObservation, text: "backwards"},
 		{mode: "source pin routed locally", windows: 1, want: ErrManagedNetworkDrift},
 		{mode: "handshake after finish", windows: 2, want: ErrManagedHandshake},
 		{mode: "uncertain rollback", windows: 2, want: ErrManagedTunnelUncertain},
@@ -209,19 +205,6 @@ func TestManagedMultiProbeLifecycle(t *testing.T) {
 			}
 
 			switch tt.mode {
-			case "clock stepped back between sources":
-				b.multiProbe.clock = offsetClock(time.Now().UTC(), time.Second, 0, 0, -1500*time.Millisecond,
-					-1500*time.Millisecond)
-			case "clock stepped forward before finish":
-				b.multiProbe.clock = offsetClock(time.Now().UTC(), time.Second, 0, 0, 0, 5*time.Second)
-			case "clock swung back between sources":
-				// Within the tolerance of the start each time, but 1.5 s backwards between the two sources.
-				b.multiProbe.clock = offsetClock(time.Now().UTC(), time.Second, 0, 750*time.Millisecond,
-					-750*time.Millisecond, -750*time.Millisecond)
-			case "clock nudged back between sources":
-				// 300 ms apart, then 500 ms back: within every tolerance, but the second source predates the first.
-				b.multiProbe.clock = offsetClock(time.Now().UTC(), 300*time.Millisecond, 0, 0,
-					-500*time.Millisecond, -500*time.Millisecond)
 			case "handshake after finish":
 				// A steady clock ten minutes behind the kernel's handshake time.
 				b.multiProbe.clock = offsetClock(time.Now().UTC().Add(-10*time.Minute), time.Second)

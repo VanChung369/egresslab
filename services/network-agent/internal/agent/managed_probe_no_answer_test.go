@@ -6,10 +6,12 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -151,7 +153,12 @@ func TestManagedProbeNoAnswer(t *testing.T) {
 			if err != nil {
 				return
 			}
+			// FIN, not the reset a close with the hello unread would send: Windows drops unread
+			// bytes on a reset.
 			_, _ = c.Write([]byte("HT"))
+			_ = c.(*net.TCPConn).CloseWrite()
+			_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+			_, _ = io.Copy(io.Discard, c)
 			_ = c.Close()
 		}
 	}()
@@ -244,8 +251,24 @@ func TestManagedProbeNoAnswer(t *testing.T) {
 		}
 	}
 
-	if !probeNoAnswer(fmt.Errorf("read: %w", syscall.ECONNRESET)) {
-		t.Error("a reset is no answer")
+	// Listed here, not taken from the lists under test.
+	lost := []syscall.Errno{syscall.ECONNREFUSED, syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.ETIMEDOUT}
+	reset := []syscall.Errno{syscall.ECONNRESET}
+	if runtime.GOOS == "windows" {
+		lost = []syscall.Errno{10061, 10065, 10051, 10060}
+		reset = []syscall.Errno{10054, 10053, 64}
+	}
+
+	for _, errno := range append(lost, reset...) {
+		if !probeNoAnswer(fmt.Errorf("read: %w", errno)) {
+			t.Errorf("%v (%d) is no answer", errno, errno)
+		}
+	}
+
+	for _, errno := range reset {
+		if !probeErrnoIn(fmt.Errorf("read: %w", errno), probeResetErrnos) {
+			t.Errorf("%v (%d) is a reset", errno, errno)
+		}
 	}
 }
 
@@ -268,8 +291,6 @@ func TestManagedMultiProbeNoAnswer(t *testing.T) {
 		{mode: "worker left running", source: 0, want: ErrNetNSBusy},
 		{mode: "cancelled", source: 0, want: context.Canceled},
 		{mode: "expired window", source: 1, want: ErrProbePolicyDrift},
-		{mode: "clock stepped", source: 0, want: ErrInvalidObservation, text: "clock"},
-		{mode: "cancelled at the clock check", source: 0, want: context.Canceled},
 	}
 
 	for _, tt := range tests {
@@ -285,31 +306,10 @@ func TestManagedMultiProbeNoAnswer(t *testing.T) {
 				*pids = []string{"", "4242\n"}
 			}
 
-			var clock managedProbeClock
-
-			switch tt.mode {
-			case "clock stepped":
-				// The wall clock steps back 1.5 s between the start and the source without an answer.
-				clock = offsetClock(time.Now().UTC(), time.Second, 0, -1500*time.Millisecond)
-			case "cancelled at the clock check":
-				// The attempt is cancelled at its second reading, after the source's window closed.
-				steady := offsetClock(time.Now().UTC(), time.Second)
-				readings := 0
-				clock = func() (time.Time, time.Duration) {
-					readings++
-					if readings == 2 {
-						cancel()
-					}
-
-					return steady()
-				}
-			}
-
 			calls := 0
 
 			b.multiProbe = &managedMultiProbeConfig{
 				identPin: sources[1].destination,
-				clock:    clock,
 				run: func(_ context.Context, _ string, source managedProbeHTTPSource) ([]byte, error) {
 					index := calls
 					calls++

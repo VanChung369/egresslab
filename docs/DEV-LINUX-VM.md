@@ -1634,6 +1634,165 @@ Limitations:
 - Whether these classes cover the failures seen so far is unknown until the next one is logged with its reason.
 - This needs a new release.
 
+### Tests on Windows and release v0.3.0-alpha.3 on WSL2 (2026-11-27)
+
+Tests of `bb8073f`:
+- Windows, Go 1.26.2 and 1.23.2:
+  - `gofmt` is clean, and `go vet` passes for all six release targets in both modules;
+  - the controller passed: 547 tests and subtests.
+- `TestManagedProbeNoAnswer` failed on Windows (fixed below). CI does not test the network agent on Windows.
+- WSL, Go 1.27.4: `go test -race` passed for both modules.
+- Desktop:
+  - in a clean export of the tree (`yarn install --frozen-lockfile`): Prettier passed, and svelte-check reported 0 errors and 2 accessibility warnings;
+  - the sidecar built, and `cargo fmt --check` passed;
+  - `clippy` and `cargo test` cannot link on this machine (no MSVC `link.exe`); the macOS CI job runs them.
+  - In the working tree, svelte-check reported a missing `@tauri-apps/api/core`: that `node_modules` predates the dependency.
+
+Fixed: probe failure classes on Windows.
+- Winsock reports its own error codes, and Go's `syscall.Errno.Is` maps none of them to the Unix names. A refused connection, or one aborted before TLS, was therefore classed `HTTPS_REQUEST_FAILED` instead of `HTTPS_NO_ANSWER`.
+- The errno lists are now per system:
+  - `managed_probe_errno_other.go` keeps exactly the previous values;
+  - `managed_probe_errno_windows.go` has `WSAECONNREFUSED`, `WSAEHOSTUNREACH`, `WSAENETUNREACH` and `WSAETIMEDOUT`, which Go does not count as a timeout. A reset is `WSAECONNRESET`, `WSAECONNABORTED` or `ERROR_NETNAME_DELETED`.
+- The worker runs only on Linux, so this changes no runtime behavior; the module's tests now pass on Windows as well.
+- The "short reply, not TLS" test server wrote two bytes and closed with the client's hello unread. That close sends a reset, and Windows drops unread bytes on a reset, so the client sometimes saw no byte. It now sends FIN, then drains with a deadline.
+- The test lists the expected codes for each system itself instead of reading the lists it checks.
+- Checks:
+  - removing any one of the seven Winsock codes failed the test on Windows;
+  - the old test server failed it in 2 of 3 runs, as a race does;
+  - the final version passed 20 times in a row on Windows, and the earlier one 10 times under `-race` in WSL. A full `-race` run passed with the final version.
+- Codex reviewed it and found four gaps, all fixed: `WSAETIMEDOUT`, `ERROR_NETNAME_DELETED`, the drain without a deadline, and expected values taken from the list under test.
+- Not covered on any system, before or after: `receivingConn` marking a reset as a close. Removing that changes no test result, because the reset error itself already counts as a cut.
+
+The artifact (`egresslab-v0.3.0-alpha.3.zip`, the official build of `272917d`), checked again on Windows and in WSL:
+- all 8 checksums verified, with exact members, owner `0/0` and modes 0755 and 0644;
+- 24 of 24 binaries embed Go 1.23.12, `vcs.revision=272917d…` and `vcs.modified=false`;
+- the docs are those of `272917d`, and no archive holds a key, state file, build path or egress address.
+- The amd64 runtime went into WSL `/usr/local/bin` (helper `b37d812f`, worker `f32aaefd`). The alpha.1 binaries are in `/root/egresslab-bin-backup-alpha1`.
+
+ident.me's address had changed:
+- The helper's pin (from 2026-11-25) was no longer an answer for `4.ident.me`. Pinned HTTPS to it timed out even from the host's own network.
+- Four `probe-egress-multi` attempts answered `EVIDENCE_UNAVAILABLE`, and the lab stayed `tunnel_configured`. The first, right after `connect-tunnel`, named Cloudflare as without an answer; the other three named ident.me.
+- The pin was replaced as described under "Multi-source helper": the current single answer was verified by pinned HTTPS with certificate checks (3 of 3), staged, checked by `check-multi-probe-pin`, and renamed. The old pin is kept root-only.
+- The Lima instances keep their own pins, and those may need the same change.
+
+First hold, with the user's approval:
+- `probe-egress-multi` passed at the first attempt (3.7 s); the hold was prepared, and an endpoint was created through the alpha.3 HTTP controller and served by `serve-endpoint`.
+- Hostname requests: `api4.ipify.org` 3 of 3, `ifconfig.co` 3 of 3 and 8 of 8 concurrent, all at the reserved address. The Windows DNS cache held neither name.
+- 108 s after the hold, after four healthy checks, the monitor faulted the lab: `monitor health expired`, 12 s after the last healthy check.
+  - Cause: the WSL VM's clock ran about 4% slow against Windows, and its wall clock was stepped forward every 33 s.
+    - The journal logged `Clock change detected` 931 times between the VM's boot the evening before and noon, and 55 more times after 19:00.
+    - That the stepper is `systemd-timesyncd` is inferred from the 33 s cadence (its shortest poll interval); its log shows only the first synchronization.
+    - The steps measured just after the fault were 1.07 and 1.11 s. Those at 19:27:30 and 19:28:03, during the hold, did not fault, and their size is unknown.
+  - The helper refuses to trust health across a wall-clock step of more than 1 s (`evidenceClockStable`). The step at 19:28:37 came a second before the fault. Its refusal is by design, and it failed closed: the streams closed, new requests were refused, and the hold stayed.
+- `release-egress` released it in 0.4 s with `generation_retired: true`.
+- During the same period, `TestProxyStreamFirstRequestsJoin` failed once under `-race` in WSL; its message was not kept.
+  - It then passed 20 times in a row, a full run and three runs of its package. Later it passed 100 of 100 times under `-race` while the clock was again stepping by more than 1 s.
+  - Its cause is unknown.
+
+`wsl --shutdown`, with the user's approval:
+- The clock still ran 1.5 to 2.3% slow; right after the restart, the steps were 0.73 to 0.76 s every 33 s.
+- During the second hold they were 0.79 to 1.00 s (0.999 s at 20:00:53).
+- From 20:02, once the hold was over, they were 1.09 to 1.13 s again, so the restart helped for about ten minutes. The cause on the host is unknown.
+
+Second hold, with the user's approval:
+- `probe-egress-multi` passed at the first attempt (3.7 s), and `reserve-egress` prepared the hold in 3.6 s.
+- Hostname requests: 3 of 3, 3 of 3 and 8 of 8 concurrent, all at the reserved address; the DNS cache held neither name.
+  - 9 of these 14 requests took 2.3 to 7.3 s, and 5 took about 13 s. Why those 5 waited was not analyzed.
+- Refused as expected: a wrong password, `1.1.1.1`, TCP port 53 and the name `localhost`. A normal request right after them matched.
+- 360 requests on one kept-alive connection (3 a second for 2.5 minutes):
+  - all matched, with no new connection;
+  - median 0.31 s, 95th percentile 0.84 s, maximum 4.7 s;
+  - 7 took over 1 s, each at a monitor check.
+- The monitor reported 12 healthy checks, 16 to 25 s apart, and no fault until the kill switch.
+- Kill switch, with a 50 KB/s download running and the lab's `wg0` taken down as root:
+  - the lab had no route left;
+  - three requests during the outage were all refused, and none was answered by another path;
+  - the lab was `faulted` 5 s later;
+  - the download ended (curl 56) after 17 KiB already buffered;
+  - a new request was refused, and the hold stayed.
+- `release-egress` released it in 0.3 s with `generation_retired: true`.
+
+After:
+- the endpoints were deleted through the API, and the labs deleted; `egresslab-lab-recover` found nothing;
+- the helper stopped, leaving no namespace, table or process;
+- `state.json` is unchanged, and `runtimes.json` differs only in the binding's `updated_at`;
+- the journal went from 10180 to 13532 bytes;
+- WSL keeps the alpha.3 runtime.
+
+Limitations:
+- A WSL VM whose clock runs a few percent slow faults every hold within minutes, once its steps exceed 1 s. On this machine a restart brought them under 1 s only for about ten minutes, and the second hold ran with as little as a millisecond of margin.
+  - Before a real run, check `journalctl | grep -c "Clock change detected"`.
+  - The helper now tolerates such steps; see the next section.
+- Native Linux has still not run end to end.
+
+### Wall-clock steps no longer fault a hold (2026-11-27)
+
+What changed, with the details in `docs/PRIVILEGED-HELPER.md`:
+- Between checks: the monitor's health and the verified evidence are timed on the monotonic clock, and bounded by their wall-clock age too (`freshSince`). A step alone no longer ends them, and a wall clock 60 s or more ahead (a paused VM) still does.
+- During a check: a step that is the only cause ends the attempt like a source without an answer, with the reason `WALL_CLOCK_STEPPED`. This applies in the worker's attempt, and in the helper around the probe and at the renewal. The check runs again 2 s later and renews nothing meanwhile.
+- An on-demand `probe-egress-multi` or `reserve-egress` across a step answers `EVIDENCE_UNAVAILABLE` and leaves the lab configured.
+- Still faults, step or not:
+  - an invalid observation;
+  - a changed pinned address, generation or policy;
+  - a failed window cleanup or readback;
+  - a busy namespace or a tunnel that no longer verifies.
+
+Tests:
+- `TestManagedMultiProbeClockStepped` (agent) covers 11 cases:
+  - a step within the 1 s tolerance passes;
+  - 1.1 s forward as on WSL, 5 s forward at the finish, 1.5 s back between sources, a swing back, and a 500 ms nudge back each end softly: tunnel, pin and firewall unchanged, and the next attempt runs;
+  - a step still removes the tunnel when it comes with a failed cleanup, with drift, with a changed pinned address, with two sources that disagree, or (at the finish) with a handshake from the wrong peer.
+- `TestFreshSinceClockSteps`: the monotonic deadline, a reading before the record, 1.1 s ahead (fresh), 10 minutes ahead (not fresh), and a step back past the observation (fresh until the monotonic deadline, never after).
+- `TestEgressMonitorClockStepped`:
+  - a step around the probe, from its start or from its end to the renewal leaves the health and schedules the recheck, which then renews;
+  - with an invalid observation, or one that started 10 s before the check, it faults.
+- `TestGenerationProbeClockStepped`:
+  - `EVIDENCE_UNAVAILABLE` with the lab configured, then a normal probe;
+  - with an observation that started before the capability was issued, or finished in the helper's future, it faults.
+- The helper simulates a step through `LabLifecycle.clockStable` (nil in production), because Go offers no way to build a time with a stepped wall clock.
+- The earlier clock cases in `TestManagedMultiProbeLifecycle` moved to the new test, and the no-answer test keeps the source's own reason across a step.
+- 17 mutations, each caught by a test:
+  - in the agent (6): any step made soft even when joined with a failure; no soft path in the loop; a step at the finish faulting; the soft path skipping the tunnel check; no address comparison before the clock; the finish without the handshake peer check;
+  - in `freshSince` (3): no wall-clock age bound; a step back ending it; no monotonic deadline;
+  - in the monitor (5): a step around the probe or by the renewal faulting; the step checked before the time bounds, or before validity; no check from the probe's end to the renewal;
+  - in the on-demand probe (3): no soft step; the step checked before the time bounds; bounds widened beyond the measured step.
+- Not caught by a unit test: putting the step check back between checks, which needs a real step.
+- Codex reviewed it. Fixed:
+  - a step could hide a disagreement between sources, or a malformed handshake from the wrong peer at the finish;
+  - the helper made an attempt soft before checking its times, so a step could hide an observation outside the attempt;
+  - the monitor did not compare the probe's end with the renewal.
+- Codex also flagged a pin set by an attempt that the helper then discards. That is intended: the agent verified that address.
+- Paths that still fail on a backward step are listed in `docs/PRIVILEGED-HELPER.md`; they predate this change.
+- `go test` passed on Windows (Go 1.26.2), and `go test -race` passed in WSL. `go vet` passed for linux, windows and darwin.
+
+Real run on WSL2, with the user's approval for one hold:
+- Setup:
+  - the helper (`4446c8d2`) and the probe worker (`f9631f73`) were built from the working tree; the alpha.3 ones are in `/root/egresslab-bin-backup-alpha3`;
+  - the rest of the runtime and the Windows controller were alpha.3;
+  - `clockstep.py` sampled the VM's clock throughout.
+- `probe-egress-multi` passed at the first attempt (3.6 s), and `reserve-egress` prepared the hold in 3.7 s.
+- Hostname requests: 3 of 3, 3 of 3 and 8 of 8 concurrent, all at the reserved address. The DNS cache held neither name.
+- 16.5 minutes of traffic:
+  - 2100 requests on one kept-alive connection (curl reconnected twice), all at the reserved address: median 0.30 s, 95th percentile 0.81 s, maximum 8.8 s (the first request);
+  - a 20 KB/s download alongside ended with curl 56 after 323 s (6.2 MB), before any step over 1 s, with nothing in the helper log. As on Lima, what ends such connections is unknown.
+- The clock stepped 31 times, from +0.77 to +1.19 s; 15 steps were over 1 s, from 20:53 on.
+  - The alpha.3 helper would have faulted the lab at the first of them.
+  - The monitor reported 45 healthy checks.
+  - Three checks met a step: `source ident_me: probe source unavailable; tunnel unchanged (WALL_CLOCK_STEPPED); health not renewed, 35s left`. Each recheck, 6 s later, was healthy.
+- Kill switch, with `wg0` taken down:
+  - three requests were refused, and none was answered by another path;
+  - the lab was `faulted` 4 s later, and the hold stayed.
+- `release-egress` released it in 0.3 s with `generation_retired: true`.
+- After:
+  - the endpoint and the lab were deleted, `egresslab-lab-recover` found nothing, and the helper stopped;
+  - `state.json` is unchanged, and the journal went from 13532 to 15209 bytes;
+  - WSL keeps the working-tree helper and worker. To go back to alpha.3, install the two binaries from `/root/egresslab-bin-backup-alpha3` into `/usr/local/bin`.
+
+Limitations:
+- The controller and the helper still compare their own clocks with no or 1 s allowance: a capability's `issued_at`, and `multiProbeWithin` on the controller. A WSL clock more than a second behind Windows can therefore still refuse a request (see "Clocks" in `docs/PRIVILEGED-HELPER.md`).
+- Steps backwards were not tested on a real helper: correcting a forward step would trip `helperauth`'s rollback check.
+- This needs a new release.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.

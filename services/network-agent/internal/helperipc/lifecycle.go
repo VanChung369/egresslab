@@ -150,6 +150,8 @@ type LabLifecycle struct {
 
 	logf func(format string, args ...any) // nil: log.Printf
 
+	clockStable func(from, to time.Time) bool // nil: evidenceClockStable; tests stand in for a step
+
 	// The streams of the prepared lease and their keeper; written under mu, read without it so that
 	// a release can cancel them. proxyCount counts admitted and waiting streams.
 	proxyPlane atomic.Pointer[proxyPlane]

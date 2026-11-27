@@ -55,13 +55,7 @@ type egressMonitorHealth struct {
 }
 
 func (h egressMonitorHealth) fresh(now time.Time) bool {
-	if h.checkedAt.IsZero() || !evidenceClockStable(h.checkedAt, now) || !now.Before(h.expiresAt) {
-		return false
-	}
-
-	age := now.Sub(h.observedAt)
-
-	return age >= 0 && age < verifiedProbeEvidenceTTL
+	return freshSince(h.checkedAt, h.observedAt, h.expiresAt, now)
 }
 
 // renewBy is the last moment a renewal can start with its whole probe budget before the health
@@ -296,9 +290,24 @@ func (l *LabLifecycle) monitorPreparedLocked(ctx context.Context) (*PreparedLeas
 
 	info := MultiProbeInfo{ProfileID: lab.ProfileID, Namespace: lab.Namespace, MultiProbeObservation: observation}
 
-	if !validMultiProbeObservation(&info, &expected) || !multiProbeWithin(&info, startedAt, finishedAt) ||
-		!evidenceClockStable(startedAt, finishedAt) {
+	if !validMultiProbeObservation(&info, &expected) {
 		return fail(errors.New("invalid monitor observation"))
+	}
+
+	// A step widens the time check by its own size only; a step alone then renews nothing.
+	stable := l.attemptClockStable(startedAt, finishedAt)
+
+	var step time.Duration
+	if !stable {
+		step = wallClockStep(startedAt, finishedAt)
+	}
+
+	if !multiProbeWithinAcross(&info, startedAt, finishedAt, step) {
+		return fail(errors.New("invalid monitor observation"))
+	}
+
+	if !stable {
+		return nil, l.monitorUnansweredLocked(p, lab, expected.TunnelGeneration, deadline, errClockStepped)
 	}
 
 	current, err := l.currentGenerationLocked(lab.Namespace)
@@ -311,10 +320,14 @@ func (l *LabLifecycle) monitorPreparedLocked(ctx context.Context) (*PreparedLeas
 	}
 
 	checkedAt := time.Now()
+
+	if !l.attemptClockStable(startedAt, checkedAt) || !l.attemptClockStable(finishedAt, checkedAt) {
+		return nil, l.monitorUnansweredLocked(p, lab, expected.TunnelGeneration, deadline, errClockStepped)
+	}
+
 	age := checkedAt.Sub(observation.ObservedAt)
 
-	if !evidenceClockStable(startedAt, checkedAt) || !p.monitor.fresh(checkedAt) || !checkedAt.Before(deadline) ||
-		age < 0 || age >= verifiedProbeEvidenceTTL {
+	if !p.monitor.fresh(checkedAt) || !checkedAt.Before(deadline) || age < 0 || age >= verifiedProbeEvidenceTTL {
 		return fail(errors.New("monitor renewal expired"))
 	}
 
@@ -330,7 +343,8 @@ func (l *LabLifecycle) monitorPreparedLocked(ctx context.Context) (*PreparedLeas
 	return &renewed, nil
 }
 
-// monitorUnansweredLocked: a source gave no answer and the backend verified the tunnel unchanged.
+// monitorUnansweredLocked: a source gave no answer, or the wall clock stepped during the check, and
+// the backend verified the tunnel unchanged.
 // Nothing is renewed: the health keeps its expiry, which still cuts the tunnel if no check succeeds
 // before it, and the check runs again after egressMonitorRecheck. The caller holds l.mu.
 func (l *LabLifecycle) monitorUnansweredLocked(p *preparedEgressLease, lab LabInfo, generation string,

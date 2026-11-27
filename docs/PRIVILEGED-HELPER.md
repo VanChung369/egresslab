@@ -26,7 +26,7 @@ prepared, the helper re-verifies its generation's address with the same two sour
 drift or a failed check faults and removes the tunnel, and the durable hold stays. Since Step 36 a
 source that gives no answer only renews nothing: the check runs again, and the tunnel is cut if
 the health expires first. Since 2026-11-27 that includes the verified host answering a service error
-(429 or 5xx) or cutting its reply short. A loopback
+(429 or 5xx) or cutting its reply short, and a wall-clock step during the check. A loopback
 SOCKS5 proxy (`serve-socks`) carries IPv4 TCP streams through the prepared generation: each CONNECT
 is a signed `OpenProxyStreamV1`, the socket is opened inside the lab by an unprivileged worker and
 handed to the helper, and its traffic passes only a kernel-timed gate that the helper renews while
@@ -1122,7 +1122,21 @@ about the egress address:
   namespace or a tunnel check) faults as before. All timestamps are wall-clock UTC, and each one is
 checked against monotonic time: if the wall clock moved more than 1 s away from it since the
 attempt started or since the previous reading (a clock step in either direction), or if a
-reading is earlier than the previous one, the attempt fails closed.
+reading is earlier than the previous one, the timestamps prove nothing.
+- **A clock step (since 2026-11-27).** It says nothing about the egress either, so a step alone
+  ends the attempt like a source without an answer: `ErrManagedProbeSourceUnavailable` with the
+  reason `WALL_CLOCK_STEPPED`, no evidence, no pin, and the tunnel verified as staged. It applies
+  only when the source's window closed as opened with nothing else joined to the step, or when the
+  step shows at the finish, after the last window closed and the tunnel verified.
+  - What a step cannot hide: each source's address is compared with the pin and with the first
+    source before the clock is read; at the finish, the handshake's peer and format are still
+    checked (only its age needs the clock); a failed cleanup, readback or tunnel check on top of a
+    step still faults.
+  - An attempt the agent completed can still pin its verified address when the helper then
+    discards it over the helper's own clock check; the pin stands, as for any address two sources
+    agreed on.
+  - Why: a WSL2 VM whose clock ran 4% slow was stepped forward by about 1.1 s every 33 s. A 4 s
+    attempt then met a step about one time in nine, and each such step faulted the lab.
 
 A successful attempt returns the agreed IPv4 address, the start and finish times, the earliest
 source observation time, the handshake time, per-source evidence (source, destination, address,
@@ -1418,8 +1432,13 @@ A successful V2 attempt records trusted evidence in the helper, in memory only: 
 the helper epoch, the nonce, the agreed address and the oldest observation time. It is never built
 from anything a client sends, and it is neither a reservation nor a lease. It expires at the
 earlier of 60 s after the helper accepted the capability and 60 s after the oldest observation, on
-the monotonic clock; a reading earlier than the record, or a wall-clock step of more than 1 s
-against monotonic time, makes it unusable. Since nothing recorded later could be used, a V2
+the monotonic clock; a reading earlier than the record, or a wall-clock age of 60 s or more (a wall
+clock far ahead, as after a paused VM), makes it unusable. A wall-clock step alone neither ends nor
+extends it (until 2026-11-27 any step of more than 1 s ended it), though it moves the wall-clock
+age by its own size. A step during the attempt itself yields no evidence, like a source without an
+answer (`EVIDENCE_UNAVAILABLE`, the lab left configured). Before that, the observation is still
+checked: an invalid one, or times outside the attempt and the capability's issue by more than the
+measured step, still fault. Since nothing recorded later could be used, a V2
 attempt's context ends 60 s after acceptance (the cleanups keep their own deadlines). A refusal before the nonce is consumed and every read
 leave it as it is. An accepted attempt drops it at once, a failed one leaves none, a sticky
 violation drops it, and so do `Disconnect`, `DeleteLab` of that lab, a failed `VerifyLab`, a
@@ -1929,6 +1948,17 @@ lease's exact tunnel generation:
   - The worker gives a source 4 s to accept the TCP connection; TLS and the response keep the
     10 s limit. A check whose source does not connect therefore takes about 5 s, so about six fit
     into the health instead of about three.
+
+  - A wall-clock step during the check is handled the same way (since 2026-11-27): seen by the
+    worker, or by the helper around the probe, from its start or its end to the renewal. An invalid
+    observation, times outside the check by more than the measured step, or a changed address or
+    generation still fault.
+  - Between checks, the health is timed on the monotonic clock and bounded by its wall-clock age.
+    A step moves that age by its size, so a wall clock jumped 60 s or more ahead still ends it.
+  - A step backwards is still not tolerated everywhere. A WireGuard handshake from before the step
+    can then read as being in the future, which faults the tunnel. A receipt can read as from the
+    client's future, which the client refuses. And a rollback that `helperauth` observes disables
+    signed operations for the epoch.
 
   A path that answers nothing is therefore cut when the health expires rather than at the first
   failed check, though nothing new crosses it meanwhile. An address change is still caught by the

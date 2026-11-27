@@ -32,12 +32,19 @@ func systemManagedProbeClock() managedProbeClock {
 	}
 }
 
+// ErrManagedClockStepped: the wall clock moved apart from monotonic time during an attempt, so its
+// timestamps prove nothing. It says nothing about the egress either: an attempt that fails for this
+// reason alone yields nothing and leaves the tunnel, like a source without an answer.
+var ErrManagedClockStepped = fmt.Errorf("%w: wall clock stepped during the attempt", ErrInvalidObservation)
+
+const managedClockStepReason = "WALL_CLOCK_STEPPED"
+
 // managedClockStep refuses a reading whose wall-clock progress since the start of the attempt
 // differs from its monotonic progress by more than maxManagedClockStep.
 func managedClockStep(startWall time.Time, startMono time.Duration, wall time.Time, mono time.Duration) error {
 	step := wall.Sub(startWall) - (mono - startMono)
 	if step > maxManagedClockStep || step < -maxManagedClockStep {
-		return fmt.Errorf("%w: wall clock stepped during the attempt", ErrInvalidObservation)
+		return ErrManagedClockStepped
 	}
 
 	return nil
@@ -96,8 +103,9 @@ func (b *ManagedTunnelBackend) MultiProbePolicyPin() (netip.Addr, error) {
 //
 // Each source gets its own kernel-timed window, closed and verified before the next one opens; the
 // tunnel and the namespace process inventory are verified before and after every window. Once the
-// attempt starts, any failure discards every observation, faults the tunnel and removes it. All
-// timestamps are wall-clock UTC, checked against monotonic time: a clock step fails the attempt.
+// attempt starts, any failure discards every observation, faults the tunnel and removes it; only a
+// source without an answer, or a clock step alone, leaves it (ErrManagedProbeSourceUnavailable). All
+// timestamps are wall-clock UTC, checked against monotonic time.
 func (b *ManagedTunnelBackend) ProbeConfiguredMulti(
 	ctx context.Context,
 	namespace string,
@@ -183,15 +191,9 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 	// Each reading is checked against the start and the previous reading, and never goes backwards.
 	stamp := func() (time.Time, error) {
 		wall, mono := clock()
-		if err := errors.Join(
-			managedClockStep(startedAt, startMono, wall, mono),
-			managedClockStep(lastWall, lastMono, wall, mono),
-		); err != nil {
-			return time.Time{}, err
-		}
-
-		if wall.Before(lastWall) {
-			return time.Time{}, fmt.Errorf("%w: wall clock went backwards during the attempt", ErrInvalidObservation)
+		if managedClockStep(startedAt, startMono, wall, mono) != nil ||
+			managedClockStep(lastWall, lastMono, wall, mono) != nil || wall.Before(lastWall) {
+			return time.Time{}, ErrManagedClockStepped
 		}
 
 		lastWall, lastMono = wall, mono
@@ -272,6 +274,11 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 					return ErrManagedStickyIPChanged
 				}
 
+				// Before the clock is read, so that a step cannot hide a disagreement.
+				if len(samples) > 0 && ip != samples[0].ipv4 {
+					return ErrManagedProbeIPMismatch
+				}
+
 				if err := probeCtx.Err(); err != nil {
 					return err
 				}
@@ -285,18 +292,19 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 
 				return nil
 			})
-		// The source gave no answer and its window closed as opened: with the worker gone and the
-		// tunnel as staged, the attempt yields nothing and the tunnel stays.
+		if onlyCause(err, ErrManagedClockStepped) {
+			noAnswer = managedClockStepReason
+			err = ErrManagedProbeNoAnswer
+		}
+
+		// The source gave no answer, or the clock stepped, and its window closed as opened: with the
+		// worker gone and the tunnel as staged, the attempt yields nothing and the tunnel stays.
 		if onlyCause(err, ErrManagedProbeNoAnswer) {
 			if err := b.requireIdleProbeNamespaceLocked(ctx, namespace); err != nil {
 				return ManagedMultiProbeObservation{}, err
 			}
 
 			if err := b.verifyConfiguredLocked(ctx, t); err != nil {
-				return ManagedMultiProbeObservation{}, err
-			}
-
-			if _, err := stamp(); err != nil {
 				return ManagedMultiProbeObservation{}, err
 			}
 
@@ -338,9 +346,22 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 		return ManagedMultiProbeObservation{}, ErrManagedHandshake
 	}
 
+	// Every window is closed and the tunnel was verified after the last one. Across a step, the
+	// handshake's age cannot be judged, but its peer and format still can.
 	finishedAt, err := stamp()
 	if err != nil {
-		return ManagedMultiProbeObservation{}, err
+		if _, err := parseManagedHandshakeSeconds(raw, t.peer.peerPublicKey); err != nil {
+			return ManagedMultiProbeObservation{}, err
+		}
+
+		if err := ctx.Err(); err != nil {
+			return ManagedMultiProbeObservation{}, err
+		}
+
+		unanswered = true
+
+		return ManagedMultiProbeObservation{}, fmt.Errorf("%w (%s)", ErrManagedProbeSourceUnavailable,
+			managedClockStepReason)
 	}
 
 	// Judged at the same checked reading as FinishedAt, so the handshake cannot postdate it.

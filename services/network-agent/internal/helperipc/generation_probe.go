@@ -184,8 +184,31 @@ type verifiedMultiProbeEvidence struct {
 	expiresAt  time.Time
 }
 
+var errClockStepped = errors.New("wall clock stepped during the attempt")
+
+// wallClockStep is how far the wall clock moved apart from monotonic time between from and to, both
+// from time.Now, in either direction.
+func wallClockStep(from, to time.Time) time.Duration {
+	step := to.Round(0).Sub(from.Round(0)) - to.Sub(from)
+	if step < 0 {
+		return -step
+	}
+
+	return step
+}
+
+// attemptClockStable is evidenceClockStable, around one attempt.
+func (l *LabLifecycle) attemptClockStable(from, to time.Time) bool {
+	if l.clockStable != nil {
+		return l.clockStable(from, to)
+	}
+
+	return evidenceClockStable(from, to)
+}
+
 // evidenceClockStable requires to after from, with wall-clock progress within 1 s of monotonic
-// progress. Both must come from time.Now.
+// progress. Both must come from time.Now. It guards one attempt, while its wall-clock timestamps are
+// compared; recorded evidence is then timed on the monotonic clock.
 func evidenceClockStable(from, to time.Time) bool {
 	elapsed := to.Sub(from)
 	step := to.Round(0).Sub(from.Round(0)) - elapsed
@@ -237,13 +260,15 @@ func newVerifiedMultiProbeEvidence(
 
 // fresh reports whether the evidence may still back a decision at now (from time.Now).
 func (e *verifiedMultiProbeEvidence) fresh(now time.Time) bool {
-	if e == nil || !evidenceClockStable(e.recordedAt, now) || !now.Before(e.expiresAt) {
-		return false
-	}
+	return e != nil && freshSince(e.recordedAt, e.observedAt, e.expiresAt, now)
+}
 
-	age := now.Sub(e.observedAt)
-
-	return age >= 0 && age < verifiedProbeEvidenceTTL
+// freshSince bounds recorded evidence on the monotonic clock (expiresAt), and by its wall-clock age
+// too, so a wall clock that jumped far ahead (a paused VM) ends it. A wall-clock step alone neither
+// extends it nor ends it: a VM's time synchronization steps the clock every few seconds.
+func freshSince(recordedAt, observedAt, expiresAt, now time.Time) bool {
+	return !recordedAt.IsZero() && !now.Before(recordedAt) && now.Before(expiresAt) &&
+		now.Sub(observedAt) < verifiedProbeEvidenceTTL
 }
 
 // invalidateEvidenceLocked drops the local authorization state of profileID: unconsumed evidence,

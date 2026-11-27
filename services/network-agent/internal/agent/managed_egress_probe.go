@@ -44,18 +44,27 @@ type ManagedProbeObservation struct {
 // parseManagedHandshake reads "wg show wg0 latest-handshakes": exactly the expected peer, with a
 // handshake that happened, not in the future and at most maxManagedHandshakeAge old.
 func parseManagedHandshake(output, expectedPeer string, now time.Time) (time.Time, error) {
-	fields := strings.Split(strings.TrimSpace(output), "\t")
-	if len(fields) != 2 || fields[0] != expectedPeer {
-		return time.Time{}, ErrManagedHandshake
-	}
-
-	seconds, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil || seconds <= 0 || strconv.FormatInt(seconds, 10) != fields[1] ||
-		seconds > now.Unix() || now.Unix()-seconds > int64(maxManagedHandshakeAge/time.Second) {
+	seconds, err := parseManagedHandshakeSeconds(output, expectedPeer)
+	if err != nil || seconds > now.Unix() || now.Unix()-seconds > int64(maxManagedHandshakeAge/time.Second) {
 		return time.Time{}, ErrManagedHandshake
 	}
 
 	return time.Unix(seconds, 0).UTC(), nil
+}
+
+// parseManagedHandshakeSeconds checks the peer and the format, which need no clock.
+func parseManagedHandshakeSeconds(output, expectedPeer string) (int64, error) {
+	fields := strings.Split(strings.TrimSpace(output), "\t")
+	if len(fields) != 2 || fields[0] != expectedPeer {
+		return 0, ErrManagedHandshake
+	}
+
+	seconds, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || seconds <= 0 || strconv.FormatInt(seconds, 10) != fields[1] {
+		return 0, ErrManagedHandshake
+	}
+
+	return seconds, nil
 }
 
 // requireIdleProbeNamespaceLocked requires no process in the lab namespace: nothing may share the

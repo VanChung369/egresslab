@@ -165,6 +165,16 @@ func validMultiProbeForCapability(
 	intent *helperauth.Intent,
 	capability *helperauth.SignedCapability,
 ) bool {
+	return validMultiProbeForCapabilityAcross(info, intent, capability, 0)
+}
+
+// validMultiProbeForCapabilityAcross allows the start a wall-clock step earlier than the issue.
+func validMultiProbeForCapabilityAcross(
+	info *MultiProbeInfo,
+	intent *helperauth.Intent,
+	capability *helperauth.SignedCapability,
+	step time.Duration,
+) bool {
 	if !validMultiProbeInfo(info, intent) || capability == nil || capability.Claims.Intent != *intent ||
 		capability.Claims.IssuedAt <= 0 {
 		return false
@@ -174,14 +184,20 @@ func validMultiProbeForCapability(
 		return false
 	}
 
-	return !info.StartedAt.Before(time.Unix(capability.Claims.IssuedAt, 0))
+	return !info.StartedAt.Before(time.Unix(capability.Claims.IssuedAt, 0).Add(-step))
 }
 
 // multiProbeWithin requires evidence that started no earlier than from, with the agent's 1 s
 // clock-step tolerance, and finished no later than to: the helper and its client share one clock,
 // so evidence never legitimately ends in their future.
 func multiProbeWithin(info *MultiProbeInfo, from, to time.Time) bool {
-	return info != nil && !info.StartedAt.Before(from.Add(-time.Second)) && !info.FinishedAt.After(to)
+	return multiProbeWithinAcross(info, from, to, 0)
+}
+
+// multiProbeWithinAcross widens both bounds by a wall-clock step measured around the attempt, and by
+// nothing else: evidence the step cannot explain still fails.
+func multiProbeWithinAcross(info *MultiProbeInfo, from, to time.Time, step time.Duration) bool {
+	return info != nil && !info.StartedAt.Before(from.Add(-time.Second-step)) && !info.FinishedAt.After(to.Add(step))
 }
 
 // olderHelperDisabled recognizes how a helper from before Step 29C.4a refuses PermitMultiProbeV1:
@@ -341,14 +357,29 @@ func (l *LabLifecycle) executeMultiProbe(
 		info.AttemptNonce = req.Capability.Claims.Nonce
 	}
 
-	if err == nil && !validMultiProbeForCapability(&info, &expected, req.Capability) {
+	now := time.Now()
+
+	// A wall-clock step during the attempt leaves its timestamps unprovable and says nothing about the
+	// egress: like a source without an answer, it yields no evidence and leaves the tunnel. The time
+	// checks before that allow the step's own size, so evidence it cannot explain still faults.
+	stable := !generationBound || l.attemptClockStable(acceptedAt, now)
+
+	var step time.Duration
+	if !stable {
+		step = wallClockStep(acceptedAt, now)
+	}
+
+	if err == nil && !validMultiProbeForCapabilityAcross(&info, &expected, req.Capability, step) {
 		err = errors.New("invalid backend multi-source observation")
 	}
 
-	now := time.Now()
-
-	if err == nil && !multiProbeWithin(&info, acceptedAt, now) {
+	if err == nil && !multiProbeWithinAcross(&info, acceptedAt, now, step) {
 		err = errors.New("multi-source observation outside the accepted attempt")
+	}
+
+	if err == nil && !stable {
+		unanswered = true
+		err = errClockStepped
 	}
 
 	var verified *verifiedMultiProbeEvidence
@@ -361,8 +392,8 @@ func (l *LabLifecycle) executeMultiProbe(
 		err = ctx.Err()
 	}
 
-	// A source gave no answer and the backend verified the tunnel unchanged: the lab is restored and
-	// can be probed again with a new capability.
+	// A source gave no answer, or the clock stepped, and the backend verified the tunnel unchanged: the
+	// lab is restored and can be probed again with a new capability.
 	if unanswered && ctx.Err() == nil && l.unansweredProbeIntactLocked(lab, expected.TunnelGeneration) {
 		l.labs.set(lab.ProfileID, lab)
 
