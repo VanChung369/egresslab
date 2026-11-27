@@ -1130,7 +1130,7 @@ The ident.me pin:
 - ident.me itself was unreliable that day:
   - of 30 pinned requests from each instance's own network, 6 and 9 failed (no connection within 5 s, or no answer within 10 s), and several more took 3 s or longer;
   - the same check against `1.1.1.1` answered in 0.1 s.
-  - Any such failure during a monitor check faults the lab, with no retry. Three of the five holds below ended that way.
+  - Any such failure during a monitor check faulted the lab, with no retry. Three of the five holds below ended that way. Since then, a source that gives no answer only renews nothing; see "A source without an answer (Step 36)".
 
 Real run: five holds in three rounds, each released. Addresses are compared, never printed.
 
@@ -1205,9 +1205,11 @@ Found and fixed after the run (`list-labs` while streams run):
   - the release took 0.43 s, and the lab ended `sealed`.
   - Journal: 43897 to 47247 bytes, from two more holds and releases (one of them for the first fix).
 - A call that lands just as the keeper takes or gives back the lock, or while a new stream's first request holds it, still answers `LAB_BUSY`.
-, from the release commit with the official Go version. The official GitHub artifact was not run on macOS.
+
+Limitations:
+- The release was built locally, from the release commit with the official Go version. The official GitHub artifact was not run on macOS.
 - The host's own DNS traffic was not captured, since packet capture on macOS needs root, which this run did not have. The isolated resolver sends nothing to the host's resolver by design (Step 35), and the instances' captures saw none of the names.
-- ident.me's unreliability faulted three of the five holds. By design, any source failure during a check faults the generation. A source that fails this often makes long sessions impractical.
+- ident.me's unreliability faulted three of the five holds: in `727fc84`, any source failure during a check faults the generation. Changed after this run; see "A source without an answer (Step 36)".
 - An idle route's first request may wait up to a monitor interval for a window. If it arrives during a check longer than 5 s, it is likely refused with `LAB_BUSY` (seen once).
 - In `727fc84`, `list-labs` answered `LAB_BUSY` while a runtime had streams (seen on B); fixed after the run.
 - A release that arrives during a check waits for it (4.7 s here).
@@ -1215,6 +1217,132 @@ Found and fixed after the run (`list-labs` while streams run):
 - Native Linux has not run end to end.
 
 Application networking as a whole remained disabled.
+
+### Release v0.3.0-alpha.2 on macOS and two Lima runtimes (Step 36)
+
+The official artifact of `063fe7f` (the `list-labs` fix above), built by GitHub Actions and downloaded by the user, checked on 2026-11-27.
+
+Artifact:
+- The zip holds the 8 archives and `SHA256SUMS`, and `shasum -a 256 -c SHA256SUMS` passed for all 8.
+- Every tar entry has owner `0/0` and mode 0755 (binaries) or 0644, and the zips carry no uid or gid.
+- All 24 binaries embed Go 1.23.12, `vcs.revision=063fe7f…`, `vcs.modified=false`, `-trimpath` and `CGO_ENABLED=0`.
+- The macOS arm64 binaries are ad-hoc signed by the linker.
+- No archive holds a key, a build-machine path or an egress address.
+- Reproducible: a build on macOS from a clean clone of `063fe7f`, with `GOTOOLCHAIN=go1.23.12` and BSD tar, gave 24 of 24 binaries byte-identical to the official ones. The docs in the archives are those of the commit.
+- Those docs lack the "Limitations:" heading of the macOS section and the start of its first item, removed by mistake in `063fe7f`; restored after the release.
+
+Installation: the arm64 runtime went into both instances with the subshell under "Installing a release" (6 of 6 binaries match the archive, helper `67a41d07`). The alpha.2 macOS controller read the existing authority.
+
+Real run: four holds, all ended by ident.me (in `063fe7f` any source failure faults).
+- Both routes probed and held. B's first probe faulted its lab (ident.me) and passed on a new lab.
+- All four holds were faulted by the monitor's ident.me check, from 9 s to 8.5 min after they were made.
+- Name requests: through B, 8 of 8 concurrent ones matched. Through A, 1 of 8 matched; the other 7 got `LAB_BUSY` at their DNS stream, the first streams of a new plane arriving during a long check.
+- Not run, because the holds faulted and my test script hung on the listeners: `list-labs` during streams with this binary (the same code ran on Lima in the previous section), a kept-alive series, a kill switch, and a release during downloads.
+- The faulted holds were released in 0.24 to 0.34 s with `generation_retired: true`. Journal: 47247 to 53932 bytes.
+
+### A source without an answer (Step 36)
+
+On 2026-11-27, ident.me failed 3 of 20 pinned requests from each instance's own network. In `063fe7f` each monitor check (about every 20 s) faulted the lab on such a failure, so a route lasted one or two minutes. Since this change, only a source that answered wrongly faults; one that gives no answer renews nothing.
+
+The change:
+- The worker reports a source that gave no answer as its own line (`HTTPS_NO_ANSWER`), apart from one that answered and was refused (`HTTPS_REQUEST_FAILED`).
+  - No answer: the source sent nothing at all, not a byte at any layer, and the attempt timed out or the connection was refused, reset or closed. Any byte that came back makes it an answer, cut off or not, and so does a server that completed TLS and then went silent.
+  - A certificate, a host name, a TLS alert, a reply that is not TLS, a status, an encoding or a body is an answer.
+- The agent leaves the tunnel in place only when all of these hold:
+  - the error is nothing but the no-answer error;
+  - the source's window closed as opened;
+  - the worker is gone;
+  - the tunnel verifies as staged;
+  - the clock checks pass.
+
+  It then returns `ErrManagedProbeSourceUnavailable`, with no evidence and no pin. Anything else on top of it faults as before.
+- The monitor, on that result:
+  - renews nothing, checks that the generation did not change, and checks again 2 s later;
+  - opens no traffic window until a check succeeds, while the overlay keeps carrying established streams during the checks;
+  - cuts the tunnel when the health expires, as before (60 s after the last source observation).
+- `probe-egress-multi` answers `EVIDENCE_UNAVAILABLE` and leaves the lab configured; a new approval probes again.
+
+Tests:
+- `TestManagedProbeNoAnswer`, with real HTTPS servers in the test:
+  - no answer: a server that never answers, a closed port, and a connection closed before TLS;
+  - an answer: an untrusted certificate, another host name, a reply that is not TLS, and HTTP 503.
+- `TestManagedMultiProbeNoAnswer`:
+  - no answer from either source keeps the tunnel, its firewall and the next attempt;
+  - no answer together with a cleanup failure, a drift, a worker left running, a cancellation or an expired window removes the tunnel.
+- `TestManagedProbeWorkerError` and `TestProbeFailure`: the worker's line and its mapping.
+- `TestAdaptProbeError`: only the agent's source without an answer reaches the helper as one.
+- `TestEgressMonitorSourceNoAnswer`:
+  - the health is unchanged, and the check waits for the recheck time;
+  - no traffic window opens;
+  - a later success renews the health;
+  - an expired health faults.
+- `TestEgressMonitorSourceNoAnswerGenerationChanged`.
+- `TestGenerationProbeSourceNoAnswer`: the lab is restored, the capability is used, a new attempt succeeds, and a changed generation faults.
+- On macOS, `go vet` (three systems) and `go test -race` passed for both modules, and the Linux tests passed in `egresslab`.
+- Mutation checks: each of these 14 failed a test.
+  - the soft path still faulting, or skipping the tunnel check or the idle check;
+  - any joined cause counted;
+  - every error counted as no answer;
+  - no recheck spacing, the recheck gate ignored, or the health extended;
+  - no generation check in the monitor or in the on-demand probe;
+  - the lab not restored after an on-demand probe;
+  - the runner's error untyped, the worker's single line, and the adapter passing the error through.
+- A list of certificate errors that the first version excluded was removed: no test could tell it apart, since such errors are never timeouts or connection errors.
+- Codex's review, both fixed after the Lima run below (unit tests and mutation checks only):
+  - A source that sent a status line and then disconnected counted as no answer. Now only an error before the first byte of the response does (`httptrace`); the test adds that interrupted reply.
+  - After a check without an answer, a recheck could wait for the routine interval once the last stream closed, while no window could open. Now the recheck is due at its time, streams or not (`TestEgressMonitorRecheckDueWithoutStreams`).
+  - Reverting either fix failed its test.
+- Codex's second review, both fixed:
+  - The first fix looked only at HTTP data, so a short reply that was not TLS, then a close, still counted as no answer. Now the connection itself records whether the source sent any byte. The test adds that reply, and a server that completes TLS and then sends nothing (now an answer too).
+  - The path without an answer skipped the attempt's clock check. It now runs it before keeping the tunnel, and a test steps the clock back 1.5 s during a source without an answer.
+  - Reverting either fix, or not recording the bytes, failed a test.
+- Codex's third review, both fixed:
+  - The attempt's context could expire during the clock check and still keep the tunnel. The context is now checked last, and a test cancels it at that reading.
+  - A check without an answer whose generation read ended after the health expired only scheduled a recheck. It now checks the health and the deadline again and faults, as a renewal does (`TestEgressMonitorSourceNoAnswerPastExpiry`).
+  - Reverting either fix failed its test. Codex did not review this last round.
+- These six fixes came after the Lima run below, which used the first classification. 40 pinned requests from each instance's own network then failed 3 times each, every time before TCP connected.
+- Also passed with Go 1.23.12, the release workflow's version: `go vet` (three systems) and `go test` for both modules.
+
+On Lima with the final build (helper `768b64ee`, worker `b2c8b317`; the alpha.2 helper and worker reinstalled afterwards):
+- `probe-egress-multi` on A with WireGuard's UDP port dropped: after 11 s, the controller printed `EVIDENCE_UNAVAILABLE: no matching fresh verified egress evidence`, and the lab stayed `tunnel_configured`. Once the drop was removed, the same lab probed at the first attempt and was reserved.
+- An 8-minute run on both routes, as below (kept-alive series on A, downloads on B, name requests and `list-labs` every 15 s):
+  - no fault on either route;
+  - checks: 26 healthy and 5 without an answer on A, 27 and 5 on B, each route twice two in a row; all 10 from ident.me;
+  - 17 of 17 name requests matched on each route, and `list-labs` always answered `tunnel_configured`;
+  - A's kept-alive requests: 1200 of 1200 matched; median 0.29 s, p95 0.77 s; 23 over 1 s.
+  - One A request took 16.6 s. It started at the second check in a row without an answer, with 14 s of health left. That is too little for the overlay (it needs 14 s), so the established connection stopped until the next success, 8 s later, and TCP's backoff stretched the pause.
+  - B: five of six downloads kept their rate (about 17 MB in 110 s). The sixth got `LAB_BUSY` at its first stream, which arrived during a 10 s check without an answer, longer than the 5 s a first stream waits.
+- Holds released in 0.35 and 0.47 s with `generation_retired: true`, and cleaned up as before. Journal: 60620 to 63964 bytes.
+
+On Lima, with this helper (`a0f00fda`) and worker (`c8c9442a`) and the rest of alpha.2 (the alpha.2 helper and worker were reinstalled afterwards).
+
+An 11-minute run on both routes:
+- Route A ran 300-request kept-alive series back to back, with name requests and `list-labs` every 15 s.
+  - 31 healthy checks and 5 checks without an answer from ident.me, once two in a row (16 s of health left); no fault.
+  - 1500 of 1500 requests matched: median 0.28 s, p95 0.77 s, maximum 8.2 s; 29 took over 1 s and one over 5 s. The slow ones coincide with checks without an answer, when no window opens.
+  - 27 of 27 name requests matched, and `list-labs` answered `tunnel_configured` 27 times.
+- Route B ran 150 KB/s downloads back to back.
+  - 3 checks without an answer, two of them in a row, recovering with about 6 s of health left; the two downloads kept their rate (about 17 MB in 110 s each).
+  - At 11:03:41 the monitor faulted B: `invalid egress observation: wall clock went backwards during the attempt`. This is the existing clock check, which fails closed on any backward step during an attempt, and is unrelated to this change. The journal of the instance shows no time adjustment.
+- Every on-demand probe of the run passed at the first attempt, so the on-demand path without an answer ran only in tests.
+
+Kill switch:
+- Idle route A, `wg0` taken down: faulted 3.6 s later. The next check found `tunnel network configuration drifted: addresses` before any source was asked.
+- Route B with a download running, `wg0` taken down: faulted 0.8 s later (the keeper's window), and a new request was refused.
+- A silent VPN server on A: WireGuard's UDP port dropped in the instance's root namespace, with the tunnel itself intact.
+  - Three checks without an answer followed (27, 14 and 1 s of health left).
+  - The monitor faulted the lab with `monitor health expired` 58 s after the last success, 52 s after the drop.
+  - A request during the silence was refused. The drop was removed afterwards.
+
+After: every hold released in 0.27 to 0.38 s with `generation_retired: true`, no lab or table left, nothing for `egresslab-lab-recover`, helpers stopped, stages revoked, the alpha.2 runtime reinstalled in both instances (6 of 6 binaries match the archive). Journal: 53932 to 60620 bytes.
+
+Limitations:
+- A path that answers nothing is now cut when the health expires, up to 60 s after the last success, instead of at the first failed check (about 20 s). Nothing new crosses it meanwhile, since no window opens. Established streams may flow under the overlay until 14 s before the expiry. An address change is still caught by the first source that answers.
+- A check without an answer takes 10 to 13 s (the worker's 10 s limit), so about three in a row reach the expiry. Two in a row were seen twice in 11 minutes, once on each route.
+- Long checks still hold the lifecycle lock: a first stream or a release arriving then may get `LAB_BUSY`, and checks without an answer (about 10 s each) make long checks more frequent; one download was refused that way in the final run.
+- Near the end of a streak without answers, the overlay stops being eligible (it needs 14 s of health), so established streams can stall; one request took 16.6 s.
+- The clock check faulted B once; on Lima it treats any backward step of the wall clock during an attempt as a failure.
+- The released binaries (alpha.1, alpha.2) do not have this change; it needs a new release.
 
 ## Security Notes
 
@@ -1249,4 +1377,4 @@ Both checks that were pending for Windows ran on 2026-11-26; see "Windows and WS
 
 ## Next Milestone
 
-The network engine MVP is complete: release v0.3.0-alpha.1 (Step 36), packaged and checked with its release binaries on Windows through WSL2, and on macOS with two Lima runtimes (a local build of the release commit). Further work belongs to the next product phase (VPN rotation, UDP, IPv6, automatic VM management, desktop activation, Universal Messenger integration), not to the engine MVP. It builds on the monitor traffic overlay and the isolated DNS resolver for domain names verified on Windows through WSL2 and on two Lima runtimes (Step 35), the proxy plane and an API-created endpoint verified on Windows through WSL2, with the fix for the Windows state files (Step 35), several streams per runtime verified on two Lima runtimes (Step 35), the endpoint-to-runtime integration verified on two Lima runtimes (Step 35), the SOCKS5 proxy runtime verified on Lima through the real tunnel (Step 34), the kernel-timed traffic gate verified in throwaway namespaces on Lima (Step 33), the continuous egress monitoring of prepared generations verified on Lima (Step 32), the reboot-bound reservation recovery verified on Lima through a real helper crash and guest reboot (Step 31E.3), the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting; in Step 31E.3 both reservations, 10 s after `connect-tunnel`, succeeded at the first attempt); since Step 32 a failed worker names a coded reason in the helper's error, but no failure has recurred since, so the cause is still unknown. (On 2026-11-27 the first probes on Lima failed with `ident_me … HTTPS_REQUEST_FAILED` because `4.ident.me` had moved; that is a different, known cause.) WSL2 ran the single-source and multi-source paths on 2026-11-25 and the proxy plane, then the monitor overlay and the isolated DNS resolver, on 2026-11-26 (the first probe of every session succeeded); native Linux has not. See `docs/PRIVILEGED-HELPER.md`.
+The network engine MVP is complete: release v0.3.0-alpha.1 (Step 36), packaged and checked with its release binaries on Windows through WSL2, and on macOS with two Lima runtimes (a local build of the release commit); v0.3.0-alpha.2 adds the `list-labs` fix. A source without an answer no longer faults a lab since then, which needs a new release. Further work belongs to the next product phase (VPN rotation, UDP, IPv6, automatic VM management, desktop activation, Universal Messenger integration), not to the engine MVP. It builds on the monitor traffic overlay and the isolated DNS resolver for domain names verified on Windows through WSL2 and on two Lima runtimes (Step 35), the proxy plane and an API-created endpoint verified on Windows through WSL2, with the fix for the Windows state files (Step 35), several streams per runtime verified on two Lima runtimes (Step 35), the endpoint-to-runtime integration verified on two Lima runtimes (Step 35), the SOCKS5 proxy runtime verified on Lima through the real tunnel (Step 34), the kernel-timed traffic gate verified in throwaway namespaces on Lima (Step 33), the continuous egress monitoring of prepared generations verified on Lima (Step 32), the reboot-bound reservation recovery verified on Lima through a real helper crash and guest reboot (Step 31E.3), the persistent helper epoch witness (Step 31E.3a), the cross-process authority races and the concurrent reservations and releases on two Lima runtimes (Step 31E.2), the collision refused across two Lima runtimes (Step 31E.1), the reservation lifecycle verified on Lima against the real tunnel (Step 31D.3e), the controller's release command (Step 31D.3d.2), the durable release journal (Step 31D.3d.1), the helper's generation-bound revocation (Step 31D.3c), the controller's lease preparation (Step 31D.3b), the helper's prepared lease (Step 31D.3a), the provisioned reservation authority and its CLI commands (Step 31D.2), the signed reservation orchestration (Step 31D.1), the controller's durable reservation authority (Step 31C), its in-process registry (Step 31B), the helper's local egress candidate (Step 31A), the generation-scoped pin (Step 30A), the signed generation binding (Step 30B.1) and the V2 cutover (Step 30B.2). Open: the first signed attempt of a session sometimes fails because a probe worker exits with an error the helper does not record (Steps 29B.1, 29B.2b, 29C.4c, 30A and 30B.2 on Lima, and the single-source probe on WSL2; in the last four it was the first probe of the session, and a fresh lab then succeeded; in Step 31E.1 it was the first probe right after `connect-tunnel` on runtime B's second config, and in Step 31E.2 the first probe of both new helpers, about a second after `connect-tunnel`; each time a fresh lab then succeeded, in Step 31E.2 probed 10 s after connecting; in Step 31E.3 both reservations, 10 s after `connect-tunnel`, succeeded at the first attempt); since Step 32 a failed worker names a coded reason in the helper's error, but no failure has recurred since, so the cause is still unknown. (On 2026-11-27 the first probes on Lima failed with `ident_me … HTTPS_REQUEST_FAILED` because `4.ident.me` had moved; that is a different, known cause.) WSL2 ran the single-source and multi-source paths on 2026-11-25 and the proxy plane, then the monitor overlay and the isolated DNS resolver, on 2026-11-26 (the first probe of every session succeeded); native Linux has not. See `docs/PRIVILEGED-HELPER.md`.

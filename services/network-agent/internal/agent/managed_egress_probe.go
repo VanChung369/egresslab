@@ -18,6 +18,15 @@ var (
 	ErrManagedProbeUnavailable = errors.New("managed probe runner unavailable")
 	ErrManagedProbeFailed      = errors.New("managed egress probe failed")
 	ErrManagedHandshake        = errors.New("recent WireGuard handshake not verified")
+
+	// ErrManagedProbeNoAnswer: nothing came back from a source (no connection, TLS handshake or
+	// response in time, or a reset). A response that arrived and was refused is not one.
+	ErrManagedProbeNoAnswer = errors.New("probe source gave no answer")
+
+	// ErrManagedProbeSourceUnavailable: a source gave no answer, and afterwards its window was closed,
+	// the worker gone and the tunnel verified as staged. The attempt yields nothing and the tunnel
+	// stays.
+	ErrManagedProbeSourceUnavailable = errors.New("probe source unavailable; tunnel unchanged")
 )
 
 // ManagedProbeObservation is one observation from one source. It is not a lease and does not

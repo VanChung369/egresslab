@@ -109,3 +109,21 @@ func TestTunnelBackendOffersMonitorOverlay(t *testing.T) {
 		t.Fatal("tunnel backend does not offer the monitor's traffic overlay")
 	}
 }
+
+// Only the agent's source without an answer, with the tunnel unchanged, reaches the helper as one.
+func TestAdaptProbeError(t *testing.T) {
+	soft := fmt.Errorf("source ident_me: %w", agent.ErrManagedProbeSourceUnavailable)
+	if err := adaptProbeError(soft); !errors.Is(err, helperipc.ErrProbeSourceUnavailable) {
+		t.Fatalf("source without an answer: %v", err)
+	}
+
+	for _, err := range []error{
+		errors.Join(agent.ErrManagedProbeFailed, agent.ErrManagedProbeNoAnswer),
+		agent.ErrManagedProbeFailed,
+		agent.ErrManagedStickyIPChanged,
+	} {
+		if errors.Is(adaptProbeError(err), helperipc.ErrProbeSourceUnavailable) {
+			t.Fatalf("%v adapted as a source without an answer", err)
+		}
+	}
+}

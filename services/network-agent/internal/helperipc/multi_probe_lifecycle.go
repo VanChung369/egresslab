@@ -334,6 +334,8 @@ func (l *LabLifecycle) executeMultiProbe(
 		observation, err = l.multiProbes.ProbeConfiguredMulti(ctx, lab.Namespace)
 	}
 
+	unanswered := errors.Is(err, ErrProbeSourceUnavailable)
+
 	info := MultiProbeInfo{ProfileID: lab.ProfileID, Namespace: lab.Namespace, MultiProbeObservation: observation}
 	if generationBound {
 		info.AttemptNonce = req.Capability.Claims.Nonce
@@ -357,6 +359,14 @@ func (l *LabLifecycle) executeMultiProbe(
 
 	if err == nil {
 		err = ctx.Err()
+	}
+
+	// A source gave no answer and the backend verified the tunnel unchanged: the lab is restored and
+	// can be probed again with a new capability.
+	if unanswered && ctx.Err() == nil && l.unansweredProbeIntactLocked(lab, expected.TunnelGeneration) {
+		l.labs.set(lab.ProfileID, lab)
+
+		return MultiProbeInfo{}, fmt.Errorf("%w: %v", errEvidenceUnavailable, err)
 	}
 
 	if err != nil {
@@ -397,4 +407,19 @@ func ProbeEgressMulti(
 		Intent:     &intent,
 		Capability: &capability,
 	})
+}
+
+// unansweredProbeIntactLocked: the tunnel is still the one probed. The caller holds l.mu.
+func (l *LabLifecycle) unansweredProbeIntactLocked(lab LabInfo, generation string) bool {
+	if l.tunnelProfile != lab.ProfileID || l.candidateGenerationContradicted {
+		return false
+	}
+
+	if generation == "" {
+		return true
+	}
+
+	current, err := l.currentGenerationLocked(lab.Namespace)
+
+	return err == nil && current == generation
 }

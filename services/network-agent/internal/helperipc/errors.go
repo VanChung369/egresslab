@@ -56,4 +56,8 @@ var (
 	ErrLabKernelIncompatible = errors.New("kernel adds devices to new namespaces")
 	ErrLabFirewallDrift      = errors.New("lab firewall drifted")
 	ErrLabTopology           = errors.New("lab topology changed")
+
+	// ErrProbeSourceUnavailable: a probe source gave no answer, and the backend verified the tunnel
+	// unchanged afterwards. The attempt yields no evidence and renews nothing.
+	ErrProbeSourceUnavailable = errors.New("probe source unavailable")
 )

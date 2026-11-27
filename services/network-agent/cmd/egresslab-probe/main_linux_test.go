@@ -3,9 +3,13 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/VanChung369/egresslab/services/network-agent/internal/agent"
 )
 
 const droppedStatus = `Name:	egresslab-probe
@@ -78,5 +82,15 @@ func TestParseWorkerProbeRequest(t *testing.T) {
 		if _, err := parseWorkerProbeRequest(args); err == nil {
 			t.Fatalf("invalid worker arguments accepted: %q", args)
 		}
+	}
+}
+
+func TestProbeFailure(t *testing.T) {
+	if err := probeFailure(fmt.Errorf("%w: timeout", agent.ErrManagedProbeNoAnswer)); err.Error() != "HTTPS probe got no answer" {
+		t.Fatalf("no answer: %v", err)
+	}
+
+	if err := probeFailure(errors.New("probe returned HTTP 503")); err.Error() != "HTTPS probe failed" {
+		t.Fatalf("refused answer: %v", err)
 	}
 }

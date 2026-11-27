@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -45,6 +46,7 @@ func TestVerifyProbeBinary(t *testing.T) {
 func TestManagedProbeFailureReason(t *testing.T) {
 	for stderr, want := range map[string]string{
 		"HTTPS probe failed\n":                      "HTTPS_REQUEST_FAILED",
+		"HTTPS probe got no answer\n":               "HTTPS_NO_ANSWER",
 		"probe must not run as root\n":              "WORKER_PRIVILEGE_CHECK_FAILED",
 		"probe must have no supplementary groups\n": "WORKER_PRIVILEGE_CHECK_FAILED",
 		"unexpected probe privileges\n":             "WORKER_PRIVILEGE_CHECK_FAILED",
@@ -58,6 +60,21 @@ func TestManagedProbeFailureReason(t *testing.T) {
 	} {
 		if got := managedProbeFailureReason(stderr); got != want {
 			t.Fatalf("%q: got %s, want %s", stderr, got, want)
+		}
+	}
+}
+
+func TestManagedProbeWorkerError(t *testing.T) {
+	silent := managedProbeWorkerError("HTTPS probe got no answer\n")
+	if !errors.Is(silent, ErrManagedProbeFailed) || !errors.Is(silent, ErrManagedProbeNoAnswer) ||
+		!strings.Contains(silent.Error(), "HTTPS_NO_ANSWER") {
+		t.Fatalf("worker without an answer: %v", silent)
+	}
+
+	for _, stderr := range []string{"HTTPS probe failed\n", "", "unknown probe source\n"} {
+		if err := managedProbeWorkerError(stderr); !errors.Is(err, ErrManagedProbeFailed) ||
+			errors.Is(err, ErrManagedProbeNoAnswer) {
+			t.Fatalf("%q: %v", stderr, err)
 		}
 	}
 }

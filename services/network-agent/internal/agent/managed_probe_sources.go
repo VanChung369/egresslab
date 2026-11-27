@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync/atomic"
+	"syscall"
 )
 
 const (
@@ -136,7 +138,7 @@ func (s managedProbeHTTPSource) url() string {
 func newManagedProbeHTTPClient(host string, destination netip.Addr, dial probeDialFunc) *http.Client {
 	transport := &http.Transport{
 		Proxy:                  nil,
-		DialContext:            pinnedProbeHostDial(host, destination, dial),
+		DialContext:            recordingProbeDial(pinnedProbeHostDial(host, destination, dial)),
 		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host},
 		DisableKeepAlives:      true,
 		DisableCompression:     true,
@@ -171,6 +173,11 @@ func fetchManagedProbeBody(ctx context.Context, source managedProbeHTTPSource) (
 
 // readManagedProbeHTTPS requires HTTP 200, no content encoding and a body of 1 to 4096 bytes.
 func readManagedProbeHTTPS(ctx context.Context, client *http.Client, rawURL string) ([]byte, error) {
+	// Once the source sent a byte, at any layer, an interrupted reply is an answer, not silence.
+	var received atomic.Bool
+
+	ctx = context.WithValue(ctx, probeReceivedKey{}, &received)
+
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -182,6 +189,10 @@ func readManagedProbeHTTPS(ctx context.Context, client *http.Client, rawURL stri
 
 	response, err := client.Do(request)
 	if err != nil {
+		if !received.Load() && probeNoAnswer(err) {
+			return nil, fmt.Errorf("%w: %w", ErrManagedProbeNoAnswer, err)
+		}
+
 		return nil, err
 	}
 	defer response.Body.Close()
@@ -254,4 +265,49 @@ func parseManagedProbeBody(source managedProbeHTTPSource, body []byte) (netip.Ad
 	default:
 		return netip.Addr{}, ErrManagedProbeSourcePolicy
 	}
+}
+
+// probeNoAnswer: nothing came back in time, or the connection was refused, reset or closed. The
+// caller asks only when the source sent no byte at all.
+func probeNoAnswer(err error) bool {
+	var timeout interface{ Timeout() bool }
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return true
+	}
+
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+type probeReceivedKey struct{}
+
+// recordingProbeDial marks, in the request's context, that the source sent at least one byte.
+func recordingProbeDial(dial probeDialFunc) probeDialFunc {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := dial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+
+		if received, ok := ctx.Value(probeReceivedKey{}).(*atomic.Bool); ok {
+			return receivingConn{Conn: conn, received: received}, nil
+		}
+
+		return conn, nil
+	}
+}
+
+type receivingConn struct {
+	net.Conn
+	received *atomic.Bool
+}
+
+func (c receivingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.received.Store(true)
+	}
+
+	return n, err
 }

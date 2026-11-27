@@ -143,6 +143,8 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 	b.sealed.manager.mu.Lock()
 	defer b.sealed.manager.mu.Unlock()
 
+	unanswered := false
+
 	config := b.multiProbe
 	if config == nil || config.run == nil {
 		return ManagedMultiProbeObservation{}, ErrManagedProbeUnavailable
@@ -201,7 +203,7 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 	defer cancel()
 
 	defer func() {
-		if resultErr == nil {
+		if resultErr == nil || unanswered {
 			return
 		}
 
@@ -249,6 +251,10 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 		err := b.sealed.firewall.withMonitoredProbeWindowLocked(ctx, namespace, source.destination, overlay,
 			func(probeCtx context.Context) error {
 				body, err := config.run(probeCtx, namespace, source)
+				if errors.Is(err, ErrManagedProbeNoAnswer) {
+					return ErrManagedProbeNoAnswer
+				}
+
 				if err != nil {
 					return err
 				}
@@ -276,6 +282,30 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 
 				return nil
 			})
+		// The source gave no answer and its window closed as opened: with the worker gone and the
+		// tunnel as staged, the attempt yields nothing and the tunnel stays.
+		if onlyCause(err, ErrManagedProbeNoAnswer) {
+			if err := b.requireIdleProbeNamespaceLocked(ctx, namespace); err != nil {
+				return ManagedMultiProbeObservation{}, err
+			}
+
+			if err := b.verifyConfiguredLocked(ctx, t); err != nil {
+				return ManagedMultiProbeObservation{}, err
+			}
+
+			if _, err := stamp(); err != nil {
+				return ManagedMultiProbeObservation{}, err
+			}
+
+			if err := ctx.Err(); err != nil {
+				return ManagedMultiProbeObservation{}, err
+			}
+
+			unanswered = true
+
+			return ManagedMultiProbeObservation{}, fmt.Errorf("source %s: %w", source.id, ErrManagedProbeSourceUnavailable)
+		}
+
 		if err != nil {
 			return ManagedMultiProbeObservation{}, fmt.Errorf("source %s: %w", source.id, err)
 		}
@@ -343,4 +373,24 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 		HandshakeAt:      handshake,
 		Sources:          evidence,
 	}, nil
+}
+
+// onlyCause reports whether err is target, or joins nothing but target.
+func onlyCause(err, target error) bool {
+	if err == target {
+		return true
+	}
+
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok || len(joined.Unwrap()) == 0 {
+		return false
+	}
+
+	for _, cause := range joined.Unwrap() {
+		if !onlyCause(cause, target) {
+			return false
+		}
+	}
+
+	return true
 }

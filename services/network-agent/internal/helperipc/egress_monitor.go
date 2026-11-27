@@ -16,6 +16,9 @@ const (
 	egressMonitorBudget   = 30 * time.Second
 	egressMonitorTick     = time.Second
 
+	// egressMonitorRecheck spaces the checks after one whose source gave no answer.
+	egressMonitorRecheck = 2 * time.Second
+
 	monitorLogQueue = 32
 )
 
@@ -47,6 +50,8 @@ type egressMonitorHealth struct {
 	observedAt time.Time
 	checkedAt  time.Time
 	expiresAt  time.Time
+
+	recheckAt time.Time // after a check whose source gave no answer; never extends the health
 }
 
 func (h egressMonitorHealth) fresh(now time.Time) bool {
@@ -113,6 +118,11 @@ func (l *LabLifecycle) monitorOverlayLocked(p *preparedEgressLease, now time.Tim
 // A check that itself ended past that point leaves no window to follow, and goes by the routine
 // schedule.
 func (l *LabLifecycle) monitorDueLocked(p *preparedEgressLease, now time.Time) bool {
+	// After a check without an answer, the next one is due at its recheck, streams or not.
+	if !p.monitor.recheckAt.IsZero() {
+		return !now.Before(p.monitor.recheckAt)
+	}
+
 	if p.monitor.due(now) {
 		return true
 	}
@@ -260,6 +270,10 @@ func (l *LabLifecycle) monitorPreparedLocked(ctx context.Context) (*PreparedLeas
 
 	finishedAt := time.Now()
 
+	if err != nil && errors.Is(err, ErrProbeSourceUnavailable) && probeErr == nil {
+		return nil, l.monitorUnansweredLocked(p, lab, expected.TunnelGeneration, deadline, err)
+	}
+
 	if err != nil {
 		return fail(err)
 	}
@@ -314,6 +328,33 @@ func (l *LabLifecycle) monitorPreparedLocked(ctx context.Context) (*PreparedLeas
 	renewed := p.info
 
 	return &renewed, nil
+}
+
+// monitorUnansweredLocked: a source gave no answer and the backend verified the tunnel unchanged.
+// Nothing is renewed: the health keeps its expiry, which still cuts the tunnel if no check succeeds
+// before it, and the check runs again after egressMonitorRecheck. The caller holds l.mu.
+func (l *LabLifecycle) monitorUnansweredLocked(p *preparedEgressLease, lab LabInfo, generation string,
+	deadline time.Time, cause error) error {
+	current, err := l.currentGenerationLocked(lab.Namespace)
+	if err != nil {
+		return l.faultMonitoredTunnelLocked(lab, err)
+	}
+
+	if current != generation || l.candidateGenerationContradicted {
+		return l.faultMonitoredTunnelLocked(lab, errors.New("generation changed during monitor"))
+	}
+
+	now := time.Now()
+
+	if !p.monitor.fresh(now) || !now.Before(deadline) {
+		return l.faultMonitoredTunnelLocked(lab, errors.Join(cause, errors.New("monitor health expired")))
+	}
+
+	p.monitor.recheckAt = now.Add(egressMonitorRecheck)
+
+	logDetached("Egress monitor: %v; health not renewed, %s left", cause, p.monitor.expiresAt.Sub(now).Round(time.Second))
+
+	return nil
 }
 
 // RunEgressMonitor runs until ctx ends. Only the helper's startup owns it. It ticks every second

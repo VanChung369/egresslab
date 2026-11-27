@@ -132,7 +132,7 @@ func (b tunnelBackend) ProbeConfiguredMulti(
 ) (helperipc.MultiProbeObservation, error) {
 	result, err := b.ManagedTunnelBackend.ProbeConfiguredMulti(ctx, namespace)
 	if err != nil {
-		return helperipc.MultiProbeObservation{}, err
+		return helperipc.MultiProbeObservation{}, adaptProbeError(err)
 	}
 
 	return adaptMultiProbeObservation(result, false)
@@ -146,7 +146,7 @@ func (b tunnelBackend) ProbeConfiguredMultiForGeneration(
 ) (helperipc.MultiProbeObservation, error) {
 	result, err := b.ManagedTunnelBackend.ProbeConfiguredMultiForGeneration(ctx, namespace, generation)
 	if err != nil {
-		return helperipc.MultiProbeObservation{}, err
+		return helperipc.MultiProbeObservation{}, adaptProbeError(err)
 	}
 
 	return adaptMultiProbeObservation(result, true)
@@ -161,10 +161,19 @@ func (b tunnelBackend) ProbeConfiguredMultiForGenerationWithOverlay(
 	result, err := b.ManagedTunnelBackend.ProbeConfiguredMultiForGenerationWithOverlay(ctx, namespace, generation,
 		agent.MonitorTrafficOverlay{UID: overlay.UID, HealthUntil: overlay.HealthUntil, Alive: overlay.Alive})
 	if err != nil {
-		return helperipc.MultiProbeObservation{}, err
+		return helperipc.MultiProbeObservation{}, adaptProbeError(err)
 	}
 
 	return adaptMultiProbeObservation(result, true)
+}
+
+// adaptProbeError keeps a source that gave no answer, with the tunnel unchanged, apart from a failure.
+func adaptProbeError(err error) error {
+	if errors.Is(err, agent.ErrManagedProbeSourceUnavailable) {
+		return fmt.Errorf("%w: %w", helperipc.ErrProbeSourceUnavailable, err)
+	}
+
+	return err
 }
 
 func adaptMultiProbeObservation(

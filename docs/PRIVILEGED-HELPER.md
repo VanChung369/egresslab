@@ -23,7 +23,9 @@ durable hold and records the release in the authority's journal. After a helper 
 of the Linux guest, `recover-egress` has a later helper epoch attest, from its boot-bound witnesses,
 that the reboot ended the original generation (`RecoverRetiredGenerationV1`). While a lease is
 prepared, the helper re-verifies its generation's address with the same two sources about every 20 s;
-drift or a failed check faults and removes the tunnel, and the durable hold stays. A loopback
+drift or a failed check faults and removes the tunnel, and the durable hold stays. Since Step 36 a
+source that gives no answer only renews nothing: the check runs again, and the tunnel is cut if
+the health expires first. A loopback
 SOCKS5 proxy (`serve-socks`) carries IPv4 TCP streams through the prepared generation: each CONNECT
 is a signed `OpenProxyStreamV1`, the socket is opened inside the lab by an unprivileged worker and
 handed to the helper, and its traffic passes only a kernel-timed gate that the helper renews while
@@ -586,7 +588,7 @@ Every refusal carries a `code`. Clients act on it; the message is for people. On
 | `KERNEL_INCOMPATIBLE` | new namespaces would get extra devices |
 | `STATE_UNCERTAIN` | a create, tunnel connect or cleanup may have left kernel state behind; delete the lab, or check recovery before restarting the helper, which loses the egress retirement records (a revocation's answer says to keep it running) |
 | `STAGE_NOT_FOUND` | the vault holds no such stage for the profile (`StageInfo`, `ConnectTunnel`); the lab is untouched |
-| `EVIDENCE_UNAVAILABLE` | no fresh, unconsumed V2 evidence matches the reservation (none, expired or already consumed) |
+| `EVIDENCE_UNAVAILABLE` | no fresh, unconsumed V2 evidence matches the reservation (none, expired or already consumed); since Step 36 also a multi-source probe whose source gave no answer, with the lab left configured: approve a new attempt |
 | `INTERNAL` | anything else; details are in the helper log |
 
 The controller adds `RUNTIME_UNTRUSTED`, and reports a `CreateLab` or `ConnectTunnel` that failed
@@ -1090,7 +1092,22 @@ parent parses and validates every body itself in the source's format.
 Before the attempt starts, a refusal (no multi-source configuration, an invalid source policy,
 another namespace, a faulted tunnel, a cancelled context) changes nothing. Once it has started, any
 failure discards every observation, faults the tunnel and removes it; an unconfirmed removal keeps
-the faulted tunnel tracked (`ErrManagedTunnelUncertain`). All timestamps are wall-clock UTC, and each one is
+the faulted tunnel tracked (`ErrManagedTunnelUncertain`).
+
+The one exception (since Step 36) is a source that gives no answer:
+- **What counts.** The source sent nothing at all, not a byte at any layer, and the attempt timed
+  out or the connection was refused, reset or closed. The worker reports it as its own line
+  (`HTTPS_NO_ANSWER`). Any byte that came back makes it an answer, cut off or not; so does a server
+  that completed TLS and then went silent.
+- **What does not count.** A response that arrived and was refused is still a failure: a
+  certificate, a host name, a TLS alert, a reply that is not TLS, a status, an encoding or a body.
+  So is an older worker, which reports every failure the same way.
+- **The result.** If the source's window then closed as opened, with nothing else joined to the
+  error, and the worker is gone, the tunnel verifies as staged, the clock checks pass and the
+  attempt's context is still live, the attempt returns
+  `ErrManagedProbeSourceUnavailable`. It yields no evidence, sets no pin, and leaves the tunnel and
+  its firewall as they were. Anything more on top of it (a cleanup, a readback, a context, a busy
+  namespace or a tunnel check) faults as before. All timestamps are wall-clock UTC, and each one is
 checked against monotonic time: if the wall clock moved more than 1 s away from it since the
 attempt started or since the previous reading (a clock step in either direction), or if a
 reading is earlier than the previous one, the attempt fails closed.
@@ -1889,6 +1906,19 @@ lease's exact tunnel generation:
   are never renewed: a receipt never becomes a new authorization.
 - A changed address, a disagreement between the sources, a probe failure, a changed generation or
   policy, or expired health faults the lab, drops its local authorization and cleans up the tunnel.
+- A source that gives no answer, with the tunnel verified unchanged (since Step 36), renews nothing
+  and faults nothing:
+  - the health keeps its expiry, and the check runs again 2 s later;
+  - no traffic window opens until a check succeeds, so new streams wait;
+  - established streams still flow through the monitor's overlay during the checks, until 14 s
+    before the expiry;
+  - if no check succeeds before the health expires, at most 60 s after the last source observation,
+    the tunnel is faulted as before, also when a check without an answer itself ends past it.
+
+  A path that answers nothing is therefore cut when the health expires rather than at the first
+  failed check, though nothing new crosses it meanwhile. An address change is still caught by the
+  first source that answers. This is a bounded re-check, not a retry: the attempt still renews
+  nothing without two sources that agree.
   A confirmed cleanup retires the generation in the existing retirement record, so `release-egress`
   then releases the hold; a failed cleanup, or a generation the backend contradicted, retires
   nothing, and the hold stays. The durable hold always stays with the controller; nothing reserves
@@ -1901,7 +1931,7 @@ lease's exact tunnel generation:
 - Its log lines go through a bounded queue: a stalled log sink drops lines rather than stop the
   monitor or the helper's shutdown, which stops the monitor before closing the labs and the vault.
 - A failed probe worker now names a fixed reason in the helper's error (`HTTPS_REQUEST_FAILED`,
-  `WORKER_PRIVILEGE_CHECK_FAILED`, `WORKER_STATUS_UNAVAILABLE`, `WORKER_INVALID_REQUEST`,
+  `HTTPS_NO_ANSWER` since Step 36, `WORKER_PRIVILEGE_CHECK_FAILED`, `WORKER_STATUS_UNAVAILABLE`, `WORKER_INVALID_REQUEST`,
   `WORKER_EXECUTION_FAILED`); its raw stderr is never logged.
 
 Polling cannot detect an address change instantly, and a preparation that lands close to its
