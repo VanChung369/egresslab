@@ -78,7 +78,9 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   let response: Response;
   try {
+    // The same bound as the desktop supervisor's, so that a stalled request never holds a refresh.
     response = await fetch(`${ROOT}/api/v1${path}`, {
+      signal: AbortSignal.timeout(15_000),
       ...init,
       headers: {
         ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),

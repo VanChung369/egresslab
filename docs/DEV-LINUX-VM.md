@@ -1516,6 +1516,56 @@ Follow-up on 2026-11-27, for the open points above:
 - The sidecar answered the UI's exact requests (`/profiles?limit=200&offset=0`, the same for endpoints, and `/discovery`) with 200.
 - The two harness checks of `api.ts` were run once by hand; the desktop app has no frontend test suite to keep them in.
 
+### More and longer proxy streams, and desktop follow-ups (2026-11-27)
+
+The helper admitted at most 8 streams per runtime and cut each after 30 minutes. That was too few for a messaging client's parallel connections, and too short for its long-lived ones (WebSockets).
+
+Changes:
+- The helper admits 32 streams, admitted and waiting together, out of 40 connections, so 8 stay free for a release and other operations. A stream lives at most 24 hours.
+- `serve-socks` and `serve-endpoint` serve 32 clients at once, and up to 32 more wait 10 s for a slot.
+- Desktop:
+  - `yarn tauri:dev` embeds the built frontend, so no port serves the window; `yarn tauri:dev:hmr` keeps Vite (see `docs/ARCHITECTURE.md`).
+  - A timer refresh is skipped while one runs, and an older refresh never overwrites a newer one.
+  - In the browser, each request is bounded at 15 s.
+- CI has a macOS job for the Rust supervisor: it builds the sidecar, then runs `cargo fmt --check`, `clippy -D warnings` and `cargo test --locked`.
+
+Tests:
+- `TestProxyStreamClosedByRelease` now fills all 32 stream slots and sends the release through the helper's socket. With no connections reserved beyond the streams, the release is refused (connection reset).
+- The helper IPC tests passed in `egresslab`, and `go test` passed for both modules with `-race` (Go 1.25.1) and with Go 1.23.12.
+- The CI job's steps passed in a copy of the tree holding only tracked and unignored files: no `node_modules` and no frontend build, which the debug build does not need. Without the sidecar, `tauri-build` stops at compile time. The job has not run on GitHub yet.
+- Desktop changes, each checked by bundling the real module with a fake IPC or `fetch`, and each check failed with its change removed:
+  - the refresh after a delete kept its result while a slower timer refresh ended later, and a tick during a refresh was skipped;
+  - a stalled browser request was rejected after 15 s; without the bound, it was still waiting after 20 s.
+- `yarn tauri:dev`, started with no frontend build at all:
+  - Cargo started only after both Vite builds;
+  - the window's requests started the controller, and the controller kept its PID;
+  - nothing listened on 5173, 1430 or 8787.
+
+Lima's SSH sessions. Every stream runs one `limactl shell` for its whole life, and all of them share one SSH connection. Ubuntu's `sshd` allows 10 sessions on it (`MaxSessions`). Beyond that, `ssh` opens a connection of its own, and `sshd` drops some of those when many start at once (`MaxStartups 10:30:100`).
+- With the default, 20 sessions at once all ran, 10 of them on their own connection; with 40 at once, 8 failed.
+- After the drop-in below and a new master connection, 40 of 40 ran on the shared connection.
+
+Applied to `egresslab` only; `egresslab-b` keeps the default:
+
+```bash
+limactl shell egresslab bash -c 'printf "MaxSessions 64\n" | sudo tee /etc/ssh/sshd_config.d/70-egresslab-sessions.conf > /dev/null && sudo sshd -t && sudo systemctl reload ssh'
+ssh -o ControlPath="$HOME/.lima/egresslab/ssh.sock" -O exit lima-egresslab
+```
+
+Real run on `egresslab`, with the helper (`945b143f`) and `helperctl` built from the working tree, the rest of alpha.3, and `serve-endpoint` built from the working tree:
+- The pin answered 5 of 5. The vault stage must be made while the helper is stopped; the route then probed and reserved at the first attempt, and a name request matched.
+- 24 downloads at once, at 20 KB/s for 90 s each, next to the long download below:
+  - the lab namespace held 23 established connections after 30 s and 22 after 60 s;
+  - 22 of 24 downloads ran at full rate, about 1.85 MB each;
+  - a name request during the burst matched.
+- The other 2 failed before connecting: their name lookups, each of which opens its own DoH stream, could not be dialed within the window (`DESTINATION_UNREACHABLE` after about 7 s). About 48 dials started at once.
+- A first burst against proof.ovh.net does not count: that server answered 20 of 24 with HTTP 429, its own limit per address.
+
+Limitations:
+- A burst of new connections can outrun the dial budget of one traffic window, since every name lookup is its own DoH stream. Caching or sharing lookups would reduce this; it is left as a decision.
+- On Lima, more than about 10 streams need the `MaxSessions` change above. WSL2 starts one `wsl.exe` per stream and has not run more than eight (see "Windows checks").
+- The released binaries keep the old limits; this needs a new release.
+
 ## Security Notes
 
 - Never commit `.env` files containing secrets.
@@ -1542,11 +1592,13 @@ If DNS returns several addresses, do not take the first one blindly. The provide
 
 ## Windows checks
 
-Pending (Step 37): run `yarn tauri:dev` on Windows with a scratch `EGRESSLAB_DATA_DIR`, and check five things:
+Pending (Step 37): run `yarn tauri:dev` (the embedded frontend, no dev port) on Windows with a scratch `EGRESSLAB_DATA_DIR`, and check four things:
 - the sidecar starts without a console window and answers;
 - a second controller is refused through `LockFileEx`, and with a controller already holding the directory, the window shows "Another EgressLab controller is using this data directory";
-- nothing listens on 8787;
+- nothing listens on 8787, 5173 or 1430;
 - no controller is left after the app exits normally and after the app process is killed.
+
+Pending (more and longer streams): with a route up through WSL2, open more than eight streams at once through `serve-endpoint`, each with its own `wsl.exe`, and keep one open for more than 30 minutes.
 
 Both checks that were pending for Windows ran on 2026-11-26; see "Windows and WSL2 run (Step 35)".
 

@@ -25,9 +25,9 @@ const (
 
 	// Up to socksMaxClients clients are served at once, as many as the helper admits streams per
 	// runtime; a few more wait briefly for a slot, and the rest are refused.
-	socksMaxClients = 8
+	socksMaxClients = 32
 	socksSlotWait   = 10 * time.Second
-	socksMaxWaiting = 8
+	socksMaxWaiting = 32
 )
 
 func validSocksPort(raw string) bool {

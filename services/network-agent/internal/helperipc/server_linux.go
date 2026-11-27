@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	maxConnections   = 16
+	maxConnections   = maxProxyStreams + 8
 	maxRecoveryItems = 128
 	requestTimeout   = 5 * time.Second
 	scanTimeout      = 3 * time.Second

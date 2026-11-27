@@ -103,3 +103,42 @@ jobs:
       # "yarn check" is Yarn 1's lockfile check; "yarn run check" runs the package script.
       - name: svelte-check
         run: yarn run check
+
+  desktop-rust:
+    name: Desktop (Rust supervisor, macOS)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/controller/go.mod
+          cache-dependency-path: services/controller/go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      # tauri-build refuses to compile without the sidecar, and the tests run it.
+      - name: Sidecar
+        run: node scripts/build-sidecar.mjs
+
+      - name: rustfmt
+        working-directory: apps/desktop/src-tauri
+        run: cargo fmt --check
+
+      - name: clippy
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: cargo test
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --locked

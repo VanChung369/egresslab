@@ -18,6 +18,7 @@
     type ProxyEndpoint,
     type RoutingProfile
   } from '$lib/api';
+  import { createRefreshGate } from '$lib/refresh';
 
   type View = 'overview' | 'endpoints' | 'profiles' | 'tunnels' | 'agents';
   let activeView: View = 'overview';
@@ -63,7 +64,20 @@
     notice = '';
   }
 
+  const refreshes = createRefreshGate();
+
   async function refresh(quiet = false): Promise<void> {
+    const ticket = refreshes.start(quiet);
+    if (ticket === undefined) return;
+
+    try {
+      await refreshAs(ticket, quiet);
+    } finally {
+      refreshes.finish();
+    }
+  }
+
+  async function refreshAs(ticket: number, quiet: boolean): Promise<void> {
     try {
       const [h, o, p, e] = await Promise.all([
         getHealth(),
@@ -71,6 +85,7 @@
         getProfiles(),
         getEndpoints()
       ]);
+      if (!refreshes.isLatest(ticket)) return;
       health = h;
       overview = o;
       profiles = p.items;
@@ -78,20 +93,23 @@
       connected = true;
       if (!quiet) error = '';
     } catch (e) {
+      if (!refreshes.isLatest(ticket)) return;
       connected = false;
       if (!quiet) error = e instanceof Error ? e.message : 'Unknown connection error';
     } finally {
-      loading = false;
+      if (refreshes.isLatest(ticket)) loading = false;
     }
 
     // Agent discovery is read-only and optional; its failure never hides the core screens.
     if (connected) {
       try {
         const [a, t] = await Promise.all([getAgents(), getTunnels()]);
+        if (!refreshes.isLatest(ticket)) return;
         agents = a.items;
         tunnels = t.items;
         discoveryError = '';
       } catch (e) {
+        if (!refreshes.isLatest(ticket)) return;
         discoveryError = e instanceof Error ? e.message : 'Agent discovery failed';
       }
     }

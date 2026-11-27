@@ -1,0 +1,9 @@
+{
+  "build": {
+    "devUrl": null,
+    "beforeDevCommand": {
+      "script": "yarn build:sidecar && yarn build",
+      "wait": true
+    }
+  }
+}

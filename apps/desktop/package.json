@@ -12,7 +12,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "tauri": "tauri",
-    "tauri:dev": "node scripts/check-dev-port.mjs && tauri dev"
+    "tauri:dev": "tauri dev --no-dev-server --config src-tauri/tauri.embedded-dev.conf.json",
+    "tauri:dev:hmr": "node scripts/check-dev-port.mjs && tauri dev"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.0",

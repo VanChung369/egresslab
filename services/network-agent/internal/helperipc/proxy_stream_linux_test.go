@@ -331,7 +331,7 @@ func TestProxyStreamClosedByRelease(t *testing.T) {
 
 	var conns []*net.UnixConn
 
-	for range 3 {
+	for range maxProxyStreams {
 		conn, _, err := p.open(t, p.capability(t, testProxyDestination))
 		if err != nil {
 			t.Fatal(err)
@@ -342,8 +342,11 @@ func TestProxyStreamClosedByRelease(t *testing.T) {
 		conns = append(conns, conn)
 	}
 
-	if _, err := runRevokeLease(p.f, revokeRequest(t, p.f, p.prep)); err != nil {
-		t.Fatalf("release refused while streams ran: %v", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if _, err := callRequest(ctx, p.socket, revokeRequest(t, p.f, p.prep)); err != nil {
+		t.Fatalf("release refused while every stream slot was taken: %v", err)
 	}
 
 	for _, conn := range conns {

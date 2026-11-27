@@ -13,7 +13,7 @@ import (
 
 const (
 	// proxyStreamLifetime bounds one stream; it is not the lifetime of any traffic permission.
-	proxyStreamLifetime = 30 * time.Minute
+	proxyStreamLifetime = 24 * time.Hour
 
 	// proxyPreemptWait bounds how long a release waits for the streams to leave their traffic
 	// window, and a first stream for a short monitor check.
@@ -21,7 +21,7 @@ const (
 
 	// maxProxyStreams counts admitted and waiting streams together. Each keeps one server connection
 	// for its lifetime, so the rest of maxConnections stays free for a release.
-	maxProxyStreams = 8
+	maxProxyStreams = 32
 )
 
 // ProxyStreamAck answers an OpenProxyStreamV1 request on the same connection, before any stream

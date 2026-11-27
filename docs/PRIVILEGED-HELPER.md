@@ -2015,12 +2015,14 @@ runs in the foreground until interrupted and changes no global readiness.
   left (later requests wait for the next window), and every dial ends 2 s before the window's
   deadline, so its worker's cleanup never runs the window past it; a late dial may hold the window
   past 6 s, never past its deadline. A stream's own failure never fails the window. The last stream
-  to end ends the windows. At most eight streams per helper, admitted and waiting together: each
-  keeps one of the helper's sixteen connections, and a ninth is refused with `LAB_BUSY` before its
-  capability is consumed. A client that half-closes keeps its download; while the download runs, one
+  to end ends the windows. At most 32 streams per helper, admitted and waiting together: each
+  keeps one of the helper's 40 connections, which leaves 8 for a release and other operations, and a
+  33rd is refused with `LAB_BUSY` before its capability is consumed (eight streams and sixteen
+  connections until 2026-11-27). A client that half-closes keeps its download; while the download runs, one
   whose connection to the helper is gone entirely (the socket reports a hang-up) ends its stream even
   if the destination neither sends nor reads, so a stale stream never holds a slot. (Step 34 had one stream per helper, and a new one replaced it.) A stream lives at most
-  30 minutes, and ends with the prepared lease: monitoring faults, disconnects, releases and new
+  24 hours (30 minutes until 2026-11-27, which cut long-lived connections such as WebSockets), and
+  ends with the prepared lease: monitoring faults, disconnects, releases and new
   tunnels close every stream before anything else.
 - **Preemption.** The keeper holds the lifecycle lock through its windows almost continuously. A new
   stream joins the running keeper without the lock; with no keeper it waits up to 5 s for the lock (a
@@ -2042,8 +2044,14 @@ runs in the foreground until interrupted and changes no global readiness.
   then both directions are framed (data, FIN, and END from the guest), because neither a killed
   launcher nor a closed stdout crosses `limactl shell`; EOF on stdin closes the stream. A destination
   FIN does not end the upload. A pending request whose client left never dials.
-- **Client handling.** Up to eight clients are served at once (one at a time in Step 34), as many
-  as the helper admits; up to eight more wait up to 10 s for a slot, the rest are refused. After the
+  Each stream is one launcher session for its whole life. On Lima, `limactl shell` shares one SSH
+  connection, and the guest's `sshd` allows 10 sessions on it by default (`MaxSessions`). Beyond
+  that `ssh` opens connections of its own, and a burst of them can be refused (`MaxStartups`): with
+  the default, 8 of 40 sessions opened at once failed. Raise `MaxSessions` in the guest for more
+  streams (see `docs/DEV-LINUX-VM.md`).
+- **Client handling.** Up to 32 clients are served at once (one at a time in Step 34, eight until
+  2026-11-27), as many as the helper admits; up to 32 more wait up to 10 s for a slot, the rest are
+  refused. After the
   destination finished, an idle client is closed after 30 s.
 
 Limits of this prototype: since Step 35 a short pause remains around each monitor check (see Monitor
@@ -2068,7 +2076,7 @@ and the API's saves of the same files no longer collide: readers share delete ac
 rename with POSIX semantics, retrying transient refusals.
 
 Several streams per runtime (Step 35): the helper's streams share one keeper and its traffic windows
-(see Traffic windows and Preemption above), and `serve-socks` and `serve-endpoint` serve up to eight
+(see Traffic windows and Preemption above), and `serve-socks` and `serve-endpoint` serve up to 32 (eight until 2026-11-27)
 clients at once, each CONNECT with its own capability. The IPC protocol, helperctl and the workers
 did not change.
 
