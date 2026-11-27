@@ -53,25 +53,27 @@ jobs:
             GOOS="${target%/*}" GOARCH="${target#*/}" go vet ./...
           done
 
-  controller-cross-platform:
-    name: Controller (${{ matrix.os }})
+  cross-platform:
+    name: Go (${{ matrix.module }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # macos-latest is Apple Silicon (arm64). Windows runs the real DPAPI key store tests;
         # the macOS Keychain test is opt-in (EGRESSLAB_TEST_KEYCHAIN=1) and skipped here.
+        # The network agent runs only on Linux, but its tests run where developers build it.
         os: [windows-latest, macos-latest]
+        module: [services/controller, services/network-agent]
     defaults:
       run:
-        working-directory: services/controller
+        working-directory: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: services/controller/go.mod
-          cache-dependency-path: services/controller/go.mod
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.mod
 
       - name: go vet
         run: go vet ./...

@@ -2069,6 +2069,16 @@ runs in the foreground until interrupted and changes no global readiness.
   24 hours (30 minutes until 2026-11-27, which cut long-lived connections such as WebSockets), and
   ends with the prepared lease: monitoring faults, disconnects, releases and new
   tunnels close every stream before anything else.
+- **Logs (since 2026-11-27).** Each stream logs one line when it ends, with its duration and the
+  bytes each way: `proxy stream ended after 323s: download: connection reset (up 812 B, down 6524103 B)`.
+  - The reason is the first cause only: an upload or download error by kind (`connection reset`,
+    `broken pipe`, `timed out`, `unreachable` or `failed`), `client gone`, `lifetime reached`,
+    `streams closed` (by a release, a fault or a monitor finding, each of which logs its own line),
+    or `closed by both sides`.
+  - Which socket failed is not named, because a splice reports both through one of them, and no
+    address or destination appears.
+  - A fault that the keeper's traffic window finds is logged as `Traffic window fault: …`; before,
+    only a monitor fault had a line.
 - **Preemption.** The keeper holds the lifecycle lock through its windows almost continuously. A new
   stream joins the running keeper without the lock; with no keeper it waits up to 5 s for the lock (a
   monitor check), and a first request that meanwhile finds another first request's keeper joins it.

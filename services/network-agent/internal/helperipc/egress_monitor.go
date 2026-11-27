@@ -19,7 +19,7 @@ const (
 	// egressMonitorRecheck spaces the checks after one whose source gave no answer.
 	egressMonitorRecheck = 2 * time.Second
 
-	monitorLogQueue = 32
+	monitorLogQueue = 128 // room for every stream's end line ahead of a fault
 )
 
 var (

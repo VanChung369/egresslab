@@ -1072,7 +1072,7 @@ Official artifact (GitHub Actions "Release Build", `727fc84`), checked on 2026-1
 Limitations:
 - The lifecycle above, with a download cut mid-stream, ran on the first trial build. The script was hardened after Codex's review: archive modes and owners, member checks, the trust roots embedded by name. Its later trial builds, through GNU tar and through BSD tar (libarchive, as on macOS), passed their checks and checksums, and their Windows controller started, but the lifecycle was not repeated.
 - macOS with two Lima runtimes ran later, with a local build of the release commit; see the next section. Native Linux has not run end to end.
-- A fault found by the keeper's traffic window is not written to the helper log, unlike a monitor fault; the controller sees `LAB_FAULTED`.
+- A fault found by the keeper's traffic window was not written to the helper log, unlike a monitor fault; the controller saw `LAB_FAULTED`. Since 2026-11-27 it is logged as `Traffic window fault`.
 - `recover-egress` (after a guest reboot) was not repeated with release binaries.
 
 ### Release binaries on macOS and two Lima runtimes (Step 36)
@@ -1564,7 +1564,7 @@ Real run on `egresslab`, with the helper (`945b143f`) and `helperctl` built from
   - from Cloudflare, one ran past 30 minutes and was reset after 2162 s (36 minutes);
   - from OVH and Hetzner, two ended cleanly after exactly 1611 s at 5 KB/s, and one at 10 KB/s after 1008 s, so neither the time nor the byte count is fixed.
   - The helper logged nothing at any of these moments, and the monitor stayed healthy throughout: 209 checks, no check without an answer, no fault.
-  - What ended these connections is unknown: the helper does not log why a stream ends. That logging is worth adding before a 24-hour test.
+  - What ended these connections is unknown: the helper did not log why a stream ends. Since 2026-11-27 it does (see "Logs" under the proxy in `docs/PRIVILEGED-HELPER.md`).
 - Cleanup: the hold released in 0.86 s with `generation_retired: true`; the build with the probe classes below then ran on the same route.
 
 Limitations:
@@ -1792,6 +1792,25 @@ Limitations:
 - The controller and the helper still compare their own clocks with no or 1 s allowance: a capability's `issued_at`, and `multiProbeWithin` on the controller. A WSL clock more than a second behind Windows can therefore still refuse a request (see "Clocks" in `docs/PRIVILEGED-HELPER.md`).
 - Steps backwards were not tested on a real helper: correcting a forward step would trip `helperauth`'s rollback check.
 - This needs a new release.
+
+### Stream logs and network agent CI on Windows and macOS (2026-11-27)
+
+- CI: the cross-platform job runs `go vet` and `go test` for the network agent on `windows-latest` and `macos-latest` too, not only on Linux. The Winsock failure above had gone unnoticed for want of it.
+- The helper logs why each proxy stream ended and how many bytes it carried, without addresses. It also logs a fault that the keeper's traffic window finds (see "Logs" under the proxy in `docs/PRIVILEGED-HELPER.md`).
+- Tests (Linux, under `-race`):
+  - `TestProxyStreamEndReason` checks the naming;
+  - `TestRelayProxyEndCause`, over real sockets, checks four ends: both sides closed, the destination reset, the client gone, and the context ended from outside. It also checks the byte counts.
+- Three mutations each failed it:
+  - consequences of our own close recorded as the cause;
+  - the hang-up watcher without its cause;
+  - the context read after the relay's own cancel.
+- Codex reviewed it. Fixed:
+  - the hang-up watcher could still write the cause while the relay returned (a data race);
+  - a clean close of both sides was named `streams closed`, because the relay's own cancel came first;
+  - the reason of a closed plane could be stale or carry a raw backend error, so the stream line no longer quotes it;
+  - 32 stream lines could fill the 32-line log queue ahead of the fault line; the queue now holds 128.
+- The new fault line prints its error as the monitor's fault line always did.
+- Not yet seen on a real helper: the next run's long connections will show their reason.
 
 ## Security Notes
 

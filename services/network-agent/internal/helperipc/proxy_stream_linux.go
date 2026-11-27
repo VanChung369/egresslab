@@ -212,6 +212,11 @@ func (l *LabLifecycle) runProxyPlane(plane *proxyPlane, k proxyKeeper) {
 		})
 
 		if err != nil && !errors.Is(err, errLabBusy) {
+			// A monitor fault has its own line; a window's did not.
+			if errors.Is(err, errLabFaulted) || errors.Is(err, errLabUncertain) {
+				logDetached("Traffic window fault: %v", err)
+			}
+
 			failure = err
 			return
 		}
@@ -430,7 +435,44 @@ func (l *LabLifecycle) serveProxyStream(
 		return
 	}
 
-	relayProxy(stream.ctx, stream.cancel, conn, stream.target)
+	started := time.Now()
+	result := relayProxy(stream.ctx, stream.cancel, conn, stream.target)
+
+	logDetached("proxy stream ended after %s: %s (up %d B, down %d B)", time.Since(started).Round(time.Second),
+		proxyStreamEndReason(result), result.up, result.down)
+}
+
+// proxyStreamEndReason names what ended a stream: the relay's first failure, its lifetime, the
+// streams being closed (a release, a fault or a monitor finding, each with its own log line), or
+// both sides closing.
+func proxyStreamEndReason(r proxyRelayResult) string {
+	switch {
+	case r.cause != "":
+		return r.cause
+	case errors.Is(r.stopped, context.DeadlineExceeded):
+		return "lifetime reached"
+	case r.stopped != nil:
+		return "streams closed"
+	default:
+		return "closed by both sides"
+	}
+}
+
+// proxyRelayFailure names a relay error by direction and kind, without any address. Which socket
+// failed is not reliable: a splice reports both through one of them.
+func proxyRelayFailure(direction string, err error) string {
+	switch {
+	case errors.Is(err, syscall.ECONNRESET):
+		return direction + ": connection reset"
+	case errors.Is(err, syscall.EPIPE):
+		return direction + ": broken pipe"
+	case errors.Is(err, syscall.ETIMEDOUT):
+		return direction + ": timed out"
+	case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH):
+		return direction + ": unreachable"
+	default:
+		return direction + ": failed"
+	}
 }
 
 // waitProxyAdmission waits for the keeper's answer. A request the keeper has not taken is withdrawn
@@ -501,7 +543,7 @@ func peerHungUp(conn *net.UnixConn) bool {
 // watchPeerHangup ends the stream once the IPC peer is gone entirely, while the download still runs:
 // otherwise a destination that neither sends nor reads would keep the stream and its slot. After
 // the download it stops: the upload ends on its own.
-func watchPeerHangup(ctx context.Context, cancel context.CancelFunc, client *net.UnixConn, downloaded *atomic.Bool) {
+func watchPeerHangup(ctx context.Context, cancel func(), client *net.UnixConn, downloaded *atomic.Bool) {
 	tick := time.NewTicker(proxyHangupCheck)
 	defer tick.Stop()
 
@@ -523,9 +565,15 @@ func watchPeerHangup(ctx context.Context, cancel context.CancelFunc, client *net
 	}
 }
 
+type proxyRelayResult struct {
+	up, down int64
+	cause    string // what ended the stream first, if not both sides closing or its context
+	stopped  error  // without a cause: the context's end from outside (lifetime or closed streams)
+}
+
 // relayProxy copies both directions and propagates half-closes; the stream ends when both are done
 // or on the first error.
-func relayProxy(ctx context.Context, cancel context.CancelFunc, client *net.UnixConn, target *net.TCPConn) {
+func relayProxy(ctx context.Context, cancel context.CancelFunc, client *net.UnixConn, target *net.TCPConn) proxyRelayResult {
 	defer cancel()
 
 	stop := context.AfterFunc(ctx, func() {
@@ -534,17 +582,40 @@ func relayProxy(ctx context.Context, cancel context.CancelFunc, client *net.Unix
 	})
 	defer stop()
 
+	var (
+		result proxyRelayResult
+		first  sync.Once
+	)
+
+	// Only the first cause counts; errors from the sockets closed after it, or after the context
+	// ended from outside, are its consequence.
+	end := func(cause string) {
+		if ctx.Err() == nil {
+			first.Do(func() { result.cause = cause })
+		}
+
+		cancel()
+	}
+
 	done := make(chan struct{}, 2)
 
 	var downloaded atomic.Bool
 
-	go watchPeerHangup(ctx, cancel, client, &downloaded)
+	watched := make(chan struct{})
+
+	go func() {
+		defer close(watched)
+		watchPeerHangup(ctx, func() { end("client gone") }, client, &downloaded)
+	}()
 
 	go func() {
 		defer func() { done <- struct{}{} }()
 
-		if _, err := io.Copy(target, client); err != nil {
-			cancel()
+		n, err := io.Copy(target, client)
+		atomic.AddInt64(&result.up, n)
+
+		if err != nil {
+			end(proxyRelayFailure("upload", err))
 			return
 		}
 
@@ -554,8 +625,11 @@ func relayProxy(ctx context.Context, cancel context.CancelFunc, client *net.Unix
 	go func() {
 		defer func() { done <- struct{}{} }()
 
-		if _, err := io.Copy(client, target); err != nil {
-			cancel()
+		n, err := io.Copy(client, target)
+		atomic.AddInt64(&result.down, n)
+
+		if err != nil {
+			end(proxyRelayFailure("download", err))
 			return
 		}
 
@@ -566,4 +640,15 @@ func relayProxy(ctx context.Context, cancel context.CancelFunc, client *net.Unix
 
 	<-done
 	<-done
+
+	// Read before our own cancel, which ends the watcher; the result is read only once it is gone.
+	stopped := ctx.Err()
+	cancel()
+	<-watched
+
+	if result.cause == "" {
+		result.stopped = stopped
+	}
+
+	return result
 }
