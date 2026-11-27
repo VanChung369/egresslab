@@ -1554,17 +1554,85 @@ ssh -o ControlPath="$HOME/.lima/egresslab/ssh.sock" -O exit lima-egresslab
 
 Real run on `egresslab`, with the helper (`945b143f`) and `helperctl` built from the working tree, the rest of alpha.3, and `serve-endpoint` built from the working tree:
 - The pin answered 5 of 5. The vault stage must be made while the helper is stopped; the route then probed and reserved at the first attempt, and a name request matched.
-- 24 downloads at once, at 20 KB/s for 90 s each, next to the long download below:
+- 24 downloads at once, at 20 KB/s for 90 s each, next to a long download:
   - the lab namespace held 23 established connections after 30 s and 22 after 60 s;
   - 22 of 24 downloads ran at full rate, about 1.85 MB each;
   - a name request during the burst matched.
 - The other 2 failed before connecting: their name lookups, each of which opens its own DoH stream, could not be dialed within the window (`DESTINATION_UNREACHABLE` after about 7 s). About 48 dials started at once.
 - A first burst against proof.ovh.net does not count: that server answered 20 of 24 with HTTP 429, its own limit per address.
+- Long downloads at 5 to 10 KB/s:
+  - from Cloudflare, one ran past 30 minutes and was reset after 2162 s (36 minutes);
+  - from OVH and Hetzner, two ended cleanly after exactly 1611 s at 5 KB/s, and one at 10 KB/s after 1008 s, so neither the time nor the byte count is fixed.
+  - The helper logged nothing at any of these moments, and the monitor stayed healthy throughout: 209 checks, no check without an answer, no fault.
+  - What ended these connections is unknown: the helper does not log why a stream ends. That logging is worth adding before a 24-hour test.
+- Cleanup: the hold released in 0.86 s with `generation_retired: true`; the build with the probe classes below then ran on the same route.
 
 Limitations:
 - A burst of new connections can outrun the dial budget of one traffic window, since every name lookup is its own DoH stream. Caching or sharing lookups would reduce this; it is left as a decision.
 - On Lima, more than about 10 streams need the `MaxSessions` change above. WSL2 starts one `wsl.exe` per stream and has not run more than eight (see "Windows checks").
 - The released binaries keep the old limits; this needs a new release.
+
+Codex reviewed this work once; it changed nothing.
+- Fixed: `yarn tauri:dev` started Cargo before the frontend build had finished, so it could embed the previous build. The build hook now waits (`wait: true`); with no build at all beforehand, Cargo started only after both Vite builds.
+- Fixed: in the browser, a stalled request could hold a refresh, and with it every timer tick, for good. Each request now ends after 15 s.
+- Left as a decision: on a Lima guest with the default `MaxSessions`, a burst of more than about 10 connections opens SSH connections of its own, and some can be dropped. The fix above is a guest setting, not code.
+
+### Probe failure classes (2026-11-27)
+
+A source that answered at all used to fault the lab, even when the answer said nothing about the egress address. The alpha.3 run lost a route to `HTTPS_REQUEST_FAILED` from ident.me, and nobody could tell what came back. The worker now reports one of seven classes:
+- Three renew nothing and fault nothing, like a source that never answered: the check runs again 2 s later, and the lab faults only if the health expires (see `docs/PRIVILEGED-HELPER.md`):
+  - `HTTPS_NO_ANSWER`;
+  - `HTTPS_SOURCE_UNAVAILABLE`: 429 or 5xx after a verified TLS handshake;
+  - `HTTPS_REPLY_INCOMPLETE`: a verified reply that timed out or was cut.
+- The other four still fault at once: `HTTPS_TLS_FAILED`, `HTTPS_UNEXPECTED_STATUS`, `HTTPS_INVALID_RESPONSE` and `HTTPS_REQUEST_FAILED`.
+- Monitor lines now name the reason of a check without an answer.
+- `probe-egress-multi` and `reserve-egress` answer `EVIDENCE_UNAVAILABLE` for these three classes and leave the lab configured.
+
+Tests:
+- `TestManagedProbeNoAnswer` covers 22 cases against local servers, each with its class and consequence:
+  - silence, refusal and a close before TLS;
+  - 503 and 429;
+  - a reply cut between lines, inside the status line, inside a header line, in the body or in a chunked trailer, and silence after TLS;
+  - an untrusted certificate, another host name, a reply that is not TLS, two bytes that are not TLS, and a TLS 1.3 alert after the handshake;
+  - 404, an encoded body, an empty body, and a complete malformed status line with or without a close after it.
+- A cut is recognized when the connection was closed or reset below TLS while more of the reply was due. A TLS server that closes properly (`close_notify`) in the middle of a line still faults.
+- `TestManagedProbeReasonsRoundTrip` maps every worker line back to the same reason and consequence in the helper. A line the helper does not know fails.
+- `TestManagedMultiProbeNoAnswer` checks that the reason reaches the error.
+- Linux: the agent, worker and helper tests passed in `egresslab-b`; macOS: `go test`, and `go vet` for three systems.
+- Mutation checks, each of which failed a test:
+  - a byte before a verified handshake counted as no answer;
+  - a certificate failure counted as no answer;
+  - a 503 or a cut verified reply counted as a failure;
+  - a 404 counted as no answer;
+  - the reason dropped from the monitor line;
+  - an unknown worker line counted as no answer;
+  - a close while more was due ignored, or any read counted as a close;
+  - a TLS alert after the handshake reported as an invalid response.
+- The first run of the certificate mutation was not caught, because the test read the expected consequence from the table it was checking. The soft classes are now listed in the test itself.
+
+Codex's review (it changed nothing) found three gaps, all fixed with the tests above:
+- a reply cut inside its status or a header line, which Go reports as a syntax error;
+- a chunked reply cut in its trailer;
+- a TLS 1.3 alert after the handshake, which was reported as an invalid response.
+
+On Lima, `egresslab` ran this build: the helper `cc5bbfb5`, `helperctl` `5503fbc8` and the probe worker `5be57051`.
+- `reserve-egress` probed and reserved at the first attempt.
+- 8 minutes with two downloads at 20 KB/s and a name request every 15 s:
+  - 23 of 23 name requests matched;
+  - both downloads ran the full 480 s, about 9.8 MB each;
+  - 24 healthy checks, none without an answer, no fault.
+- ident.me answered every check, so no new reason appeared in the log.
+- Afterwards:
+  - the hold was released with `generation_retired: true` and the lab deleted;
+  - the alpha.3 helper (`4f7faaea`), `helperctl` and worker (`e25ef9a6`) were reinstalled and the stage revoked;
+  - nothing remained for `egresslab-lab-recover`;
+  - `state.json` was unchanged;
+  - the journal went from 77339 to 80689 bytes.
+
+Limitations:
+- A real 503 or cut reply from ident.me cannot be produced on demand, so the Lima run is a regression check only.
+- Whether these classes cover the failures seen so far is unknown until the next one is logged with its reason.
+- This needs a new release.
 
 ## Security Notes
 

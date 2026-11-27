@@ -25,7 +25,8 @@ that the reboot ended the original generation (`RecoverRetiredGenerationV1`). Wh
 prepared, the helper re-verifies its generation's address with the same two sources about every 20 s;
 drift or a failed check faults and removes the tunnel, and the durable hold stays. Since Step 36 a
 source that gives no answer only renews nothing: the check runs again, and the tunnel is cut if
-the health expires first. A loopback
+the health expires first. Since 2026-11-27 that includes the verified host answering a service error
+(429 or 5xx) or cutting its reply short. A loopback
 SOCKS5 proxy (`serve-socks`) carries IPv4 TCP streams through the prepared generation: each CONNECT
 is a signed `OpenProxyStreamV1`, the socket is opened inside the lab by an unprivileged worker and
 handed to the helper, and its traffic passes only a kernel-timed gate that the helper renews while
@@ -1094,14 +1095,25 @@ another namespace, a faulted tunnel, a cancelled context) changes nothing. Once 
 failure discards every observation, faults the tunnel and removes it; an unconfirmed removal keeps
 the faulted tunnel tracked (`ErrManagedTunnelUncertain`).
 
-The one exception (since Step 36) is a source that gives no answer:
-- **What counts.** The source sent nothing at all, not a byte at any layer, and the attempt timed
-  out or the connection was refused, reset or closed. The worker reports it as its own line
-  (`HTTPS_NO_ANSWER`). Any byte that came back makes it an answer, cut off or not; so does a server
-  that completed TLS and then went silent.
-- **What does not count.** A response that arrived and was refused is still a failure: a
-  certificate, a host name, a TLS alert, a reply that is not TLS, a status, an encoding or a body.
-  So is an older worker, which reports every failure the same way.
+The one exception (since Step 36) is a source that gives no usable answer, one that says nothing
+about the egress address:
+- **What counts.** The worker reports each case as its own line:
+  - `HTTPS_NO_ANSWER`: the source sent nothing at all, not a byte at any layer, and the attempt
+    timed out or the connection was refused, reset or closed;
+  - `HTTPS_SOURCE_UNAVAILABLE` (since 2026-11-27): after a verified TLS handshake (certificate and
+    host name), the host answered 429 or a 5xx status;
+  - `HTTPS_REPLY_INCOMPLETE` (since 2026-11-27): after a verified handshake, the reply timed out or
+    was reset or cut short, in its headers or its body.
+- **What does not count.** Anything else that came back is still a failure:
+  - `HTTPS_TLS_FAILED`: any byte before a verified handshake, a certificate, a host name, a TLS
+    alert, a reply that is not TLS, or a handshake cut short;
+  - `HTTPS_UNEXPECTED_STATUS`: any other status;
+  - `HTTPS_INVALID_RESPONSE`: an encoding, an empty or oversized body, or a malformed reply;
+  - `HTTPS_REQUEST_FAILED`: anything else.
+
+  Until 2026-11-27 any byte that came back made it an answer, so a 503 or a cut reply faulted the
+  lab. A worker line the helper does not know fails, and an older worker reports only
+  `HTTPS_NO_ANSWER` and `HTTPS_REQUEST_FAILED`.
 - **The result.** If the source's window then closed as opened, with nothing else joined to the
   error, and the worker is gone, the tunnel verifies as staged, the clock checks pass and the
   attempt's context is still live, the attempt returns
@@ -1934,8 +1946,11 @@ lease's exact tunnel generation:
 - Its log lines go through a bounded queue: a stalled log sink drops lines rather than stop the
   monitor or the helper's shutdown, which stops the monitor before closing the labs and the vault.
 - A failed probe worker now names a fixed reason in the helper's error (`HTTPS_REQUEST_FAILED`,
-  `HTTPS_NO_ANSWER` since Step 36, `WORKER_PRIVILEGE_CHECK_FAILED`, `WORKER_STATUS_UNAVAILABLE`, `WORKER_INVALID_REQUEST`,
-  `WORKER_EXECUTION_FAILED`); its raw stderr is never logged.
+  `HTTPS_NO_ANSWER` since Step 36, the other `HTTPS_` reasons since 2026-11-27,
+  `WORKER_PRIVILEGE_CHECK_FAILED`, `WORKER_STATUS_UNAVAILABLE`, `WORKER_INVALID_REQUEST`,
+  `WORKER_EXECUTION_FAILED`); its raw stderr is never logged. A check without a usable answer logs
+  its reason too, for example `source ident_me: probe source unavailable; tunnel unchanged
+  (HTTPS_SOURCE_UNAVAILABLE)`.
 
 Polling cannot detect an address change instantly, and a preparation that lands close to its
 evidence deadline leaves the first check little time, so it may fault. The controller, the journal
