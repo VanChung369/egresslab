@@ -17,7 +17,7 @@ func (f *fakeRuntime) ProbeEgress(
 	profileID, namespace string,
 	capability control.LabCapability,
 ) (control.LabProbeInfo, error) {
-	f.calls = append(f.calls, "PermitProbe")
+	f.record("PermitProbe")
 	f.probeCalls = append(f.probeCalls, capability)
 
 	if f.probeErr != nil {

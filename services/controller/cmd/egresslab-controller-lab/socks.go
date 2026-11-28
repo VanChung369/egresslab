@@ -55,24 +55,36 @@ func (s *session) serveSocks(reservationID, portArg string) error {
 		return err
 	}
 
-	return s.serveSocksWithAuthority(reservationID, portArg, authority, keys, nil)
-}
-
-// serveSocksWithAuthority: guard, when set, must hold at start and for every stream, after its
-// capability is minted and before it is sent.
-func (s *session) serveSocksWithAuthority(reservationID, portArg string, authority *control.ReservationAuthority,
-	keys control.LabSigner, guard func() error) error {
-	port, _ := strconv.ParseUint(portArg, 10, 16)
-
-	if guard != nil {
-		if err := guard(); err != nil {
-			return reservationCommandError(err)
-		}
-	}
-
 	hold, err := authority.Lookup(reservationID)
 	if err != nil {
 		return reservationCommandError(err)
+	}
+
+	route := &socksRoute{reservationID: reservationID, identIPv4: hold.IdentIPv4}
+
+	return s.serveSocksWithAuthority(portArg, authority, keys, func() *socksRoute { return route })
+}
+
+// socksRoute is what one CONNECT is minted for: the hold, its ident pin for the resolver's answers,
+// and the guard that must hold after the mint and before the capability is sent.
+type socksRoute struct {
+	reservationID string
+	identIPv4     string
+	guard         func() error
+}
+
+// errRouteRecovering refuses a CONNECT while an automatic recovery replaces the route.
+var errRouteRecovering = errors.New("the route is being recovered")
+
+// serveSocksWithAuthority reads route once per CONNECT; nil refuses it. The first route is the one
+// printed at start.
+func (s *session) serveSocksWithAuthority(portArg string, authority *control.ReservationAuthority,
+	keys control.LabSigner, route func() *socksRoute) error {
+	port, _ := strconv.ParseUint(portArg, 10, 16)
+
+	first := route()
+	if first == nil {
+		return errRouteRecovering
 	}
 
 	trusted := func() (control.TrustedRuntime, error) {
@@ -135,55 +147,65 @@ func (s *session) serveSocksWithAuthority(reservationID, portArg string, authori
 		Password      string `json:"password"`
 		ReservationID string `json:"reservation_id"`
 		NetworkReady  bool   `json:"network_ready"`
-	}{listener.Addr().String(), username, password, reservationID, false}); err != nil {
+	}{listener.Addr().String(), username, password, first.reservationID, false}); err != nil {
 		return err
 	}
 
-	dial := func(ctx context.Context, destination netip.AddrPort) (socks5.Stream, error) {
-		// The trust record is read again for every CONNECT: untrust-runtime stops new streams.
-		rt, err := trusted()
-		if err != nil {
-			return nil, err
-		}
-
-		// Bounded setup; the stream itself lives on ctx.
-		setup, cancel := context.WithTimeout(ctx, proxySetupTimeout)
-		defer cancel()
-
-		helper, err := transport.HelperInfo(setup)
-		if err != nil {
-			return nil, err
-		}
-
-		capability, err := authority.MintProxyStream(reservationID, destination, keys, rt, helper, s.d.now())
-		if err != nil {
-			if errors.Is(err, control.ErrProxyDestinationNotAllowed) {
-				return nil, socks5.ErrNotAllowed
+	// A client is served on the route it found when it connected, for its DNS and its CONNECT: a
+	// recovery meanwhile never mixes the old route with the new one. Without a route, both refuse.
+	handlers := func(current *socksRoute) (socks5.DialFunc, socks5.ResolveFunc) {
+		dial := func(ctx context.Context, destination netip.AddrPort) (socks5.Stream, error) {
+			if current == nil {
+				return nil, errors.Join(socks5.ErrNotAllowed, errRouteRecovering)
 			}
 
-			if errors.Is(err, control.ErrReservationReleaseInvalid) || errors.Is(err, control.ErrReservationNotFound) {
-				return nil, errors.Join(socks5.ErrNotAllowed, err)
+			// The trust record is read again for every CONNECT: untrust-runtime stops new streams.
+			rt, err := trusted()
+			if err != nil {
+				return nil, err
 			}
 
-			return nil, err
-		}
+			// Bounded setup; the stream itself lives on ctx.
+			setup, cancel := context.WithTimeout(ctx, proxySetupTimeout)
+			defer cancel()
 
-		// The last check before the capability leaves the controller; a refused one is discarded.
-		if guard != nil {
-			if err := guard(); err != nil {
-				return nil, errors.Join(socks5.ErrNotAllowed, err)
+			helper, err := transport.HelperInfo(setup)
+			if err != nil {
+				return nil, err
 			}
+
+			capability, err := authority.MintProxyStream(current.reservationID, destination, keys, rt, helper, s.d.now())
+			if err != nil {
+				if errors.Is(err, control.ErrProxyDestinationNotAllowed) {
+					return nil, socks5.ErrNotAllowed
+				}
+
+				if errors.Is(err, control.ErrReservationReleaseInvalid) || errors.Is(err, control.ErrReservationNotFound) {
+					return nil, errors.Join(socks5.ErrNotAllowed, err)
+				}
+
+				return nil, err
+			}
+
+			// The last check before the capability leaves the controller; a refused one is discarded.
+			if current.guard != nil {
+				if err := current.guard(); err != nil {
+					return nil, errors.Join(socks5.ErrNotAllowed, err)
+				}
+			}
+
+			return streams.OpenProxyStream(ctx, capability)
 		}
 
-		return streams.OpenProxyStream(ctx, capability)
+		// DNS goes through dial too: the same trust, reservation, binding and signed capability checks.
+		// Answers the mint would refuse (the probe sources, say) are skipped; the port is checked before
+		// resolution and again by the mint.
+		resolve := socks5.NewIsolatedResolver(dial, func(ip netip.Addr) bool {
+			return current != nil && control.ValidLabProxyDestination(netip.AddrPortFrom(ip, 443), current.identIPv4)
+		})
+
+		return dial, resolve
 	}
-
-	// DNS goes through dial too: the same trust, reservation, binding and signed capability checks.
-	// Answers the mint would refuse (the probe sources, say) are skipped; the port is checked before
-	// resolution and again by the mint.
-	resolve := socks5.NewIsolatedResolver(dial, func(ip netip.Addr) bool {
-		return control.ValidLabProxyDestination(netip.AddrPortFrom(ip, 443), hold.IdentIPv4)
-	})
 
 	slot := make(chan struct{}, socksMaxClients)
 	waiting := make(chan struct{}, socksMaxWaiting)
@@ -237,6 +259,8 @@ func (s *session) serveSocksWithAuthority(reservationID, portArg string, authori
 			}
 
 			defer func() { <-slot }()
+
+			dial, resolve := handlers(route())
 
 			if err := socks5.ServeConnWithResolver(ctx, conn, username, password, dial, resolve); err != nil {
 				fmt.Fprintln(os.Stderr, "serve-socks:", err)

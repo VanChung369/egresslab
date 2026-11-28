@@ -365,6 +365,7 @@ egresslab-controller-lab -approve release-egress <reservation ID>               
 egresslab-controller-lab -approve recover-egress <reservation ID>                       # only after a helper crash and a guest reboot
 egresslab-controller-lab -approve serve-socks <reservation ID> 1080                    # SOCKS5 on 127.0.0.1:1080, foreground
 egresslab-controller-lab -approve serve-endpoint <endpoint ID>                          # a stored SOCKS5 endpoint, foreground
+egresslab-controller-lab -approve -recover [-recover-ip same|any] [-recover-attempts N] serve-endpoint <endpoint ID>   # replaces a faulted route
 ```
 
 `disconnect` and `delete-lab` never release a durable reservation; only `release-egress` does, through the runtime and helper process that hold it, or `recover-egress` after that helper crashed and the guest rebooted (Step 31E.3). Do not copy an authority between hosts or run `init-reservations` again to work around a mismatch.
@@ -1587,6 +1588,64 @@ A source that answered at all used to fault the lab, even when the answer said n
 - The other four still fault at once: `HTTPS_TLS_FAILED`, `HTTPS_UNEXPECTED_STATUS`, `HTTPS_INVALID_RESPONSE` and `HTTPS_REQUEST_FAILED`.
 - Monitor lines now name the reason of a check without an answer.
 - `probe-egress-multi` and `reserve-egress` answer `EVIDENCE_UNAVAILABLE` for these three classes and leave the lab configured.
+- Since 2026-11-28 (below) `HTTPS_TLS_FAILED` is split three ways, so the list now has nine classes.
+
+### A TLS handshake cut short (2026-11-28)
+
+What happened: ten minutes into the 24-hour soak, the monitor faulted the lab with `source cloudflare_trace: managed egress probe failed: HTTPS_TLS_FAILED`. Automatic recovery replaced the route in about 23 s, at the same address, and used one of its five attempts.
+- The timing is consistent with a stalled handshake. The healthy check before ended at 09:49:33, checks run 20 s apart, and the fault came at 09:50:05, so the source probably sent its first bytes and then nothing until the 10 s timeout. The worker's single fixed line cannot say more.
+- An alert or a certificate failure would have ended within a second.
+- ident.me had answered the pin on every check before. Cloudflare runs first, so ident.me was not asked in that attempt.
+- With this change the hold would probably have been kept. The proof would be a `pin confirmed` line in a soak run with the new helper.
+
+The worker now tells three cases apart where it reported one:
+- **`HTTPS_TLS_INTERRUPTED`:** the first two bytes began a TLS handshake record. Then, before the handshake was verified, the request timed out or the connection was reset or became unreachable, and the handshake itself reported nothing else.
+- **`HTTPS_TLS_ALERT`:** the source sent a TLS alert.
+- **`HTTPS_TLS_FAILED`:** everything else unverified:
+  - a certificate or a host name, even when the deadline is the error that comes back, as long as the handshake reported the refusal first;
+  - a reply that is not TLS, or a single byte;
+  - a close. Go reports a TLS `close_notify` as a plain close, so a close might be an alert.
+
+On a pinned generation, an `HTTPS_TLS_INTERRUPTED` no longer faults if every other source answers the pin in its own window of the same attempt. The monitor then logs `probe source unavailable ... (HTTPS_TLS_INTERRUPTED, pin confirmed by 1 other); health not renewed` and checks again 2 s later.
+- **Still faults:**
+  - a first probe with no pin;
+  - a second cut;
+  - the other source without an answer, with a clock step, or seeing another address;
+  - a clock step at the finish;
+  - any window, cleanup or tunnel failure.
+- **Still faults at once:** alerts, closes and certificate failures. A cut that keeps recurring faults when the health expires, as a source without an answer does.
+- **Budget:** one cut costs about 13 s of the 30 s check, so two in a row fit within the 60 s health.
+- **Recovery supervisor:** during a check, `ListLabs` still answers at once (the monitor marks the registry settled), and `HelperInfo` takes no lock, so a longer check is not an unreadable poll.
+
+Tests:
+- `TestManagedProbeNoAnswer` (27 cases) adds five rows:
+  - a handshake prefix followed by silence and by a reset, both `HTTPS_TLS_INTERRUPTED`;
+  - a handshake prefix followed by a close, one handshake byte, and a `close_notify` first, all `HTTPS_TLS_FAILED`.
+- The alert row now expects `HTTPS_TLS_ALERT`, and the two bytes that are not TLS still give `HTTPS_TLS_FAILED`.
+- `TestProbeTLSPrefix` covers the prefix check.
+- `TestProbeHandshakeRefusedAtTheDeadline` checks that a refused handshake still decides when the deadline is what `Do` returns.
+- `TestManagedMultiProbeInterrupted` (20 cases) covers:
+  - the cut on either source, with the pin confirmed, and the pin confirmed followed by a step at the finish (a fault);
+  - no pin; the other source without an answer, with a clock step, or seeing another address; both sources cut;
+  - a wrong handshake peer; a window not closed; drift; a worker left running; cancellation; an expired window;
+  - drift, a worker left running and cancellation also on the last source;
+  - a wrapped failure, `HTTPS_TLS_FAILED` and `HTTPS_TLS_ALERT`.
+- Mutations: 17 of 19 caught. The two that survived change nothing that matters:
+  - letting a second cut through still faults, because the sample count check catches it;
+  - counting a close as a cut still gives `HTTPS_TLS_FAILED`. Go reports the close to the handshake as an error that is no timeout or reset, so the refused-handshake check catches it.
+- Passed:
+  - the Windows tests;
+  - `go vet` for Windows, Linux and macOS;
+  - on WSL, as the normal user and with test binaries built on Windows: the probe tests above plus the Linux-only `TestManagedProbeFailureReason`, `TestManagedProbeWorkerError`, `TestManagedProbeReasonsRoundTrip` and `TestProbeFailure`.
+- The race detector and the full Linux suite wait until the 24-hour soak has finished, so they do not compete with it for CPU. The running soak still uses the earlier helper, and the new runtime is not installed.
+
+Codex reviewed it once and found six issues; five were fixed:
+- Fixed: a cut plus a clock step at the finish was soft, so a handshake that went stale during the attempt was never checked. It now faults.
+- Fixed: Go reports a TLS `close_notify` as a plain close, so an alert record followed by it counted as a cut. Closes no longer count, and only a handshake record (22, 3) is a prefix.
+- Fixed: one byte was enough for a prefix. Two are now required.
+- Fixed: the request's deadline could hide a certificate refusal. The handshake's own error now decides.
+- Fixed in the tests: the reset row now waits for the client hello and checks `SetLinger`.
+- Left as before: a runner error that wraps both a hard failure and `ErrManagedProbeSourceUnavailable` or `ErrManagedProbeNoAnswer` would be misread. No worker produces one; this predates the change.
 
 Tests:
 - `TestManagedProbeNoAnswer` covers 22 cases against local servers, each with its class and consequence:
@@ -1840,6 +1899,125 @@ Tests:
   - near the boundary, the helper could accept an attempt that the controller refused (hence 4 s);
   - the docs overstated the 30 s limit.
 - `go test -race` passed in WSL, and `go test` and `go vet` (windows, darwin, linux) on Windows.
+
+### Automatic route recovery (2026-11-27)
+
+`serve-endpoint -recover` replaces a faulted route without a new start.
+- **Approval.** `-approve -recover` approves, for this process only and only for the endpoint's profile, up to `-recover-attempts` automatic attempts (default 3, at most 20). With `-recover-ip same` (the default) a new route must come back at the faulted hold's address; `any` accepts another one. Without `-recover`, nothing changes: a later hold needs a new, approved start.
+- **What triggers it.** A supervisor polls the helper every 5 s. Only a `faulted` state of the served lab, read from the helper epoch, runtime and key that prepared the hold, starts a recovery. Anything else stops the endpoint and touches nothing:
+  - a lab that is missing, in another namespace, or `sealed`;
+  - another helper epoch;
+  - three unreadable polls in a row.
+- **During a recovery** every new connection is refused (the kill switch); the helper already closed the streams. A client keeps the route it found when it connected, for its DNS and its CONNECT, so no request mixes two routes.
+- **Steps:**
+  1. Release the faulted hold. It must confirm `generation_retired`. A busy journal, an unconfirmed release or an unconfirmed revocation is asked again up to 6 times, 1 to 16 s apart. `release-egress` documents that remedy, and the helper reports a fault before it has finished removing the tunnel.
+  2. Delete the faulted lab.
+  3. For each attempt:
+     - check that the endpoint, its runtime and the helper epoch are still those approved;
+     - create a lab, connect the tunnel and probe it (four tries while a source gives no answer);
+     - apply the address policy before any hold;
+     - reserve (again while the journal is busy), re-read the endpoint's plan and serve the new hold.
+  - A failed attempt's lab is deleted at once, unless a hold for the profile appeared meanwhile. Attempts back off from 30 s to 5 min.
+- **Stops, leaving what exists:**
+  - a failed or unretired release;
+  - `STATE_UNCERTAIN` and the other unconfirmed or authority codes;
+  - a helper that changed;
+  - `LAB_LIMIT`;
+  - the attempt budget. A fault with no attempt left releases nothing.
+- **Under `same`**, the reserve's own probe cannot commit another address: the first probe pins the generation's address, and the agent faults a tunnel that reports another (sticky IP). A hold with another address would still be released at once.
+- **Restarting the endpoint** with a hold and a faulted lab resumes the recovery. Without a hold, a crash between release and reserve, it refuses to start, as before.
+- **Limits:**
+  - each recovery adds a hold and a helper retirement record, so the journal (4096 reservations) and the helper's records (1024 per epoch) bound how often a profile can recover;
+  - `createLab` writes `runtimes.json` back whole, so an `untrust-runtime` run at that very moment can be undone; each attempt checks the trust first, which narrows the window without closing it.
+
+Tests (fake runtime, real authority):
+- recovery at the same address, the new hold minted, and the faulted lab deleted;
+- refusal during the release and after it;
+- the same-address policy making no hold and leaving no lab;
+- another address accepted under `any`;
+- a failed release, and anything but a fault, stopping;
+- an uncertain probe stopping at once;
+- release retries for the documented codes only;
+- the budget leaving the next fault alone;
+- a helper restart and a deleted endpoint stopping before a new lab;
+- a lab with a hold left in place;
+- flag validation.
+- 11 mutations, each failed a test:
+  - recovering a non-faulted lab;
+  - reserving despite another address;
+  - going on after a failed release;
+  - no attempt cap;
+  - admitting connections during a recovery;
+  - retrying uncertain outcomes;
+  - no release retry, or retrying any refusal;
+  - releasing with no attempt left;
+  - no preflight;
+  - deleting a lab with a hold.
+- `go test -race` passed in WSL.
+- Codex reviewed it. Fixed:
+  - the helper epoch was not carried into a recovery;
+  - a leftover lab was deleted after the backoff, with no check for a hold;
+  - a revocation the helper had not confirmed yet stopped the recovery;
+  - the budget was checked after destructive steps, and `LAB_LIMIT` was retried;
+  - Ctrl+C did not reach the supervisor, and could hide its last error;
+  - a DNS lookup and its CONNECT could use two routes;
+  - `-recover=false` was accepted on other commands;
+  - two tests were too weak.
+- Codex also flagged two points left as they are:
+  - a hold committed at another address: the sticky pin prevents it;
+  - the `untrust-runtime` race: noted above.
+
+### Soak runs (scripts/soak)
+
+`scripts/soak/windows-wsl.ps1` runs one soak on Windows with a WSL runtime, and `scripts/soak/wsl-root.sh` is its root side. Start the orchestrator detached, so that it outlives the shell:
+
+```powershell
+Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','scripts\soak\windows-wsl.ps1',
+  '-ControllerDir','<folder with both controller binaries>','-ProfileId','<profile ID>','-OutDir','<results folder>','-Hours','1','-FaultAfterMinutes','30'
+```
+
+The orchestrator:
+- keeps the machine awake while it runs (`SetThreadExecutionState`);
+- starts the helper and builds a route with one approved hold;
+- creates an endpoint and serves it with `-recover -recover-ip same`;
+- sends one hostname request every 15 s, keeps one 2 KB/s download running, and optionally takes `wg0` down once;
+- writes one sample a minute to `samples.csv`:
+  - the helper's RSS, fds and threads;
+  - the controller's memory, handles and threads;
+  - `wsl.exe` processes and the journal size;
+  - recoveries and request results;
+  - the helper log counts: healthy checks, soft checks, clock steps, faults, authorization pauses and stream ends by reason;
+- writes `requests.csv`, `downloads.csv`, `clocksteps.log` and `events.log` as it goes;
+- at the end tears down: endpoint, hold, lab and helper, then writes `summary.json`.
+
+Addresses are compared, never written, and the SOCKS credentials are deleted at the end. A file named `stop` in the results folder ends a run early, with the same teardown. `scripts/soak/summarize.py RUN_DIR` prints the run's figures.
+
+First run, on 2026-11-28 with the user's approval:
+- Setup:
+  - 1 hour on Windows and WSL2, with the runtime built from `56e03a8` (helper `e2bfe8a4`) and the controller from this working tree;
+  - `-recover-attempts 3`, and `wg0` taken down at minute 30;
+  - the earlier binaries are in `/root/egresslab-bin-backup-pre-soak`.
+- Recovery:
+  - `wg0` went down at 09:09:18, and the keeper's window faulted the lab (`Traffic window fault`, the new line);
+  - the route was replaced before 09:09:42, at the same address, using 1 attempt of 3;
+  - one request was refused meanwhile (curl 97), and the next one went through the new hold.
+- Requests: 228 of 231 at the reserved address, none elsewhere.
+  - Median 5.0 s, 95th percentile 11.1 s, maximum 17.6 s.
+  - Failures: the one during the outage, one TLS error (curl 35) and one reset (curl 56).
+- The clock stepped 106 times, by +1.23 to +1.85 s, every one over the old 1 s limit. There were 12 soft clock-step rechecks, 165 healthy checks and no monitor fault.
+- Stream ends: 457 closed by both sides, 5 streams closed by the fault, 1 download reset.
+- Resources: the helper's RSS stayed at 12.7 to 14.0 MB, with 15 threads. The controller grew from 209 to 329 handles and from 14 to 25 threads; the 24-hour run will tell growth from load.
+- Teardown:
+  - release with `generation_retired: true`, the lab deleted, the endpoint deleted, the helper stopped;
+  - nothing was left;
+  - the journal went from 15209 to 18561 bytes.
+
+Findings:
+- **Latency.** A new connection waits for the keeper's next traffic window (about 6 s), and a hostname request opens two in a row (the DoH lookup, then the CONNECT). That gives medians of about 5 s and a tail near 15 s. It is the traffic gate's design, and it matters for a messaging client's first connections.
+- **A fault ends a stream as a FIN.** When the helper closes a stream after a fault, `helperctl` forwards it as the destination's FIN, so the client gets a clean half-close after any data still buffered. The rate-limited download read its buffered data for six more minutes before it ended. An application that reads as data arrives sees it at once.
+- **Half-closed streams linger.** After a client closes, its stream lives until the destination closes too: 2 to 12 minutes here, each holding one of the 32 slots.
+
+The 24-hour run started at 09:39 the same day, with `-recover-attempts 5` and no injected fault.
 
 ## Security Notes
 

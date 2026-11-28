@@ -3,8 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
+	"sync/atomic"
+	"syscall"
 
 	"github.com/VanChung369/egresslab/services/controller/internal/control"
 	"github.com/VanChung369/egresslab/services/controller/internal/labruntime"
@@ -122,8 +127,9 @@ func readEndpointPlan(dataDir, endpointID string, authority *control.Reservation
 }
 
 // serveEndpoint serves a stored endpoint on its own runtime, pinned to the hold and generation
-// approved at start: a later hold for the profile needs a new, approved start.
-func (s *session) serveEndpoint(endpointID string) error {
+// approved at start. Without automatic recovery, a later hold for the profile needs a new, approved
+// start; with it (policy.enabled), a fault of that route is replaced as the policy approved.
+func (s *session) serveEndpoint(endpointID string, policy recoveryPolicy) error {
 	authority, keys, err := s.openReservationAuthority()
 	if err != nil {
 		return err
@@ -154,8 +160,77 @@ func (s *session) serveEndpoint(endpointID string) error {
 		return errors.New("selected runtime does not match the endpoint")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), proxySetupTimeout)
-	info, err := s.provider.Transport().HelperInfo(ctx)
+	if err := s.requirePreparingHelper(context.Background(), plan); err != nil {
+		return err
+	}
+
+	live, err := s.endpointLive(endpointID, plan, authority)
+	if err != nil {
+		return err
+	}
+
+	var current atomic.Pointer[endpointLive]
+	current.Store(live)
+
+	route := func() *socksRoute {
+		if live := current.Load(); live != nil {
+			return &live.route
+		}
+
+		return nil
+	}
+
+	if !policy.enabled {
+		return s.serveSocksWithAuthority(strconv.Itoa(plan.Port), authority, keys, route)
+	}
+
+	parent := s.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+
+	// One interrupt stops the listener and the supervisor together: no recovery step starts after it.
+	signalled, stopSignals := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	ctx, stop := context.WithCancel(signalled)
+	defer stop()
+
+	var (
+		supervisor sync.WaitGroup
+		stopped    error // why the supervisor stopped the endpoint
+	)
+
+	supervisor.Add(1)
+
+	go func() {
+		defer supervisor.Done()
+
+		if stopped = s.superviseEndpoint(ctx, endpointID, authority, &current, policy); stopped != nil {
+			stop()
+		}
+	}()
+
+	serving := *s
+	serving.ctx = ctx
+	err = serving.serveSocksWithAuthority(strconv.Itoa(plan.Port), authority, keys, route)
+
+	stop()
+	supervisor.Wait()
+
+	// An outcome from a step that was running when the endpoint stopped is reported, unless it is
+	// only that interruption.
+	if stopped != nil && !errors.Is(stopped, context.Canceled) && !errors.Is(stopped, context.DeadlineExceeded) {
+		return stopped
+	}
+
+	return err
+}
+
+// requirePreparingHelper requires the runtime's helper to be the one that prepared plan's hold.
+func (s *session) requirePreparingHelper(ctx context.Context, plan endpointPlan) error {
+	readCtx, cancel := context.WithTimeout(ctx, proxySetupTimeout)
+	info, err := s.provider.Transport().HelperInfo(readCtx)
 	cancel()
 
 	if err != nil {
@@ -167,6 +242,18 @@ func (s *session) serveEndpoint(endpointID string) error {
 		return labruntime.Errorf(labruntime.CodeRuntimeUntrusted, "the helper that prepared the reservation is required")
 	}
 
+	return nil
+}
+
+// endpointLive is one immutable route of a served endpoint: the plan, its hold and what a CONNECT
+// needs. A recovery replaces it as a whole.
+type endpointLive struct {
+	plan  endpointPlan
+	hold  control.EgressReservation
+	route socksRoute
+}
+
+func (s *session) endpointLive(endpointID string, plan endpointPlan, authority *control.ReservationAuthority) (*endpointLive, error) {
 	// The hold itself is looked up again when each stream is minted, just before this check; a hold
 	// never changes owner.
 	guard := func() error {
@@ -182,5 +269,18 @@ func (s *session) serveEndpoint(endpointID string) error {
 		return nil
 	}
 
-	return s.serveSocksWithAuthority(plan.ReservationID, strconv.Itoa(plan.Port), authority, keys, guard)
+	if err := guard(); err != nil {
+		return nil, reservationCommandError(err)
+	}
+
+	hold, err := authority.Lookup(plan.ReservationID)
+	if err != nil {
+		return nil, reservationCommandError(err)
+	}
+
+	return &endpointLive{
+		plan:  plan,
+		hold:  hold,
+		route: socksRoute{reservationID: plan.ReservationID, identIPv4: hold.IdentIPv4, guard: guard},
+	}, nil
 }

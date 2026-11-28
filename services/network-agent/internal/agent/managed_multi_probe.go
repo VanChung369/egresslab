@@ -104,8 +104,9 @@ func (b *ManagedTunnelBackend) MultiProbePolicyPin() (netip.Addr, error) {
 // Each source gets its own kernel-timed window, closed and verified before the next one opens; the
 // tunnel and the namespace process inventory are verified before and after every window. Once the
 // attempt starts, any failure discards every observation, faults the tunnel and removes it; only a
-// source without an answer, or a clock step alone, leaves it (ErrManagedProbeSourceUnavailable). All
-// timestamps are wall-clock UTC, checked against monotonic time.
+// source without an answer, a clock step alone, or on a pinned generation one source's TLS handshake
+// cut short while every other source answers the pin, leaves it (ErrManagedProbeSourceUnavailable).
+// All timestamps are wall-clock UTC, checked against monotonic time.
 func (b *ManagedTunnelBackend) ProbeConfiguredMulti(
 	ctx context.Context,
 	namespace string,
@@ -234,6 +235,10 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 	samples := make([]managedProbeSample, 0, len(sources))
 	evidence := make([]ManagedProbeSourceObservation, 0, len(sources))
 
+	// A source whose handshake was cut short, which faults unless every other source answers the pin.
+	var interrupted error
+	var interruptedSource string
+
 	for _, source := range sources {
 		if err := ctx.Err(); err != nil {
 			return ManagedMultiProbeObservation{}, err
@@ -252,12 +257,19 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 
 		var noAnswer string
 
+		var cut error
+
 		err := b.sealed.firewall.withMonitoredProbeWindowLocked(ctx, namespace, source.destination, overlay,
 			func(probeCtx context.Context) error {
 				body, err := config.run(probeCtx, namespace, source)
 				if errors.Is(err, ErrManagedProbeNoAnswer) {
 					noAnswer = managedProbeReasonOf(err)
 					return ErrManagedProbeNoAnswer
+				}
+
+				// The worker's own failure only, nothing wrapped around it.
+				if failure, ok := err.(*managedProbeSourceFailure); ok && managedProbeReasons[failure.reason].confirmable {
+					cut = err
 				}
 
 				if err != nil {
@@ -297,9 +309,35 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 			err = ErrManagedProbeNoAnswer
 		}
 
+		// The handshake was cut short and its window closed as opened. Only on a pinned generation, and
+		// only once per attempt, do the other sources get to outweigh it: each must answer the pin.
+		if cut != nil && onlyCause(err, cut) {
+			if !t.expectedIPv4.IsValid() || interrupted != nil {
+				return ManagedMultiProbeObservation{}, errors.Join(interrupted, fmt.Errorf("source %s: %w", source.id, err))
+			}
+
+			if err := b.requireIdleProbeNamespaceLocked(ctx, namespace); err != nil {
+				return ManagedMultiProbeObservation{}, err
+			}
+
+			if err := b.verifyConfiguredLocked(ctx, t); err != nil {
+				return ManagedMultiProbeObservation{}, err
+			}
+
+			interrupted, interruptedSource = fmt.Errorf("source %s: %w", source.id, err), source.id
+
+			continue
+		}
+
 		// The source gave no answer, or the clock stepped, and its window closed as opened: with the
-		// worker gone and the tunnel as staged, the attempt yields nothing and the tunnel stays.
+		// worker gone and the tunnel as staged, the attempt yields nothing and the tunnel stays. After
+		// a handshake cut short, the pin is unconfirmed and the attempt faults.
 		if onlyCause(err, ErrManagedProbeNoAnswer) {
+			if interrupted != nil {
+				return ManagedMultiProbeObservation{}, fmt.Errorf("%w; source %s unconfirmed (%s)", interrupted,
+					source.id, noAnswer)
+			}
+
 			if err := b.requireIdleProbeNamespaceLocked(ctx, namespace); err != nil {
 				return ManagedMultiProbeObservation{}, err
 			}
@@ -350,6 +388,11 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 	// handshake's age cannot be judged, but its peer and format still can.
 	finishedAt, err := stamp()
 	if err != nil {
+		// Across a step the handshake's age is unknown, which a cut handshake cannot be excused with.
+		if interrupted != nil {
+			return ManagedMultiProbeObservation{}, errors.Join(interrupted, err)
+		}
+
 		if _, err := parseManagedHandshakeSeconds(raw, t.peer.peerPublicKey); err != nil {
 			return ManagedMultiProbeObservation{}, err
 		}
@@ -372,6 +415,26 @@ func (b *ManagedTunnelBackend) probeConfiguredMulti(
 
 	if err := ctx.Err(); err != nil {
 		return ManagedMultiProbeObservation{}, err
+	}
+
+	// Every other source answered the pin in its own window: the cut handshake says nothing about the
+	// egress. The attempt yields nothing and renews nothing, so a cut that keeps recurring still ends
+	// the monitor's health.
+	if interrupted != nil {
+		if len(samples) != len(sources)-1 {
+			return ManagedMultiProbeObservation{}, errors.Join(interrupted, ErrManagedProbeEvidenceIncomplete)
+		}
+
+		for _, sample := range samples {
+			if sample.ipv4 != t.expectedIPv4 {
+				return ManagedMultiProbeObservation{}, errors.Join(interrupted, ErrManagedStickyIPChanged)
+			}
+		}
+
+		unanswered = true
+
+		return ManagedMultiProbeObservation{}, fmt.Errorf("source %s: %w (%s, pin confirmed by %d other)",
+			interruptedSource, ErrManagedProbeSourceUnavailable, managedProbeReasonOf(interrupted), len(samples))
 	}
 
 	consensus, err := verifyManagedProbeConsensus(specs, samples, startedAt, finishedAt)

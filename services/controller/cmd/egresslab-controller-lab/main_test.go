@@ -105,7 +105,12 @@ type fakeRuntime struct {
 	loseRevocationReceipt bool
 	rebootBoots           [2]string // original and current kernel boot; empty: no reboot since the hold
 
-	// A proxy listener calls these two concurrently.
+	faulted    map[string]bool // profiles whose lab the helper faulted
+	onRecord   func(op string) // runs after a call is recorded, outside the lock
+	onListLabs func(call int)  // runs inside ListLabs, in the caller's goroutine
+	listCalls  int
+
+	// A proxy listener calls these two concurrently, and a recovering endpoint the rest.
 	mu              sync.Mutex
 	helperInfoCalls int
 	onHelperInfo    func(call int) // runs inside HelperInfo
@@ -143,8 +148,35 @@ func (f *fakeRuntime) OpenProxyStream(_ context.Context, c control.LabCapability
 	return nil, errFakeStream
 }
 
+// record notes a call; a recovering endpoint makes calls while its listener serves.
+func (f *fakeRuntime) record(op string) {
+	f.mu.Lock()
+	f.calls = append(f.calls, op)
+	hook := f.onRecord
+	f.mu.Unlock()
+
+	if hook != nil {
+		hook(op)
+	}
+}
+
+// fault does what the helper's monitor does: the lab faults and its tunnel is removed and retired.
+func (f *fakeRuntime) fault(profileID string) {
+	f.retireTunnel(profileID)
+
+	if f.faulted == nil {
+		f.faulted = map[string]bool{}
+	}
+
+	f.faulted[profileID] = true
+}
+
 func (f *fakeRuntime) ListLabs(context.Context) ([]control.LabInfo, error) {
-	f.calls = append(f.calls, "ListLabs")
+	f.record("ListLabs")
+
+	if f.listCalls++; f.onListLabs != nil {
+		f.onListLabs(f.listCalls)
+	}
 
 	var labs []control.LabInfo
 	for profile, ns := range f.labs {
@@ -155,7 +187,7 @@ func (f *fakeRuntime) ListLabs(context.Context) ([]control.LabInfo, error) {
 }
 
 func (f *fakeRuntime) CreateLab(_ context.Context, profileID string, c control.LabCapability) (control.LabInfo, error) {
-	f.calls = append(f.calls, "CreateLab")
+	f.record("CreateLab")
 	f.created = append(f.created, c)
 
 	if f.createErr != nil {
@@ -177,7 +209,7 @@ func (f *fakeRuntime) CreateLab(_ context.Context, profileID string, c control.L
 }
 
 func (f *fakeRuntime) lab(op, p, n, state string) (control.LabInfo, error) {
-	f.calls = append(f.calls, op)
+	f.record(op)
 
 	if f.labs[p] != n {
 		return control.LabInfo{}, labruntime.Errorf(labruntime.CodeLabNotFound, "no lab for this profile")
@@ -185,6 +217,7 @@ func (f *fakeRuntime) lab(op, p, n, state string) (control.LabInfo, error) {
 
 	if state == control.LabDeleted {
 		delete(f.labs, p)
+		delete(f.faulted, p)
 
 		if f.tunnelProfile == p {
 			f.retireTunnel(p)
@@ -199,6 +232,10 @@ func (f *fakeRuntime) lab(op, p, n, state string) (control.LabInfo, error) {
 }
 
 func (f *fakeRuntime) stateOf(profileID string) string {
+	if f.faulted[profileID] {
+		return control.LabFaulted
+	}
+
 	if f.tunnelProfile == profileID {
 		return control.LabTunnelConfigured
 	}
@@ -211,7 +248,7 @@ func (f *fakeRuntime) VerifyLab(_ context.Context, p, n string) (control.LabInfo
 }
 
 func (f *fakeRuntime) StageInfo(_ context.Context, profileID string) (control.LabStageInfo, error) {
-	f.calls = append(f.calls, "StageInfo")
+	f.record("StageInfo")
 
 	if f.stage.ProfileID != profileID {
 		return control.LabStageInfo{}, labruntime.Errorf(labruntime.CodeStageNotFound, "no WireGuard stage")
@@ -221,7 +258,7 @@ func (f *fakeRuntime) StageInfo(_ context.Context, profileID string) (control.La
 }
 
 func (f *fakeRuntime) ConnectTunnel(_ context.Context, profileID, namespace, stageID string, c control.LabCapability) (control.LabInfo, error) {
-	f.calls = append(f.calls, "ConnectTunnel")
+	f.record("ConnectTunnel")
 	f.tunnelCalls = append(f.tunnelCalls, c)
 
 	if f.tunnelErr != nil {

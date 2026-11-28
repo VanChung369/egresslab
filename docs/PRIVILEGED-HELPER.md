@@ -1113,15 +1113,52 @@ about the egress address:
   - `HTTPS_REPLY_INCOMPLETE` (since 2026-11-27): after a verified handshake, the reply timed out or
     was reset or cut short, in its headers or its body.
 - **What does not count.** Anything else that came back is still a failure:
-  - `HTTPS_TLS_FAILED`: any byte before a verified handshake, a certificate, a host name, a TLS
-    alert, a reply that is not TLS, or a handshake cut short;
+  - `HTTPS_TLS_INTERRUPTED` (since 2026-11-28): the first two bytes began a TLS handshake record
+    (content type 22, version 3), then, before the handshake was verified, the request timed out or
+    the connection was reset or became unreachable, and the handshake itself reported only that.
+    See "A handshake cut short" below;
+  - `HTTPS_TLS_ALERT` (since 2026-11-28): the source sent a TLS alert that Go reports as one,
+    before or after the handshake;
+  - `HTTPS_TLS_FAILED`: any other byte before a verified handshake:
+    - a certificate or a host name, even when the request's deadline is the error that comes back,
+      as long as the handshake reported the refusal first;
+    - a reply that is not TLS, or one byte only;
+    - a close: Go reports a TLS `close_notify` as a plain close, so a close cannot be told apart
+      from an alert;
   - `HTTPS_UNEXPECTED_STATUS`: any other status;
   - `HTTPS_INVALID_RESPONSE`: an encoding, an empty or oversized body, or a malformed reply;
   - `HTTPS_REQUEST_FAILED`: anything else.
 
   Until 2026-11-27 any byte that came back made it an answer, so a 503 or a cut reply faulted the
-  lab. A worker line the helper does not know fails, and an older worker reports only
-  `HTTPS_NO_ANSWER` and `HTTPS_REQUEST_FAILED`.
+  lab. A worker line the helper does not know fails. Older workers fail closed:
+  - one from before 2026-11-27 reports only `HTTPS_NO_ANSWER` and `HTTPS_REQUEST_FAILED`;
+  - one from before 2026-11-28 reports alerts and cut handshakes as `HTTPS_TLS_FAILED`.
+
+  An older helper fails on the two new lines (`WORKER_EXECUTION_FAILED`).
+- **A handshake cut short (since 2026-11-28).** On a generation that already has its pin, one
+  `HTTPS_TLS_INTERRUPTED` is outweighed when every other mandatory source answers exactly the pin,
+  each in its own window of the same attempt:
+  - the cut source's window must have closed as opened, with nothing else joined to the failure,
+    and the namespace must be idle and the tunnel verified as staged before the next window opens;
+  - the handshake check at the finish must pass;
+  - the attempt then returns `ErrManagedProbeSourceUnavailable` with the reason and
+    `pin confirmed`. It yields no evidence and renews nothing, so a cut that keeps recurring still
+    faults the lab when the monitor's health expires.
+  - Anything less faults as before:
+    - no pin yet (a first probe), or the worker's failure wrapped in anything;
+    - a second cut, or the other source without an answer, with a clock step or with another
+      address;
+    - a clock step at the finish, since the handshake's age then cannot be judged;
+    - a cleanup, readback, cancellation or tunnel check, or a wrong handshake.
+  - Why: the 24-hour soak on 2026-11-28 lost a hold to one `cloudflare_trace` `HTTPS_TLS_FAILED`.
+    Its timing is consistent with a handshake that stalled until the 10 s timeout after its first
+    bytes; the worker's fixed line cannot say more. ident.me had answered the pin on every check
+    before, but cloudflare_trace runs first, so ident.me was not asked in that attempt.
+  - Budget: one cut costs about 13 s of the monitor's 30 s check (the stall, then the other
+    source's window). Two in a row fit within the 60 s health; a third usually does not, and the
+    lab faults.
+    Certificates, host names, replies that are not TLS, closes and alerts still fault at once:
+    they do not come from a path that merely dropped packets.
 - **The result.** If the source's window then closed as opened, with nothing else joined to the
   error, and the worker is gone, the tunnel verifies as staged, the clock checks pass and the
   attempt's context is still live, the attempt returns

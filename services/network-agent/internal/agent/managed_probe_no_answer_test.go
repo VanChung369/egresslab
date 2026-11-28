@@ -23,12 +23,15 @@ var softProbeReasons = map[string]bool{
 	"HTTPS_NO_ANSWER": true, "HTTPS_SOURCE_UNAVAILABLE": true, "HTTPS_REPLY_INCOMPLETE": true,
 }
 
+// The only reason that the other sources answering the pin may outweigh.
+var confirmableProbeReasons = map[string]bool{"HTTPS_TLS_INTERRUPTED": true}
+
 // A source that sent nothing, or the verified host answering a service error or cutting its reply
 // short, gives no answer; anything unverified or refused fails.
 func TestManagedProbeNoAnswer(t *testing.T) {
 	for reason, known := range managedProbeReasons {
-		if known.noAnswer != softProbeReasons[reason] {
-			t.Fatalf("%s: no answer %v", reason, known.noAnswer)
+		if known.noAnswer != softProbeReasons[reason] || known.confirmable != confirmableProbeReasons[reason] {
+			t.Fatalf("%s: no answer %v, confirmable %v", reason, known.noAnswer, known.confirmable)
 		}
 	}
 
@@ -163,6 +166,51 @@ func TestManagedProbeNoAnswer(t *testing.T) {
 		}
 	}()
 
+	// Once the client hello has arrived, some bytes, then silence, a close or a reset.
+	prefixed := func(prefix []byte, end string) string {
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = listener.Close() })
+
+		go func() {
+			for {
+				c, err := listener.Accept()
+				if err != nil {
+					return
+				}
+
+				go func() {
+					defer c.Close()
+
+					_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+					_, _ = c.Read(make([]byte, 4096))
+					_, _ = c.Write(prefix)
+
+					switch end {
+					case "silence":
+						time.Sleep(time.Second)
+					case "close":
+						_ = c.(*net.TCPConn).CloseWrite()
+						_, _ = io.Copy(io.Discard, c)
+					case "reset":
+						// After the client, blocked in its read, took the bytes: Windows drops unread
+						// ones on a reset.
+						time.Sleep(200 * time.Millisecond)
+						if err := c.(*net.TCPConn).SetLinger(0); err != nil {
+							t.Errorf("linger: %v", err)
+						}
+					}
+				}()
+			}
+		}()
+
+		return listener.Addr().String()
+	}
+
+	handshake, closeNotify := []byte{22, 3, 3}, []byte{21, 3, 3, 0, 2, 1, 0}
+
 	// TLS 1.3 completes the client's handshake first; the alert for the missing client certificate follows.
 	alerting := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	alerting.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert, MinVersion: tls.VersionTLS13}
@@ -224,11 +272,16 @@ func TestManagedProbeNoAnswer(t *testing.T) {
 		"malformed status":      {fetch(tlsAddr, "example.com", "/malformed-status", true), "HTTPS_INVALID_RESPONSE"},
 		"malformed, then close": {fetch(tlsAddr, "example.com", "/malformed-then-close", true), "HTTPS_INVALID_RESPONSE"},
 		"closed mid-line":       {fetch(tlsAddr, "example.com", "/closed-status-line", true), "HTTPS_INVALID_RESPONSE"},
-		"alert after handshake": {fetch(alerting.Listener.Addr().String(), "example.com", "/ok", true), "HTTPS_TLS_FAILED"},
+		"alert after handshake": {fetch(alerting.Listener.Addr().String(), "example.com", "/ok", true), "HTTPS_TLS_ALERT"},
 		"untrusted certificate": {fetch(tlsAddr, "example.com", "/ok", false), "HTTPS_TLS_FAILED"},
 		"other host name":       {fetch(tlsAddr, "wrong.example", "/ok", true), "HTTPS_TLS_FAILED"},
 		"not TLS":               {fetch(plain.Listener.Addr().String(), "example.com", "/ok", true), "HTTPS_TLS_FAILED"},
 		"short reply, not TLS":  {fetch(short.Addr().String(), "example.com", "/ok", true), "HTTPS_TLS_FAILED"},
+		"TLS cut by silence":    {fetch(prefixed(handshake, "silence"), "example.com", "/ok", true), "HTTPS_TLS_INTERRUPTED"},
+		"TLS cut by a reset":    {fetch(prefixed(handshake, "reset"), "example.com", "/ok", true), "HTTPS_TLS_INTERRUPTED"},
+		"TLS cut by a close":    {fetch(prefixed(handshake, "close"), "example.com", "/ok", true), "HTTPS_TLS_FAILED"},
+		"one TLS byte, silence": {fetch(prefixed(handshake[:1], "silence"), "example.com", "/ok", true), "HTTPS_TLS_FAILED"},
+		"close_notify first":    {fetch(prefixed(closeNotify, "silence"), "example.com", "/ok", true), "HTTPS_TLS_FAILED"},
 		"other status":          {fetch(tlsAddr, "example.com", "/missing", true), "HTTPS_UNEXPECTED_STATUS"},
 		"encoded body":          {fetch(tlsAddr, "example.com", "/encoded", true), "HTTPS_INVALID_RESPONSE"},
 		"empty body":            {fetch(tlsAddr, "example.com", "/empty", true), "HTTPS_INVALID_RESPONSE"},

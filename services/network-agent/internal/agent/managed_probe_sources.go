@@ -11,6 +11,7 @@ import (
 	"net/http/httptrace"
 	"net/netip"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -179,20 +180,25 @@ func fetchManagedProbeBody(ctx context.Context, source managedProbeHTTPSource) (
 	return readManagedProbeHTTPS(ctx, client, source.url())
 }
 
-// managedProbeReason is how the worker reports one class of source failure: its fixed line, and
-// whether the failure says nothing about the egress (it then renews nothing and faults nothing).
+// managedProbeReason is how the worker reports one class of source failure: its fixed line, whether
+// the failure says nothing about the egress (it then renews nothing and faults nothing), and whether
+// on a pinned generation the other sources answering the pin in the same attempt outweigh it.
 type managedProbeReason struct {
-	line     string
-	noAnswer bool
+	line        string
+	noAnswer    bool
+	confirmable bool
 }
 
 // managedProbeReasons are the worker's failure classes; the helper maps the lines back. Only a source
 // that sent nothing, or the verified host answering a service error or cutting its reply short, has
-// no answer; anything unverified or refused faults.
+// no answer; anything unverified or refused faults, except a handshake that began like TLS and was
+// then cut short, which the other sources may outweigh (managed_multi_probe.go).
 var managedProbeReasons = map[string]managedProbeReason{
 	"HTTPS_NO_ANSWER":          {line: "HTTPS probe got no answer", noAnswer: true},
 	"HTTPS_SOURCE_UNAVAILABLE": {line: "HTTPS probe source unavailable", noAnswer: true},
 	"HTTPS_REPLY_INCOMPLETE":   {line: "HTTPS probe reply incomplete", noAnswer: true},
+	"HTTPS_TLS_INTERRUPTED":    {line: "HTTPS probe TLS interrupted", confirmable: true},
+	"HTTPS_TLS_ALERT":          {line: "HTTPS probe TLS alert"},
 	"HTTPS_TLS_FAILED":         {line: "HTTPS probe TLS failed"},
 	"HTTPS_UNEXPECTED_STATUS":  {line: "HTTPS probe unexpected status"},
 	"HTTPS_INVALID_RESPONSE":   {line: "HTTPS probe invalid response"},
@@ -245,13 +251,17 @@ func readManagedProbeHTTPS(ctx context.Context, client *http.Client, rawURL stri
 	// Once the source sent a byte, at any layer, its reply counts; only one from the verified host may
 	// fail without saying anything about the egress.
 	var trace probeConnTrace
-	var verified atomic.Bool
+	var verified, rejected atomic.Bool
 
 	ctx = context.WithValue(ctx, probeReceivedKey{}, &trace)
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		// The request's deadline may be what Do returns even when the handshake itself was refused.
 		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
-			if err == nil {
+			switch {
+			case err == nil:
 				verified.Store(true)
+			case !probeCutOff(err):
+				rejected.Store(true)
 			}
 		},
 	})
@@ -275,11 +285,15 @@ func readManagedProbeHTTPS(ctx context.Context, client *http.Client, rawURL stri
 		case !trace.received.Load() && probeNoAnswer(err):
 			return nil, probeSourceFailure("HTTPS_NO_ANSWER", err)
 		case tlsAlertReceived(err):
-			return nil, probeSourceFailure("HTTPS_TLS_FAILED", err)
+			return nil, probeSourceFailure("HTTPS_TLS_ALERT", err)
 		case verified.Load() && cut(err):
 			return nil, probeSourceFailure("HTTPS_REPLY_INCOMPLETE", err)
 		case verified.Load():
 			return nil, probeSourceFailure("HTTPS_INVALID_RESPONSE", err)
+		// A handshake record began, then silence or a reset. A close is not one: Go reports a TLS
+		// close_notify as EOF too.
+		case !rejected.Load() && trace.tlsPrefix() && probeCutOff(err):
+			return nil, probeSourceFailure("HTTPS_TLS_INTERRUPTED", err)
 		case trace.received.Load():
 			return nil, probeSourceFailure("HTTPS_TLS_FAILED", err)
 		}
@@ -308,7 +322,7 @@ func readManagedProbeHTTPS(ctx context.Context, client *http.Client, rawURL stri
 	if err != nil {
 		switch {
 		case tlsAlertReceived(err):
-			return nil, probeSourceFailure("HTTPS_TLS_FAILED", err)
+			return nil, probeSourceFailure("HTTPS_TLS_ALERT", err)
 		case verified.Load() && cut(err):
 			return nil, probeSourceFailure("HTTPS_REPLY_INCOMPLETE", err)
 		}
@@ -376,12 +390,18 @@ func parseManagedProbeBody(source managedProbeHTTPSource, body []byte) (netip.Ad
 // probeNoAnswer: nothing came back in time, or the connection was refused, reset or closed. The
 // caller asks only when the source sent no byte at all.
 func probeNoAnswer(err error) bool {
+	return probeCutOff(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// probeCutOff: nothing more came in time, or the connection was refused, reset or became
+// unreachable. Unlike probeNoAnswer, a close is not one.
+func probeCutOff(err error) bool {
 	var timeout interface{ Timeout() bool }
 	if errors.As(err, &timeout) && timeout.Timeout() {
 		return true
 	}
 
-	return probeErrnoIn(err, probeLostErrnos) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+	return probeErrnoIn(err, probeLostErrnos)
 }
 
 func probeErrnoIn(err error, errnos []error) bool {
@@ -403,11 +423,32 @@ func tlsAlertReceived(err error) bool {
 
 type probeReceivedKey struct{}
 
-// probeConnTrace records, below TLS, whether the source sent a byte and whether it closed or reset
-// the connection.
+// probeConnTrace records, below TLS, whether the source sent a byte, its first bytes, and whether it
+// closed or reset the connection.
 type probeConnTrace struct {
 	received atomic.Bool
 	closed   atomic.Bool
+
+	mu     sync.Mutex
+	prefix []byte
+}
+
+func (t *probeConnTrace) record(p []byte) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if room := 2 - len(t.prefix); room > 0 {
+		t.prefix = append(t.prefix, p[:min(room, len(p))]...)
+	}
+}
+
+// tlsPrefix: the first two bytes received begin a TLS handshake record (content type 22, major
+// version 3).
+func (t *probeConnTrace) tlsPrefix() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return len(t.prefix) == 2 && t.prefix[0] == 22 && t.prefix[1] == 3
 }
 
 // recordingProbeDial traces the connection in the request's context.
@@ -434,6 +475,7 @@ type receivingConn struct {
 func (c receivingConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if n > 0 {
+		c.trace.record(p[:n])
 		c.trace.received.Store(true)
 	}
 

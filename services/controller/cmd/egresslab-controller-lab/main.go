@@ -71,6 +71,9 @@ func run(argv []string, d deps) error {
 	distro := flags.String("wsl-distro", "", "WSL distribution (required to trust a WSL runtime)")
 	instance := flags.String("lima-instance", "", "Lima instance (default: egresslab)")
 	approve := flags.Bool("approve", false, "approve a lab, tunnel, runtime or reservation mutation")
+	recover := flags.Bool("recover", false, "serve-endpoint: replace a faulted route automatically, as approved here")
+	recoverIP := flags.String("recover-ip", "same", "serve-endpoint -recover: accept only the same address (same) or any")
+	recoverAttempts := flags.Int("recover-attempts", 3, "serve-endpoint -recover: automatic attempts for this process")
 
 	if err := flags.Parse(argv); err != nil {
 		return err
@@ -79,6 +82,11 @@ func run(argv []string, d deps) error {
 	args := flags.Args()
 	if len(args) == 0 {
 		return usageError()
+	}
+
+	policy, err := recoveryPolicyFromFlags(flags, *recover, *recoverIP, *recoverAttempts, args[0])
+	if err != nil {
+		return err
 	}
 
 	dataDir, err := dataDirectory()
@@ -133,7 +141,7 @@ func run(argv []string, d deps) error {
 			return errors.New("serve-endpoint selects its runtime from the stored binding")
 		}
 
-		return s.serveEndpoint(args[1])
+		return s.serveEndpoint(args[1], policy)
 	}
 
 	if s.provider, err = d.newRuntime(*kind, labruntime.Options{WSLDistro: *distro, LimaInstance: *instance}); err != nil {
@@ -221,6 +229,36 @@ func run(argv []string, d deps) error {
 	}
 
 	return nil
+}
+
+// recoveryPolicyFromFlags accepts the recovery flags only for serve-endpoint, and its tuning flags
+// only with -recover.
+func recoveryPolicyFromFlags(flags *flag.FlagSet, enabled bool, ip string, attempts int, command string) (recoveryPolicy, error) {
+	tuned := false
+
+	given := false
+
+	flags.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "recover":
+			given = true
+		case "recover-ip", "recover-attempts":
+			tuned = true
+		}
+	})
+
+	switch {
+	case (given || tuned) && command != "serve-endpoint":
+		return recoveryPolicy{}, errors.New("-recover applies to serve-endpoint only")
+	case tuned && !enabled:
+		return recoveryPolicy{}, errors.New("-recover-ip and -recover-attempts need -recover")
+	case ip != "same" && ip != "any":
+		return recoveryPolicy{}, errors.New("-recover-ip must be same or any")
+	case attempts < 1 || attempts > recoveryMaxAttempts:
+		return recoveryPolicy{}, fmt.Errorf("-recover-attempts must be 1 to %d", recoveryMaxAttempts)
+	}
+
+	return recoveryPolicy{enabled: enabled, sameIP: ip == "same", attempts: attempts}, nil
 }
 
 func checkArgs(args []string) error {
@@ -654,5 +692,6 @@ func usageError() error {
 		"  multi-probe-target PROFILE_ID NAMESPACE | reserve-egress PROFILE_ID NAMESPACE\n" +
 		"  release-egress RESERVATION_ID | recover-egress RESERVATION_ID\n" +
 		"  serve-socks RESERVATION_ID PORT (127.0.0.1 only, foreground)\n" +
-		"  serve-endpoint ENDPOINT_ID (its runtime and reservation from the stored configuration)")
+		"  serve-endpoint ENDPOINT_ID (its runtime and reservation from the stored configuration)\n" +
+		"    with -recover [-recover-ip same|any] [-recover-attempts N]: replace a faulted route automatically")
 }

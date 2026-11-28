@@ -173,6 +173,7 @@ type endpointHarness struct {
 	rt       *fakeRuntime
 	store    *control.Store
 	endpoint control.ProxyEndpoint
+	policy   recoveryPolicy
 }
 
 func newEndpointHarness(t *testing.T) *endpointHarness {
@@ -204,6 +205,7 @@ type runningEndpoint struct {
 	Listen, Username, Password string
 	ReservationID              string `json:"reservation_id"`
 
+	done <-chan error // the endpoint ended by itself
 	stop func() error
 }
 
@@ -232,11 +234,11 @@ func (e *endpointHarness) serve(t *testing.T) *runningEndpoint {
 	done := make(chan error, 1)
 
 	go func() {
-		done <- (&session{d: d, dataDir: e.dir, ctx: ctx}).serveEndpoint(e.endpoint.ID)
+		done <- (&session{d: d, dataDir: e.dir, ctx: ctx}).serveEndpoint(e.endpoint.ID, e.policy)
 		_ = stdout.Close()
 	}()
 
-	running := &runningEndpoint{stop: func() error {
+	running := &runningEndpoint{done: done, stop: func() error {
 		cancel()
 		return <-done
 	}}

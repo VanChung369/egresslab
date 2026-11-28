@@ -13,7 +13,7 @@ import (
 )
 
 func (f *fakeRuntime) MultiProbePolicy(context.Context) (control.LabMultiProbePolicy, error) {
-	f.calls = append(f.calls, control.LabMultiProbePolicyOp)
+	f.record(control.LabMultiProbePolicyOp)
 
 	if f.multiPolicyErr != nil {
 		return control.LabMultiProbePolicy{}, f.multiPolicyErr
@@ -42,7 +42,7 @@ func (f *fakeRuntime) MultiProbeTarget(
 	_ context.Context,
 	profileID, namespace string,
 ) (control.LabMultiProbeTarget, error) {
-	f.calls = append(f.calls, control.LabMultiProbeTargetOp)
+	f.record(control.LabMultiProbeTargetOp)
 
 	if f.multiPolicyErr != nil {
 		return control.LabMultiProbeTarget{}, f.multiPolicyErr
@@ -71,7 +71,7 @@ func (f *fakeRuntime) ProbeEgressMulti(
 	profileID, namespace string,
 	capability control.LabCapability,
 ) (control.LabMultiProbeInfo, error) {
-	f.calls = append(f.calls, control.LabMultiProbeV2Op)
+	f.record(control.LabMultiProbeV2Op)
 	f.multiProbeCalls = append(f.multiProbeCalls, capability)
 	f.lastMultiProbe = nil
 	f.lastCandidate = nil
@@ -369,7 +369,7 @@ func (f *fakeRuntime) ReserveEgressCandidate(
 	profileID, namespace string,
 	capability control.LabCapability,
 ) (control.LabCandidateInfo, error) {
-	f.calls = append(f.calls, control.LabReserveEgressCandidateOp)
+	f.record(control.LabReserveEgressCandidateOp)
 	f.candidateCalls = append(f.candidateCalls, capability)
 
 	if f.candidateErr != nil {
@@ -428,7 +428,7 @@ func (f *fakeRuntime) PrepareEgressLease(
 	profileID, namespace string,
 	capability control.LabCapability,
 ) (control.LabPreparedLeaseInfo, error) {
-	f.calls = append(f.calls, control.LabPrepareEgressLeaseOp)
+	f.record(control.LabPrepareEgressLeaseOp)
 	f.prepareCalls = append(f.prepareCalls, capability)
 
 	if f.prepareErr != nil {
@@ -495,7 +495,7 @@ func (f *fakeRuntime) RevokeEgressLease(
 ) (control.LabRevokedLeaseInfo, error) {
 	intent := capability.Claims.Intent
 
-	f.calls = append(f.calls, intent.Operation)
+	f.record(intent.Operation)
 	f.revokeCalls = append(f.revokeCalls, capability)
 
 	if f.revokeErr != nil {
