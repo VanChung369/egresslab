@@ -1593,7 +1593,7 @@ A source that answered at all used to fault the lab, even when the answer said n
 ### A TLS handshake cut short (2026-11-28)
 
 What happened: ten minutes into the 24-hour soak, the monitor faulted the lab with `source cloudflare_trace: managed egress probe failed: HTTPS_TLS_FAILED`. Automatic recovery replaced the route in about 23 s, at the same address, and used one of its five attempts.
-- The timing is consistent with a stalled handshake. The healthy check before ended at 09:49:33, checks run 20 s apart, and the fault came at 09:50:05, so the source probably sent its first bytes and then nothing until the 10 s timeout. The worker's single fixed line cannot say more.
+- The timing is consistent with a stalled handshake. The healthy check before ran from about 09:49:29 to 09:49:33. With the download running, the next check was due at about 09:49:45 (16 s after the last start), or at 09:49:53 by the routine 20 s, and the fault came at 09:50:05. So the faulting check took 12 to 20 s, while the healthy one before it took about 4 s. `HTTPS_TLS_FAILED` meant that bytes had arrived but the handshake never finished, so the source probably sent its first bytes and then nothing until the 10 s timeout. The worker's single fixed line cannot say more.
 - An alert or a certificate failure would have ended within a second.
 - ident.me had answered the pin on every check before. Cloudflare runs first, so ident.me was not asked in that attempt.
 - With this change the hold would probably have been kept. The proof would be a `pin confirmed` line in a soak run with the new helper.
@@ -1636,8 +1636,9 @@ Tests:
 - Passed:
   - the Windows tests;
   - `go vet` for Windows, Linux and macOS;
-  - on WSL, as the normal user and with test binaries built on Windows: the probe tests above plus the Linux-only `TestManagedProbeFailureReason`, `TestManagedProbeWorkerError`, `TestManagedProbeReasonsRoundTrip` and `TestProbeFailure`.
-- The race detector and the full Linux suite wait until the 24-hour soak has finished, so they do not compete with it for CPU. The running soak still uses the earlier helper, and the new runtime is not installed.
+  - on WSL, as the normal user and with test binaries built on Windows: the probe tests above plus the Linux-only `TestManagedProbeFailureReason`, `TestManagedProbeWorkerError`, `TestManagedProbeReasonsRoundTrip` and `TestProbeFailure`;
+  - after the soak (go1.27.4 on WSL, as the normal user): `go vet ./...`, `go test ./...` and `go test -race ./...` for the whole module.
+- Installed in WSL `/usr/local/bin` after the soak's teardown, built from `c5b661f` (helper `b2147388`, probe `f973d429`). The `56e03a8` binaries are in `/root/egresslab-bin-backup-56e03a8`. The helper started with the soak's flags and answered `ping` and `list-labs`, and nothing was left after it stopped. No hold has run on it yet.
 
 Codex reviewed it once and found six issues; five were fixed:
 - Fixed: a cut plus a clock step at the finish was soft, so a handshake that went stale during the attempt was never checked. It now faults.
@@ -1986,15 +1987,15 @@ The orchestrator:
   - the controller's memory, handles and threads;
   - `wsl.exe` processes and the journal size;
   - recoveries and request results;
-  - the helper log counts: healthy checks, soft checks, clock steps, faults, authorization pauses and stream ends by reason;
+  - the helper log counts: healthy checks, soft checks (and among them the pins confirmed after a cut handshake), clock steps, faults, authorization pauses and stream ends by reason;
 - writes `requests.csv`, `downloads.csv`, `clocksteps.log` and `events.log` as it goes;
 - at the end tears down: endpoint, hold, lab and helper, then writes `summary.json`.
 
-Addresses are compared, never written, and the SOCKS credentials are deleted at the end. A file named `stop` in the results folder ends a run early, with the same teardown. `scripts/soak/summarize.py RUN_DIR` prints the run's figures.
+Addresses are compared, never written, and the SOCKS credentials are deleted at the end. A file named `stop` in the results folder ends a run early, with the same teardown. `scripts/soak/summarize.py RUN_DIR` prints the run's figures. Its helper log counts come from the last minute sample, so they miss up to a minute before the teardown. For the whole log, run `wsl-root.sh logcounts <helper log> 0` as root.
 
 First run, on 2026-11-28 with the user's approval:
 - Setup:
-  - 1 hour on Windows and WSL2, with the runtime built from `56e03a8` (helper `e2bfe8a4`) and the controller from this working tree;
+  - 1 hour on Windows and WSL2, with the runtime built from `56e03a8` (helper `e2bfe8a4`) and the controller from the recovery change before it was committed in `c5b661f`;
   - `-recover-attempts 3`, and `wg0` taken down at minute 30;
   - the earlier binaries are in `/root/egresslab-bin-backup-pre-soak`.
 - Recovery:
@@ -2006,7 +2007,7 @@ First run, on 2026-11-28 with the user's approval:
   - Failures: the one during the outage, one TLS error (curl 35) and one reset (curl 56).
 - The clock stepped 106 times, by +1.23 to +1.85 s, every one over the old 1 s limit. There were 12 soft clock-step rechecks, 165 healthy checks and no monitor fault.
 - Stream ends: 457 closed by both sides, 5 streams closed by the fault, 1 download reset.
-- Resources: the helper's RSS stayed at 12.7 to 14.0 MB, with 15 threads. The controller grew from 209 to 329 handles and from 14 to 25 threads; the 24-hour run will tell growth from load.
+- Resources: the helper's RSS stayed at 12.7 to 14.0 MB, with 15 threads. The controller grew from 209 to 329 handles and from 14 to 25 threads; the second run below leveled off.
 - Teardown:
   - release with `generation_retired: true`, the lab deleted, the endpoint deleted, the helper stopped;
   - nothing was left;
@@ -2017,7 +2018,27 @@ Findings:
 - **A fault ends a stream as a FIN.** When the helper closes a stream after a fault, `helperctl` forwards it as the destination's FIN, so the client gets a clean half-close after any data still buffered. The rate-limited download read its buffered data for six more minutes before it ended. An application that reads as data arrives sees it at once.
 - **Half-closed streams linger.** After a client closes, its stream lives until the destination closes too: 2 to 12 minutes here, each holding one of the 32 slots.
 
-The 24-hour run started at 09:39 the same day, with `-recover-attempts 5` and no injected fault.
+Second run, planned for 24 hours, on 2026-11-28 with the user's approval:
+- Setup: the same binaries, `-recover-attempts 5`, no injected fault.
+- Length: 09:39 to 13:00, about 3 h 20 min. The user asked to end it at 13:00, so `serve-endpoint` was stopped then, and the orchestrator's own teardown ran.
+- One natural fault, at 09:50: `cloudflare_trace` `HTTPS_TLS_FAILED`, probably a stalled handshake (see "A TLS handshake cut short").
+  - New connections were refused from 09:50:03 to 09:50:28, and the route was replaced at the same address, using 1 attempt of 5.
+  - No other fault in the next 3 h 10 min.
+- Requests: 769 of 773 at the reserved address, none elsewhere.
+  - Median 5.3 s, 95th percentile 11.7 s, maximum 19.8 s.
+  - Failures: three during the outage (curl 97), and one cut by the teardown at 13:00 (curl 56).
+- The whole helper log, counted after the run: 517 healthy checks, 59 soft clock-step rechecks, 1 monitor fault, no traffic window fault, no authorization pause. The clock stepped 352 times, by +0.69 to +2.18 s.
+- Stream ends: 1545 closed by both sides, 6 download resets, 1 download timeout, and 1 client gone plus 1 upload reset at the teardown. After the fault, the 2 KB/s download ended with curl 56 five more times: four after about 40 minutes and 4.9 MB each, and one after 23 minutes.
+- Resources:
+  - the helper: RSS 12.1 to 13.7 MB, 14 to 16 threads, 13 to 33 fds;
+  - the controller's handles rose in steps: 213 to about 280 in the first 11 minutes, about 280 until minute 72, about 310 from minute 100, and 306 to 314 for the last 100 minutes. Threads went from 15 to 23, and the working set stayed at 17 to 21 MB.
+  - Steps that level off look like pools filling, not a leak, but 3 hours cannot rule out slow growth.
+- Teardown:
+  - release with `generation_retired: true`, the lab deleted, the endpoint deleted, the helper stopped;
+  - nothing was left;
+  - the journal went from 18561 to 21914 bytes.
+
+Since this run, the helper log counts include `pin_confirmed`: soft checks where the other source confirmed the pin after an `HTTPS_TLS_INTERRUPTED` cut. A run with the new runtime is the way to see one.
 
 ## Security Notes
 

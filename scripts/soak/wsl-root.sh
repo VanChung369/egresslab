@@ -49,7 +49,7 @@ logcounts)
   log=$2 from=$3
   tail -n +"$((from + 1))" "$log" | awk '
     /Egress monitor healthy/ {healthy++}
-    /health not renewed/ {soft++}
+    /health not renewed/ {soft++; if (/pin confirmed by/) pin_confirmed++}
     /WALL_CLOCK_STEPPED|wall clock stepped/ {clock++}
     /Egress monitor fault/ {monitor_fault++}
     /Traffic window fault/ {window_fault++}
@@ -60,8 +60,8 @@ logcounts)
       gsub(/[^a-z]+/, "_", reason); reasons[reason]++
     }
     END {
-      printf "healthy=%d soft=%d clock=%d monitor_fault=%d window_fault=%d auth_paused=%d ended=%d",
-        healthy, soft, clock, monitor_fault, window_fault, auth_paused, ended
+      printf "healthy=%d soft=%d pin_confirmed=%d clock=%d monitor_fault=%d window_fault=%d auth_paused=%d ended=%d",
+        healthy, soft, pin_confirmed, clock, monitor_fault, window_fault, auth_paused, ended
       for (r in reasons) printf " end_%s=%d", r, reasons[r]
       printf "\n"
     }' ;;
